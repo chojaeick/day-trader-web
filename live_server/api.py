@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import Settings
 from .db import DB
 from .kiwoom import KiwoomClient
-from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows
+from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, context_for
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); tasks=[]
@@ -37,12 +37,12 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.2',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.3',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
-    qs=db.quotes(); return {'ok':True,'mode':'LIVE','version':'1.2','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    qs=db.quotes(); return {'ok':True,'mode':'LIVE','version':'1.3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -52,6 +52,10 @@ def quote(symbol:str):
     q=db.quote(symbol)
     if not q: raise HTTPException(404,'quote not available yet')
     m=db.daily_metric(symbol) or {}; return {**q,**m}
+
+@app.get('/api/market-context/{symbol}')
+def market_context(symbol:str):
+    _,_,ctx=context_for(symbol.upper(),db.quotes()); return ctx
 
 @app.get('/api/screener')
 def screener(top_n:int=Query(10,ge=1,le=30)):
@@ -67,12 +71,11 @@ def bars(symbol:str, minutes:int=Query(1,ge=1,le=60), limit:int=Query(200,ge=10,
 
 @app.get('/api/signal/{symbol}')
 def signal(symbol:str):
-    q=db.quote(symbol) or {}; market_bias=max(-1,min(1,float(q.get('change_pct') or 0)/4))
-    return multi_timeframe_signal(symbol.upper(),db.ticks(symbol,40000),market_bias)
+    return multi_timeframe_signal(symbol.upper(),db.ticks(symbol,40000),db.quotes())
 
 @app.get('/api/position/{symbol}')
-def position(symbol:str, entry:float=Query(...,gt=0)):
-    return position_from_ticks(symbol.upper(),db.ticks(symbol,40000),entry)
+def position(symbol:str, entry:float=Query(...,gt=0), side:str=Query('LONG',pattern='^(LONG|SHORT)$')):
+    return position_from_ticks(symbol.upper(),db.ticks(symbol,40000),entry,side,db.quotes())
 
 @app.get('/api/raw')
 def raw(limit:int=20): return db.raw(min(limit,100))

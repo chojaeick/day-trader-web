@@ -41,4 +41,7 @@ def enrich_intraday(df: pd.DataFrame) -> pd.DataFrame:
     out['vol_ma20'] = out['volume'].rolling(20, min_periods=5).mean()
     out['rvol'] = out['volume'] / out['vol_ma20'].replace(0, np.nan)
     out['prev_high20'] = out['high'].rolling(20, min_periods=5).max().shift(1)
+    out['prev_low20'] = out['low'].rolling(20, min_periods=5).min().shift(1)
+    out['ret1_pct'] = out['close'].pct_change().fillna(0) * 100
+    out['ret3_pct'] = out['close'].pct_change(3).fillna(0) * 100
     return out

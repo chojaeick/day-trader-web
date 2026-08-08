@@ -1,43 +1,47 @@
-# DAY TRADER WEB + LIVE SERVER v1.2
+# DAY TRADER WEB + LIVE SERVER v1.3
 
-V1.2 upgrades the live signal system with user-requested day-trading selection logic.
+V1.3 tunes the user-requested day-trading screener and adds a live selected-symbol signal/position engine.
 
-## Added in v1.2
-- Kiwoom official US daily chart (`usa06012`, `/api/us/chart`) for 5-day metrics
-- Current price > 5-day close average screening
-- MA5 slope
-- 5-day average volume / dollar volume
-- time-adjusted intraday RVOL
-- 5-day ATR%
-- current momentum + QQQ/SMH context
-- 30+ liquid US large-cap / leveraged ETF candidate universe
-- TOP10 endpoint `/api/screener`
-- ranking checkpoints at 09:20 / 09:29 / 09:37 New York time
-- combined 1-minute + 5-minute signal confirmation
-- position endpoint for HOLD / ADD / TRIM / EXIT support
-- no order execution
+## Added / changed in v1.3
 
-## AWS update after uploading to GitHub
+### TOP10 tuning
+- Current price > 5-day average is a strong requirement
+- Positive MA5 slope gets more weight; negative slope is penalized
+- Time-adjusted RVOL tiers: 1.5x / 2x / 3x
+- ATR day-trading sweet spot (roughly 3-8%)
+- Dollar-volume / liquidity scoring
+- Liquid leveraged ETF bonus (SOXL/SOXS/TQQQ/SQQQ)
+- +3% to +10% momentum sweet spot; extreme chasing is penalized
+- QQQ / SMH alignment
+- Near-high price-action score
+
+### Selected-symbol live signal
+- 1-minute + 5-minute confirmation
+- VWAP, EMA9, EMA20, EMA50, RSI, bar RVOL
+- 20-bar breakout / breakdown
+- LONG and SHORT scores are calculated separately
+- WAIT / WATCH / SETUP / TRIGGER
+- Shows reason, risks, invalidation, T1, T2
+- Market/sector context comes from QQQ/SMH, not from the selected stock itself
+
+### Position mode
+- User enters the real fill price manually
+- LONG or SHORT side
+- HOLD / HOLD_CAUTION / ADD / TRIM_30 / TRIM_30_RUNNER / TRIM_MORE / EXIT
+- Hard loss cap remains -2% reference; technical stop can be tighter
+- No averaging down signal
+- No automated order execution
+
+## Deployment update
+Upload the entire package contents to the existing GitHub repository, then on Lightsail:
+
 ```bash
-cd /home/ubuntu/day-trader-api-repo
+cd ~/day-trader-api-repo
 git pull
 cp -r live_server trader /home/ubuntu/day-trader-api/
-cp app.py /home/ubuntu/day-trader-api-repo/app.py
 cd /home/ubuntu/day-trader-api
-source venv/bin/activate
-pip install -r live_server/requirements.txt
 sudo systemctl restart day-trader-api
 curl http://127.0.0.1:8000/health
 ```
 
-Or use `live_server/update_server.sh` after the new file is on the server.
-
-## Streamlit
-GitHub push triggers Streamlit redeploy automatically. Keep the existing Secret:
-
-```toml
-DAYTRADER_API_URL = "http://3.37.169.231:8000"
-```
-
-## Important
-This is a decision-support tool. It does not place orders. Signal scoring should be forward-tested and tuned before relying on it with meaningful capital.
+Expected health version: `1.3`.

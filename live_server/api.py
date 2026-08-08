@@ -37,12 +37,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.3.1',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.3.2',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
-    qs=db.quotes(); return {'ok':True,'mode':'LIVE','version':'1.3.1','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    qs=db.quotes()
+    return {'ok':True,'mode':'LIVE','version':'1.3.2','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -65,7 +66,7 @@ def screener(top_n:int=Query(10,ge=1,le=30)):
 def ranking_history(): return {'data':db.ranking_history()}
 
 @app.get('/api/bars/{symbol}')
-def bars(symbol:str, minutes:int=Query(1,ge=1,le=60), limit:int=Query(200,ge=10,le=1000)):
+def bars(symbol:str,minutes:int=Query(1,ge=1,le=60),limit:int=Query(200,ge=10,le=1000)):
     out=ticks_to_bars(db.ticks(symbol,40000),minutes).tail(limit)
     return {'symbol':symbol.upper(),'minutes':minutes,'data':out.assign(time=out['time'].astype(str)).to_dict('records')}
 
@@ -74,7 +75,7 @@ def signal(symbol:str):
     return multi_timeframe_signal(symbol.upper(),db.ticks(symbol,40000),db.quotes())
 
 @app.get('/api/position/{symbol}')
-def position(symbol:str, entry:float=Query(...,gt=0), side:str=Query('LONG',pattern='^(LONG|SHORT)$')):
+def position(symbol:str,entry:float=Query(...,gt=0),side:str=Query('LONG',pattern='^(LONG|SHORT)$')):
     return position_from_ticks(symbol.upper(),db.ticks(symbol,40000),entry,side,db.quotes())
 
 @app.get('/api/raw')

@@ -43,7 +43,15 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
         rank_score=max(0,60-vr*0.35-dr*0.35)
         momentum=min(20,abs(rec['change_pct'])*2)
         liq=min(20,rec['dollar_volume']/100_000_000*4)
-        rec['discovery_score']=round(rank_score+momentum+liq,1)
+        chase_penalty=0
+        if abs(rec['change_pct']) >= 20:
+            chase_penalty=18
+        elif abs(rec['change_pct']) >= 12:
+            chase_penalty=10
+        elif abs(rec['change_pct']) >= 8:
+            chase_penalty=5
+        rec['chase_risk']='HIGH' if chase_penalty>=10 else ('MEDIUM' if chase_penalty else 'NORMAL')
+        rec['discovery_score']=round(rank_score+momentum+liq-chase_penalty,1)
     eligible=[r for r in merged.values() if r['dollar_volume']>=min_dollar or r['volume_rank']<=25]
     eligible.sort(key=lambda r:(r['discovery_score'],r['dollar_volume']), reverse=True)
     picked=eligible[:limit]
@@ -57,4 +65,5 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
         if r['symbol'] not in seen:
             symbols.append(r['symbol']); seen.add(r['symbol'])
         r['sources']=','.join(sorted(r['sources']))
+        r['origin']='CORE' if r['symbol'] in core else 'AUTO'
     return DiscoveryResult(symbols=symbols,rows=picked,updated_at=datetime.now(timezone.utc).isoformat())

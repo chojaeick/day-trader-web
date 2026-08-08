@@ -27,9 +27,9 @@ class Settings:
     poll_seconds: float = float(os.getenv('DAYTRADER_POLL_SECONDS', '12'))
     daily_refresh_seconds: float = float(os.getenv('DAYTRADER_DAILY_REFRESH_SECONDS', '3600'))
     discovery_seconds: float = float(os.getenv('DAYTRADER_DISCOVERY_SECONDS', '600'))
-    discovery_limit: int = int(os.getenv('DAYTRADER_DISCOVERY_LIMIT', '35'))
+    discovery_limit: int = int(os.getenv('DAYTRADER_DISCOVERY_LIMIT', '40'))
     discovery_min_price: float = float(os.getenv('DAYTRADER_DISCOVERY_MIN_PRICE', '5'))
-    discovery_min_dollar: float = float(os.getenv('DAYTRADER_DISCOVERY_MIN_DOLLAR', '20000000'))
+    discovery_min_dollar: float = float(os.getenv('DAYTRADER_DISCOVERY_MIN_DOLLAR', '5000000'))
 
     def exchange_for(self, symbol: str) -> str:
         overrides = {

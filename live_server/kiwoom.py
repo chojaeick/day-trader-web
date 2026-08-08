@@ -81,13 +81,29 @@ class KiwoomClient:
 
 
     def ranking_today_volume(self, sort_mode: str='0') -> list[dict]:
-        body={'stex_tp':'0','inds_cd':'','stk_tp':'0','trde_qty_tp':'0',
-              'qry_tp':str(sort_mode),'stk_cnd':'0','pric_cnd':'0','trde_prica_cnd':'0'}
-        r=requests.post(self.s.rest_base+'/api/us/rkinfo',headers=self.headers('usa20530'),json=body,timeout=20)
-        d=r.json()
-        if d.get('return_code') not in (None,0):
-            raise RuntimeError(f"ranking usa20530/{sort_mode}: {d.get('return_code')} {d.get('return_msg')}")
-        return d.get('result_list') or []
+        """Kiwoom usa20530, broadened across ALL/NYSE/NASDAQ/AMEX."""
+        combined=[]
+        seen=set()
+        for stex in ('0','1','2','3'):
+            body={'stex_tp':stex,'inds_cd':'','stk_tp':'0','trde_qty_tp':'0',
+                  'qry_tp':str(sort_mode),'stk_cnd':'0','pric_cnd':'0','trde_prica_cnd':'0'}
+            r=requests.post(self.s.rest_base+'/api/us/rkinfo',
+                            headers=self.headers('usa20530'),json=body,timeout=20)
+            d=r.json()
+            if d.get('return_code') not in (None,0):
+                log.warning('ranking usa20530/%s/%s: %s %s',
+                            sort_mode,stex,d.get('return_code'),d.get('return_msg'))
+                continue
+            for row in d.get('result_list') or []:
+                sym=str(row.get('stk_cd') or '').upper().strip()
+                key=(sym, str(row.get('stex_tp') or stex))
+                if sym and key not in seen:
+                    combined.append(row)
+                    seen.add(key)
+            # Keep API cadence conservative.
+            import time
+            time.sleep(0.18)
+        return combined
 
     def discover_universe(self) -> dict:
         volume=self.ranking_today_volume('0')
@@ -97,7 +113,7 @@ class KiwoomClient:
         exchanges={r['symbol']:r.get('exchange') for r in result.rows if r.get('exchange')}
         self.s.symbols=list(result.symbols)
         self.discovery={'symbols':list(result.symbols),'rows':result.rows,'updated_at':result.updated_at,
-                        'count':len(result.symbols),'core':list(self.s.core_symbols),'exchanges':exchanges}
+                        'count':len(result.symbols),'core':list(self.s.core_symbols),'exchanges':exchanges,'auto_count':len([x for x in result.symbols if x not in self.s.core_symbols])}
         log.info('universe discovery: %s symbols',len(result.symbols))
         return self.discovery
 

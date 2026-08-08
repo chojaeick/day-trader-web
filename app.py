@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.4') if live else '1.4'
+version=(health or {}).get('version','1.4.1') if live else '1.4.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -63,7 +63,22 @@ c4.metric('Data','LIVE' if live else 'DEMO')
 if live:
     uni=api('/api/universe') or {}
     if uni.get('count'):
-        st.caption(f"자동 Universe {uni.get('count')}개 · Core {len(uni.get('core') or [])}개 · 약 10분마다 재검색")
+        st.caption(
+            f"자동 Universe {uni.get('count')}개 · AUTO {uni.get('auto_count', max(0, uni.get('count',0)-len(uni.get('core') or [])))}개 "
+            f"· Core {len(uni.get('core') or [])}개 · 약 10분마다 재검색"
+        )
+        with st.expander('오늘 자동 발굴 Universe 보기', expanded=False):
+            drows=uni.get('rows') or []
+            if drows:
+                udf=pd.DataFrame(drows)
+                keep=['origin','symbol','name','exchange','price','change_pct',
+                      'volume_rank','dollar_rank','discovery_score','chase_risk']
+                udf=udf[[c for c in keep if c in udf.columns]].rename(columns={
+                    'origin':'구분','symbol':'종목','name':'이름','exchange':'거래소',
+                    'price':'현재가','change_pct':'당일%','volume_rank':'거래량순위',
+                    'dollar_rank':'거래대금순위','discovery_score':'발굴점수','chase_risk':'추격위험'
+                })
+                st.dataframe(udf,use_container_width=True,hide_index=True)
 st.subheader('오늘의 단타 후보 TOP 10')
 if live:
     payload=api('/api/screener?top_n=10') or {'data':[]}; rows=payload.get('data',[])
@@ -161,4 +176,4 @@ if selected:
         bars=demo_bars(selected); sig=intraday_signal(selected,bars,market_bias=.7,sector_bias=.6,cfg=cfg)
         st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
 
-st.caption('V1.4: 미국장 자동 발굴(거래량/거래대금 순위) → 유동성 필터 → 정밀 TOP10 → 1·5분봉 Signal. Core ETF는 항상 감시.')
+st.caption('V1.4.1: 미국장 ALL/NYSE/NASDAQ/AMEX 자동 발굴 확대 → 약 30~40개 Universe → CORE/AUTO 구분 → 추격위험 표시 → 정밀 TOP10.')

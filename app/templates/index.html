@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DAY TRADER WEB</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">PERSONAL TRADING SIGNAL DASHBOARD</div>
+        <h1>DAY TRADER <span>WEB v1.0</span></h1>
+      </div>
+      <div class="market-pill" id="marketPill">NASDAQ · loading</div>
+    </header>
+
+    <div class="notice">현재는 <b>DEMO DATA</b>입니다. 실시간 키움/KIS API 연결 후 실제 장 데이터로 전환됩니다.</div>
+
+    <main class="grid">
+      <section class="panel rankings">
+        <div class="panel-head">
+          <div><div class="kicker">SCANNER</div><h2>오늘의 단타 TOP 10</h2></div>
+          <div class="updated" id="updated">--</div>
+        </div>
+        <div class="rank-head"><span>#</span><span>종목</span><span>점수</span><span>방향</span><span>상태</span></div>
+        <div id="top10"></div>
+      </section>
+
+      <section class="panel focus">
+        <div class="panel-head">
+          <div><div class="kicker">FOCUS MODE</div><h2 id="symbolTitle">SOXL</h2></div>
+          <div class="bias" id="biasBadge">LONG 00%</div>
+        </div>
+
+        <div class="price-row">
+          <div><div class="label">현재가</div><div class="price" id="price">--</div></div>
+          <div class="change" id="change">--</div>
+        </div>
+
+        <div class="metrics" id="metrics"></div>
+
+        <div class="status-card">
+          <div class="kicker">STATUS</div>
+          <div class="status" id="status">WAIT</div>
+          <div class="levels">
+            <div><span>진입 Trigger</span><b id="trigger">--</b></div>
+            <div><span>Technical Stop</span><b id="stop">--</b></div>
+            <div><span>Hard Stop</span><b>-2.0%</b></div>
+          </div>
+        </div>
+
+        <div class="position-card">
+          <div class="panel-head compact"><div><div class="kicker">POSITION</div><h3>진입 등록</h3></div></div>
+          <div class="form-row">
+            <input id="entry" type="number" step="0.01" placeholder="실제 진입가격" />
+            <input id="amount" type="number" value="15000000" step="100000" />
+            <select id="side"><option>LONG</option><option>SHORT</option></select>
+            <button id="registerBtn">등록</button>
+          </div>
+          <div id="positionInfo" class="position-info">포지션 없음</div>
+        </div>
+      </section>
+    </main>
+
+    <section class="panel alerts">
+      <div class="panel-head"><div><div class="kicker">ALERT POLICY</div><h2>중요 알림</h2></div></div>
+      <div class="alert-grid">
+        <div>🚨 진입 Trigger</div><div>⚠️ 손절/무효화 접근</div><div>💰 강한 익절 신호</div><div>📉 비정상 급등락</div><div>📰 중요 돌발뉴스</div>
+      </div>
+      <p>향후 카카오톡 ‘나와의 채팅’ 또는 Telegram으로 위 중요 신호만 발송합니다.</p>
+    </section>
+
+    <footer>정보 제공 및 의사결정 보조용 · 주문은 사용자가 직접 실행</footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

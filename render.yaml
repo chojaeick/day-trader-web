@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: day-trader-web
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /_stcore/health

@@ -8,6 +8,11 @@ import requests
 
 SEMI={'SOXL','SOXS','SMH','NVDA','AMD','AVGO','MU','ARM','TSM','ASML','INTC','QCOM'}
 INVERSE={'SOXS':'SMH','SQQQ':'QQQ'}
+LEVERAGED_LONG={'SOXL':'SMH','TQQQ':'QQQ'}
+def asset_group(symbol:str)->str:
+    if symbol in INVERSE: return 'INVERSE_ETF'
+    if symbol in LEVERAGED_LONG: return 'LEVERAGED_LONG'
+    return 'STOCK'
 
 def num(v, default=0.0):
     try: return float(str(v).replace(',','').strip())
@@ -49,13 +54,18 @@ def open_model_score(open_px, prev5, gap_pct, qqq_gap=0.0, smh_gap=0.0, symbol='
     elif 1<=atr<1.5:add('ATR',4)
     elif atr>12:add('ATR',-4)
 
-    if .5<=gap_pct<=4:add('Gap momentum',12)
-    elif 0<gap_pct<.5:add('Gap momentum',5)
-    elif 4<gap_pct<=8:add('Gap momentum',7)
-    elif abs(gap_pct)>12:add('Gap momentum',-12)
-    elif gap_pct<0:add('Gap momentum',-6)
+    # Direction-normalized opening momentum:
+    # inverse ETFs interpret negative own gap / negative underlying market as favorable.
+    dir_mult=-1 if symbol in INVERSE else 1
+    effective_gap=gap_pct*dir_mult
+    if .5<=effective_gap<=4:add('Gap momentum',12)
+    elif 0<effective_gap<.5:add('Gap momentum',5)
+    elif 4<effective_gap<=8:add('Gap momentum',7)
+    elif abs(effective_gap)>12:add('Gap momentum',-12)
+    elif effective_gap<0:add('Gap momentum',-6)
 
-    mg=smh_gap if symbol in SEMI else qqq_gap
+    raw_mg=smh_gap if (symbol in SEMI or INVERSE.get(symbol)=='SMH' or LEVERAGED_LONG.get(symbol)=='SMH') else qqq_gap
+    mg=raw_mg*dir_mult
     if mg>=1:add('Market/Sector',8)
     elif mg>0:add('Market/Sector',4)
     elif mg<=-1:add('Market/Sector',-7)
@@ -65,7 +75,8 @@ def open_model_score(open_px, prev5, gap_pct, qqq_gap=0.0, smh_gap=0.0, symbol='
 
     return {'score':max(0,min(100,round(score))),'ma5':ma5,'ma5_slope_pct':slope,
             'avg5_volume':avg5vol,'avg5_dollar_volume':avg5dv,'atr5_pct':atr,
-            'gap_pct':gap_pct,'parts':parts}
+            'gap_pct':gap_pct,'effective_gap_pct':effective_gap,'asset_group':asset_group(symbol),
+            'parts':parts}
 
 class ValidationStore:
     def __init__(self, live_db_path:str):
@@ -201,18 +212,27 @@ class HistoricalValidator:
                 else:
                     bench=sret if sym in SEMI and si is not None else qret
                 rows.append({'trade_date':day,'symbol':sym,'exchange':exchanges.get(sym,''),
-                             'model':'OPEN_V0','score':f['score'],'gap_pct':gap,
+                             'model':'OPEN_V0','asset_group':f['asset_group'],
+                             'score':f['score'],'gap_pct':gap,'effective_gap_pct':f['effective_gap_pct'],
                              'ma5':f['ma5'],'ma5_slope_pct':f['ma5_slope_pct'],
                              'atr5_pct':f['atr5_pct'],'avg5_dollar_volume':f['avg5_dollar_volume'],
                              'open_to_close_pct':ret,'mfe_pct':mfe,'mae_pct':mae,
-                             'benchmark_pct':bench,'excess_pct':ret-bench})
+                             'benchmark_pct':bench,'excess_pct':ret-bench,'parts':f['parts']})
 
             if len(rows)<3: continue
             rows.sort(key=lambda r:(r['score'],r['avg5_dollar_volume']),reverse=True)
             for n,r in enumerate(rows,1): r['pred_rank']=n
             actual=sorted(rows,key=lambda r:r['excess_pct'],reverse=True)
             actual_rank={r['symbol']:n for n,r in enumerate(actual,1)}
-            for r in rows:r['actual_rank']=actual_rank[r['symbol']]
+            for r in rows:
+                r['actual_rank']=actual_rank[r['symbol']]
+                r['validation_tag']='NEUTRAL'
+                if r['pred_rank']<=5 and r['actual_rank']<=5:
+                    r['validation_tag']='TRUE_POSITIVE'
+                elif r['pred_rank']<=5 and r['actual_rank']>10:
+                    r['validation_tag']='FALSE_POSITIVE'
+                elif r['pred_rank']>10 and r['actual_rank']<=5:
+                    r['validation_tag']='MISSED_WINNER'
 
             pred=pd.Series([r['pred_rank'] for r in rows],dtype=float)
             act=pd.Series([r['actual_rank'] for r in rows],dtype=float)
@@ -222,11 +242,20 @@ class HistoricalValidator:
             actual_top5={r['symbol'] for r in actual[:5]}
             pred_top5={r['symbol'] for r in top5}
             precision5=len(actual_top5 & pred_top5)/max(1,len(pred_top5))*100
+            group_stats={}
+            for grp in ('STOCK','LEVERAGED_LONG','INVERSE_ETF'):
+                gr=[r for r in rows if r['asset_group']==grp]
+                if gr:
+                    group_stats[grp]={
+                        'count':len(gr),
+                        'avg_excess':mean([r['excess_pct'] for r in gr]),
+                        'top3_avg_excess':mean([r['excess_pct'] for r in gr[:3]])
+                    }
             daily.append({'trade_date':day,'spearman':rho,
                           'top5_excess_avg':mean([r['excess_pct'] for r in top5]),
                           'top5_close_avg':mean([r['open_to_close_pct'] for r in top5]),
                           'top5_positive_excess_rate':mean([1 if r['excess_pct']>0 else 0 for r in top5])*100,
-                          'precision_at_5':precision5,
+                          'precision_at_5':precision5,'group_stats':group_stats,
                           'universe':len(rows),'qqq_return':qret,'smh_return':sret})
             all_rows.extend(rows)
 
@@ -244,7 +273,32 @@ class HistoricalValidator:
                  'failed_symbols':failures,
                  'avg_universe':mean([x['universe'] for x in daily]),
                  'created_at':datetime.now(timezone.utc).isoformat(),
-                 'note':'OPEN_V0 uses previous completed daily bars plus the current-day opening print only. Current-day high/low/close/volume are evaluation-only. Inverse ETF benchmarks are direction-adjusted.'}
+                 'note':'OPEN_V0 uses previous completed daily bars plus the current-day opening print only. Current-day high/low/close/volume are evaluation-only. Inverse ETF score direction and benchmark are both adjusted.'}
+
+        # Aggregate group performance and component diagnostics.
+        group_summary={}
+        for grp in ('STOCK','LEVERAGED_LONG','INVERSE_ETF'):
+            gr=[r for r in all_rows if r.get('asset_group')==grp]
+            if gr:
+                group_summary[grp]={
+                    'n':len(gr),
+                    'avg_excess':mean([r['excess_pct'] for r in gr]),
+                    'avg_score':mean([r['score'] for r in gr]),
+                    'positive_excess_rate':mean([1 if r['excess_pct']>0 else 0 for r in gr])*100
+                }
+        summary['group_summary']=group_summary
+
+        tp=[r for r in all_rows if r.get('validation_tag')=='TRUE_POSITIVE']
+        fp=[r for r in all_rows if r.get('validation_tag')=='FALSE_POSITIVE']
+        def avg_parts(items):
+            keys=sorted({k for r in items for k in (r.get('parts') or {}).keys()})
+            return {k:mean([float((r.get('parts') or {}).get(k,0)) for r in items]) for k in keys} if items else {}
+        summary['component_diagnostics']={
+            'true_positive_count':len(tp),
+            'false_positive_count':len(fp),
+            'true_positive_avg_parts':avg_parts(tp),
+            'false_positive_avg_parts':avg_parts(fp)
+        }
         result={'summary':summary,'daily':daily,'rows':all_rows}
         summary['run_id']=self.store.save(result)
         return result

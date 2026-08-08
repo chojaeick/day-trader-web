@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.5A.1') if live else '1.5A.1'
+version=(health or {}).get('version','1.5A.2') if live else '1.5A.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -240,6 +240,30 @@ if live:
         if sm.get('failed_symbols'):
             with st.expander('과거데이터 조회 실패 종목/원인',expanded=False):
                 st.json(sm.get('failed_symbols'))
+
+        if sm.get('group_summary'):
+            st.caption('자산군별 검증 성과')
+            gs=[]
+            for g,x in (sm.get('group_summary') or {}).items():
+                gs.append({'그룹':g,'표본수':x.get('n'),'평균 Score':x.get('avg_score'),
+                           '평균 시장초과%':x.get('avg_excess'),'초과수익 적중%':x.get('positive_excess_rate')})
+            st.dataframe(pd.DataFrame(gs),use_container_width=True,hide_index=True)
+
+        cd=sm.get('component_diagnostics') or {}
+        if cd:
+            st.caption('TOP5 성공군 vs False Positive · 평균 점수 구성 비교')
+            keys=sorted(set((cd.get('true_positive_avg_parts') or {}).keys()) | set((cd.get('false_positive_avg_parts') or {}).keys()))
+            comp=[]
+            for k in keys:
+                comp.append({
+                    '지표':k,
+                    '성공군 평균점수':(cd.get('true_positive_avg_parts') or {}).get(k,0),
+                    'False Positive 평균점수':(cd.get('false_positive_avg_parts') or {}).get(k,0)
+                })
+            if comp:
+                st.dataframe(pd.DataFrame(comp),use_container_width=True,hide_index=True)
+            st.caption(f"성공 TOP5 표본 {cd.get('true_positive_count',0)}건 · False Positive 표본 {cd.get('false_positive_count',0)}건")
+
         st.caption(sm.get('note',''))
 
         daily=pd.DataFrame(vr.get('daily') or [])
@@ -252,8 +276,9 @@ if live:
             last=sorted(rowsv['trade_date'].dropna().unique())[-1]
             st.caption(f'{last} 예상순위 vs 실제 시장초과수익 순위')
             rr=rowsv[rowsv['trade_date']==last]
-            cols=['pred_rank','actual_rank','symbol','score','gap_pct','open_to_close_pct','mfe_pct','mae_pct','excess_pct']
-            st.dataframe(rr[[c for c in cols if c in rr.columns]].head(15),use_container_width=True,hide_index=True)
+            cols=['pred_rank','actual_rank','symbol','asset_group','validation_tag','score',
+                  'gap_pct','effective_gap_pct','open_to_close_pct','mfe_pct','mae_pct','excess_pct']
+            st.dataframe(rr[[c for c in cols if c in rr.columns]].head(20),use_container_width=True,hide_index=True)
 
 
 if live:
@@ -283,4 +308,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.5A.1: Historical 데이터 품질/Inverse benchmark 보정 + Precision@5 + Live TOP10 Snapshot Validation.')
+st.caption('V1.5A.2: Inverse ETF 예측점수 방향 보정 + STOCK/Leveraged/Inverse 분리 + 성공군/False Positive 구성요소 비교.')

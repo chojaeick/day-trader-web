@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.6') if live else '1.6'
+version=(health or {}).get('version','1.6.1') if live else '1.6.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -297,6 +297,54 @@ if live:
             st.dataframe(pd.DataFrame(ms),use_container_width=True,hide_index=True)
             st.caption('WF = 앞 80거래일과 분리된 뒤 40거래일 테스트. 후보모델이 전체기간뿐 아니라 미사용 테스트구간에서도 개선되는지 확인합니다.')
 
+        if sm.get('rolling_walk_forward'):
+            st.subheader('Rolling Walk-forward · 40일 → 다음 20일')
+            rw=[]
+            for name,x in (sm.get('rolling_walk_forward') or {}).items():
+                rw.append({
+                    '모델':name,'Fold 수':x.get('fold_count'),
+                    '평균 OOS Rank Corr':x.get('avg_test_rank_corr'),
+                    '평균 OOS Precision@5':x.get('avg_test_precision_at_5'),
+                    '평균 OOS TOP5 초과%':x.get('avg_test_top5_excess_avg'),
+                    'TOP5 플러스 Fold%':x.get('positive_top5_fold_rate')
+                })
+            st.dataframe(pd.DataFrame(rw),use_container_width=True,hide_index=True)
+            with st.expander('Rolling Fold 상세',expanded=False):
+                choice=st.selectbox('모델 선택',list((sm.get('rolling_walk_forward') or {}).keys()),key='rw_model')
+                folds=((sm.get('rolling_walk_forward') or {}).get(choice) or {}).get('folds') or []
+                if folds:
+                    st.dataframe(pd.DataFrame(folds),use_container_width=True,hide_index=True)
+
+        if sm.get('rs_sensitivity'):
+            st.subheader('Relative Strength Sensitivity')
+            rs_rows=[]
+            for name,x in (sm.get('rs_sensitivity') or {}).items():
+                rs_rows.append({
+                    'RS 강도':name,
+                    '전체 Rank Corr':x.get('rank_corr'),
+                    '전체 Precision@5':x.get('precision_at_5'),
+                    '전체 TOP5 초과%':x.get('top5_excess_avg'),
+                    'Rolling OOS Rank Corr':x.get('rolling_avg_test_rank_corr'),
+                    'Rolling OOS Precision@5':x.get('rolling_avg_test_precision_at_5'),
+                    'Rolling OOS TOP5 초과%':x.get('rolling_avg_test_top5_excess_avg'),
+                    'OOS 플러스 Fold%':x.get('positive_top5_fold_rate')
+                })
+            st.dataframe(pd.DataFrame(rs_rows),use_container_width=True,hide_index=True)
+
+        if sm.get('regime_oos'):
+            st.subheader('Regime별 Out-of-sample')
+            ro=[]
+            for rg,models in (sm.get('regime_oos') or {}).items():
+                for name,x in (models or {}).items():
+                    ro.append({
+                        'Regime':rg,'모델':name,'유효 Fold':x.get('fold_count'),
+                        'OOS Rank Corr':x.get('avg_test_rank_corr'),
+                        'OOS Precision@5':x.get('avg_test_precision_at_5'),
+                        'OOS TOP5 초과%':x.get('avg_test_top5_excess_avg'),
+                        '플러스 Fold%':x.get('positive_top5_fold_rate')
+                    })
+            st.dataframe(pd.DataFrame(ro),use_container_width=True,hide_index=True)
+
         if sm.get('regime_model_study'):
             st.caption('Regime별 Current vs Candidate 비교')
             rms=[]
@@ -401,4 +449,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.6: Current vs 후보 가중치 + Relative Strength + Regime 모델 + 80/40 Walk-forward Study. 실제 운영 가중치는 아직 자동 변경하지 않습니다.')
+st.caption('V1.6.1: Rolling Walk-forward + Regime별 OOS + RS Sensitivity. 운영 가중치는 검증 통과 전까지 변경하지 않습니다.')

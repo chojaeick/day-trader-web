@@ -161,6 +161,19 @@ MODEL_WEIGHTS = {
     }
 }
 
+
+# Relative-strength sensitivity models keep the same GLOBAL_CANDIDATE structure
+# and vary only the RS contribution. This isolates whether RS itself is robust.
+for _name, _mult in {
+    'RS_OFF':0.0,
+    'RS_LOW':0.5,
+    'RS_MEDIUM':1.0,
+    'RS_HIGH':1.5,
+}.items():
+    _w=dict(MODEL_WEIGHTS['GLOBAL_CANDIDATE'])
+    _w['Relative Strength']=_mult
+    MODEL_WEIGHTS[_name]=_w
+
 def five_day_return(rows):
     if len(rows) < 5:
         return 0.0
@@ -281,6 +294,82 @@ class ValidationStore:
         with sqlite3.connect(self.path) as c:
             r=c.execute('SELECT payload FROM runs WHERE id=?',(run_id,)).fetchone()
             return json.loads(r[0]) if r else None
+
+
+def rolling_walk_forward(rows, score_key, train_days=40, test_days=20, step_days=20):
+    """Multiple non-overlapping/out-of-sample tests.
+    Model weights are fixed; train is shown for context and never tuned inside the fold.
+    """
+    dates=sorted({r['trade_date'] for r in rows})
+    folds=[]
+    start=0
+    fold_no=1
+    while start + train_days + test_days <= len(dates):
+        train_dates=dates[start:start+train_days]
+        test_dates=dates[start+train_days:start+train_days+test_days]
+        train_set=set(train_dates); test_set=set(test_dates)
+        train_res=evaluate_model_rows([r for r in rows if r['trade_date'] in train_set],score_key)
+        test_res=evaluate_model_rows([r for r in rows if r['trade_date'] in test_set],score_key)
+        folds.append({
+            'fold':fold_no,
+            'train_start':train_dates[0],'train_end':train_dates[-1],
+            'test_start':test_dates[0],'test_end':test_dates[-1],
+            'train_rank_corr':train_res['rank_corr'],
+            'train_precision_at_5':train_res['precision_at_5'],
+            'train_top5_excess_avg':train_res['top5_excess_avg'],
+            'test_rank_corr':test_res['rank_corr'],
+            'test_precision_at_5':test_res['precision_at_5'],
+            'test_top5_excess_avg':test_res['top5_excess_avg']
+        })
+        start += step_days
+        fold_no += 1
+
+    valid=[f for f in folds if f['test_rank_corr'] is not None]
+    return {
+        'train_days':train_days,'test_days':test_days,'step_days':step_days,
+        'folds':folds,
+        'fold_count':len(folds),
+        'avg_test_rank_corr':mean([f['test_rank_corr'] for f in valid]) if valid else None,
+        'avg_test_precision_at_5':mean([f['test_precision_at_5'] for f in folds]) if folds else None,
+        'avg_test_top5_excess_avg':mean([f['test_top5_excess_avg'] for f in folds]) if folds else None,
+        'positive_top5_fold_rate':mean([1 if f['test_top5_excess_avg']>0 else 0 for f in folds])*100 if folds else None
+    }
+
+def regime_rolling_walk_forward(rows, score_key, regime, train_days=40, test_days=20, step_days=20):
+    """Evaluate out-of-sample folds only on dates belonging to a specified regime.
+    Fold boundaries are chronological calendar trading sessions, preventing future leakage.
+    """
+    dates=sorted({r['trade_date'] for r in rows})
+    folds=[]
+    start=0
+    fold_no=1
+    while start + train_days + test_days <= len(dates):
+        train_dates=dates[start:start+train_days]
+        test_dates=dates[start+train_days:start+train_days+test_days]
+        # train is kept for chronology/context; evaluation filters target regime in each period
+        tr=[r for r in rows if r['trade_date'] in set(train_dates) and r.get('market_regime')==regime]
+        te=[r for r in rows if r['trade_date'] in set(test_dates) and r.get('market_regime')==regime]
+        if len({r['trade_date'] for r in te}) >= 3:
+            train_res=evaluate_model_rows(tr,score_key) if tr else {'days':0,'rank_corr':None,'precision_at_5':None,'top5_excess_avg':None}
+            test_res=evaluate_model_rows(te,score_key)
+            folds.append({
+                'fold':fold_no,'regime':regime,
+                'train_regime_days':train_res.get('days',0),'test_regime_days':test_res.get('days',0),
+                'test_start':test_dates[0],'test_end':test_dates[-1],
+                'test_rank_corr':test_res.get('rank_corr'),
+                'test_precision_at_5':test_res.get('precision_at_5'),
+                'test_top5_excess_avg':test_res.get('top5_excess_avg')
+            })
+        start += step_days
+        fold_no += 1
+    valid=[f for f in folds if f.get('test_rank_corr') is not None]
+    return {
+        'regime':regime,'folds':folds,'fold_count':len(folds),
+        'avg_test_rank_corr':mean([f['test_rank_corr'] for f in valid]) if valid else None,
+        'avg_test_precision_at_5':mean([f['test_precision_at_5'] for f in folds]) if folds else None,
+        'avg_test_top5_excess_avg':mean([f['test_top5_excess_avg'] for f in folds]) if folds else None,
+        'positive_top5_fold_rate':mean([1 if f['test_top5_excess_avg']>0 else 0 for f in folds])*100 if folds else None
+    }
 
 class HistoricalValidator:
     def __init__(self,kiwoom,live_db_path):
@@ -440,6 +529,10 @@ class HistoricalValidator:
                 rows[-1]['score_MIXED_CANDIDATE']=weighted_score(f['parts'],rs['relative_strength_points'],'MIXED_CANDIDATE')
                 rows[-1]['score_REGIME_CANDIDATE']=weighted_score(
                     f['parts'],rs['relative_strength_points'],model_for_regime(regime_info['regime']))
+                rows[-1]['score_RS_OFF']=weighted_score(f['parts'],rs['relative_strength_points'],'RS_OFF')
+                rows[-1]['score_RS_LOW']=weighted_score(f['parts'],rs['relative_strength_points'],'RS_LOW')
+                rows[-1]['score_RS_MEDIUM']=weighted_score(f['parts'],rs['relative_strength_points'],'RS_MEDIUM')
+                rows[-1]['score_RS_HIGH']=weighted_score(f['parts'],rs['relative_strength_points'],'RS_HIGH')
 
             if len(rows)<3: continue
             rows.sort(key=lambda r:(r['score'],r['avg5_dollar_volume']),reverse=True)
@@ -601,6 +694,40 @@ class HistoricalValidator:
                     'precision_at_5':res['precision_at_5'],'top5_excess_avg':res['top5_excess_avg']
                 }
         summary['regime_model_study']=regime_model_study
+
+        # Rolling walk-forward: 40 train -> 20 test, rolling every 20 sessions.
+        rolling_models={}
+        for model_name in ('GLOBAL_CURRENT','GLOBAL_CANDIDATE','BULL_CANDIDATE','BEAR_CANDIDATE',
+                           'MIXED_CANDIDATE','REGIME_CANDIDATE'):
+            rolling_models[model_name]=rolling_walk_forward(
+                all_rows,'score_'+model_name,train_days=40,test_days=20,step_days=20)
+        summary['rolling_walk_forward']=rolling_models
+
+        # Regime-specific out-of-sample study.
+        regime_oos={}
+        for rg in ('BULL','BEAR','MIXED'):
+            regime_oos[rg]={}
+            names=('GLOBAL_CURRENT','GLOBAL_CANDIDATE',f'{rg}_CANDIDATE')
+            for model_name in names:
+                regime_oos[rg][model_name]=regime_rolling_walk_forward(
+                    all_rows,'score_'+model_name,rg,40,20,20)
+        summary['regime_oos']=regime_oos
+
+        # Relative-strength sensitivity: isolate RS weight while holding other candidate weights constant.
+        rs_sensitivity={}
+        for model_name in ('RS_OFF','RS_LOW','RS_MEDIUM','RS_HIGH'):
+            whole=evaluate_model_rows(all_rows,'score_'+model_name)
+            roll=rolling_walk_forward(all_rows,'score_'+model_name,40,20,20)
+            rs_sensitivity[model_name]={
+                'rank_corr':whole['rank_corr'],
+                'precision_at_5':whole['precision_at_5'],
+                'top5_excess_avg':whole['top5_excess_avg'],
+                'rolling_avg_test_rank_corr':roll['avg_test_rank_corr'],
+                'rolling_avg_test_precision_at_5':roll['avg_test_precision_at_5'],
+                'rolling_avg_test_top5_excess_avg':roll['avg_test_top5_excess_avg'],
+                'positive_top5_fold_rate':roll['positive_top5_fold_rate']
+            }
+        summary['rs_sensitivity']=rs_sensitivity
 
         result={'summary':summary,'daily':daily,'rows':all_rows}
         summary['run_id']=self.store.save(result)

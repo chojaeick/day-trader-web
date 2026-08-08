@@ -43,13 +43,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.6.1',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.6.2',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.6.1','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.6.2','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -104,7 +104,7 @@ def validation_result(run_id:int):
     return x
 
 @app.get('/api/validation/run')
-def validation_run(days:int=Query(60,ge=20,le=120), max_symbols:int=Query(20,ge=8,le=32)):
+def validation_run(days:int=Query(60,ge=20,le=260), max_symbols:int=Query(20,ge=8,le=32)):
     base=_symbols(FALLBACK_UNIVERSE)
     ordered=[]
     for sym in ['QQQ','SMH']+base:

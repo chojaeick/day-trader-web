@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from statistics import mean
 from pathlib import Path
-import json, sqlite3, time
+import json, sqlite3, time, statistics
 import pandas as pd
 import requests
 
@@ -296,6 +296,29 @@ class ValidationStore:
             return json.loads(r[0]) if r else None
 
 
+
+def robustness_stats(folds):
+    vals=[float(f['test_top5_excess_avg']) for f in folds if f.get('test_top5_excess_avg') is not None]
+    corrs=[float(f['test_rank_corr']) for f in folds if f.get('test_rank_corr') is not None]
+    precs=[float(f['test_precision_at_5']) for f in folds if f.get('test_precision_at_5') is not None]
+    if not vals:
+        return {'worst_top5_excess':None,'best_top5_excess':None,'std_top5_excess':None,
+                'median_top5_excess':None,'positive_fold_rate':None,'worst_rank_corr':None,
+                'std_rank_corr':None,'median_rank_corr':None,'min_precision_at_5':None,
+                'std_precision_at_5':None}
+    return {
+        'worst_top5_excess':min(vals),
+        'best_top5_excess':max(vals),
+        'std_top5_excess':statistics.pstdev(vals) if len(vals)>1 else 0.0,
+        'median_top5_excess':statistics.median(vals),
+        'positive_fold_rate':sum(1 for x in vals if x>0)/len(vals)*100,
+        'worst_rank_corr':min(corrs) if corrs else None,
+        'std_rank_corr':statistics.pstdev(corrs) if len(corrs)>1 else (0.0 if corrs else None),
+        'median_rank_corr':statistics.median(corrs) if corrs else None,
+        'min_precision_at_5':min(precs) if precs else None,
+        'std_precision_at_5':statistics.pstdev(precs) if len(precs)>1 else (0.0 if precs else None)
+    }
+
 def rolling_walk_forward(rows, score_key, train_days=40, test_days=20, step_days=20):
     """Multiple non-overlapping/out-of-sample tests.
     Model weights are fixed; train is shown for context and never tuned inside the fold.
@@ -325,15 +348,16 @@ def rolling_walk_forward(rows, score_key, train_days=40, test_days=20, step_days
         fold_no += 1
 
     valid=[f for f in folds if f['test_rank_corr'] is not None]
-    return {
+    result={
         'train_days':train_days,'test_days':test_days,'step_days':step_days,
-        'folds':folds,
-        'fold_count':len(folds),
+        'folds':folds,'fold_count':len(folds),
         'avg_test_rank_corr':mean([f['test_rank_corr'] for f in valid]) if valid else None,
         'avg_test_precision_at_5':mean([f['test_precision_at_5'] for f in folds]) if folds else None,
         'avg_test_top5_excess_avg':mean([f['test_top5_excess_avg'] for f in folds]) if folds else None,
         'positive_top5_fold_rate':mean([1 if f['test_top5_excess_avg']>0 else 0 for f in folds])*100 if folds else None
     }
+    result.update(robustness_stats(folds))
+    return result
 
 def regime_rolling_walk_forward(rows, score_key, regime, train_days=40, test_days=20, step_days=20):
     """Evaluate out-of-sample folds only on dates belonging to a specified regime.
@@ -363,13 +387,15 @@ def regime_rolling_walk_forward(rows, score_key, regime, train_days=40, test_day
         start += step_days
         fold_no += 1
     valid=[f for f in folds if f.get('test_rank_corr') is not None]
-    return {
+    result={
         'regime':regime,'folds':folds,'fold_count':len(folds),
         'avg_test_rank_corr':mean([f['test_rank_corr'] for f in valid]) if valid else None,
         'avg_test_precision_at_5':mean([f['test_precision_at_5'] for f in folds]) if folds else None,
         'avg_test_top5_excess_avg':mean([f['test_top5_excess_avg'] for f in folds]) if folds else None,
         'positive_top5_fold_rate':mean([1 if f['test_top5_excess_avg']>0 else 0 for f in folds])*100 if folds else None
     }
+    result.update(robustness_stats(folds))
+    return result
 
 class HistoricalValidator:
     def __init__(self,kiwoom,live_db_path):
@@ -447,7 +473,7 @@ class HistoricalValidator:
     def run(self,symbols,days=60):
         hist={}; exchanges={}; failures={}; load_meta={}
         # Need requested sessions + at least 30 warm-up sessions. Use generous calendar range.
-        calendar_days=max(420,int((days+40)*1.8))
+        calendar_days=max(560,int((days+50)*1.7))
         for sym in symbols:
             ex=self.k.active_exchange(sym)
             rows,used_ex,err,raw_rows,pages=self.daily_history(sym,ex,calendar_days,max_pages=10)
@@ -640,7 +666,7 @@ class HistoricalValidator:
 
         dates_used=sorted({r['trade_date'] for r in all_rows})
         time_windows=[]
-        max_blocks=min(6,(len(dates_used)+19)//20)
+        max_blocks=min(13,(len(dates_used)+19)//20)
         for block in range(max_blocks):
             end_idx=len(dates_used)-block*20
             start_idx=max(0,end_idx-20)
@@ -728,6 +754,27 @@ class HistoricalValidator:
                 'positive_top5_fold_rate':roll['positive_top5_fold_rate']
             }
         summary['rs_sensitivity']=rs_sensitivity
+
+        stability=[]
+        for model_name,x in rolling_models.items():
+            avg=x.get('avg_test_top5_excess_avg')
+            if avg is None:
+                continue
+            std=float(x.get('std_top5_excess') or 0)
+            worst=float(x.get('worst_top5_excess') or 0)
+            corr=float(x.get('avg_test_rank_corr') or 0)
+            pos=float(x.get('positive_fold_rate') or 0)
+            stability_score=float(avg)-0.35*std+0.20*corr+0.002*pos+0.10*min(0,worst)
+            stability.append({
+                'model':model_name,'stability_score':stability_score,
+                'avg_oos_top5_excess':avg,'std_oos_top5_excess':x.get('std_top5_excess'),
+                'worst_oos_top5_excess':x.get('worst_top5_excess'),
+                'positive_fold_rate':x.get('positive_fold_rate'),
+                'avg_oos_rank_corr':x.get('avg_test_rank_corr'),
+                'avg_oos_precision_at_5':x.get('avg_test_precision_at_5')
+            })
+        stability.sort(key=lambda x:x['stability_score'],reverse=True)
+        summary['stability_ranking']=stability
 
         result={'summary':summary,'daily':daily,'rows':all_rows}
         summary['run_id']=self.store.save(result)

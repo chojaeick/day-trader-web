@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.5A.2') if live else '1.5A.2'
+version=(health or {}).get('version','1.5B') if live else '1.5B'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -264,20 +264,70 @@ if live:
                 st.dataframe(pd.DataFrame(comp),use_container_width=True,hide_index=True)
             st.caption(f"성공 TOP5 표본 {cd.get('true_positive_count',0)}건 · False Positive 표본 {cd.get('false_positive_count',0)}건")
 
+        if sm.get('time_window_summary'):
+            st.caption('시간 구간별 안정성 · 같은 가중치가 최근/과거에도 유지되는가')
+            tw=pd.DataFrame(sm.get('time_window_summary') or [])
+            if not tw.empty:
+                tw=tw.rename(columns={
+                    'window':'구간','start_date':'시작','end_date':'종료','days':'거래일',
+                    'rank_corr':'Rank Corr','precision_at_5':'Precision@5',
+                    'top5_excess_avg':'TOP5 시장초과%'
+                })
+                st.dataframe(tw,use_container_width=True,hide_index=True)
+
+        if sm.get('regime_summary'):
+            st.caption('시장 Regime별 검증 · 현재 가중치를 그대로 적용')
+            rg=[]
+            for name,x in (sm.get('regime_summary') or {}).items():
+                rg.append({'시장상태':name,'거래일':x.get('days'),'표본':x.get('n'),
+                           'Rank Corr':x.get('rank_corr'),'Precision@5':x.get('precision_at_5'),
+                           'TOP5 시장초과%':x.get('top5_excess_avg')})
+            st.dataframe(pd.DataFrame(rg),use_container_width=True,hide_index=True)
+
+        if sm.get('semi_regime_summary'):
+            st.caption('반도체 Regime별 검증')
+            sr=[]
+            for name,x in (sm.get('semi_regime_summary') or {}).items():
+                sr.append({'반도체상태':name,'거래일':x.get('days'),'표본':x.get('n'),
+                           'Rank Corr':x.get('rank_corr'),'Precision@5':x.get('precision_at_5'),
+                           'TOP5 시장초과%':x.get('top5_excess_avg')})
+            st.dataframe(pd.DataFrame(sr),use_container_width=True,hide_index=True)
+
+        rcd=sm.get('regime_component_diagnostics') or {}
+        if rcd:
+            with st.expander('Regime별 성공군 vs False Positive 지표 비교',expanded=False):
+                pick=st.selectbox('시장 상태',['BULL','BEAR','MIXED'],key='regime_diag')
+                x=rcd.get(pick) or {}
+                keys=sorted(set((x.get('true_positive_avg_parts') or {}).keys()) | set((x.get('false_positive_avg_parts') or {}).keys()))
+                rows_reg=[]
+                for k in keys:
+                    rows_reg.append({
+                        '지표':k,
+                        '성공군 평균점수':(x.get('true_positive_avg_parts') or {}).get(k,0),
+                        'False Positive 평균점수':(x.get('false_positive_avg_parts') or {}).get(k,0)
+                    })
+                if rows_reg:
+                    st.dataframe(pd.DataFrame(rows_reg),use_container_width=True,hide_index=True)
+                st.caption(f"성공군 {x.get('true_positive_count',0)}건 · False Positive {x.get('false_positive_count',0)}건")
+
         st.caption(sm.get('note',''))
 
         daily=pd.DataFrame(vr.get('daily') or [])
         if not daily.empty:
             st.caption('최근 20 거래일 검증 결과')
-            st.dataframe(daily.tail(20),use_container_width=True,hide_index=True)
+            dshow=daily.tail(20).copy()
+            if 'group_stats' in dshow.columns:
+                dshow=dshow.drop(columns=['group_stats'])
+            st.dataframe(dshow,use_container_width=True,hide_index=True)
 
         rowsv=pd.DataFrame(vr.get('rows') or [])
         if not rowsv.empty:
             last=sorted(rowsv['trade_date'].dropna().unique())[-1]
             st.caption(f'{last} 예상순위 vs 실제 시장초과수익 순위')
             rr=rowsv[rowsv['trade_date']==last]
-            cols=['pred_rank','actual_rank','symbol','asset_group','validation_tag','score',
-                  'gap_pct','effective_gap_pct','open_to_close_pct','mfe_pct','mae_pct','excess_pct']
+            cols=['pred_rank','actual_rank','symbol','asset_group','market_regime','semi_regime',
+                  'validation_tag','score','gap_pct','effective_gap_pct',
+                  'open_to_close_pct','mfe_pct','mae_pct','excess_pct']
             st.dataframe(rr[[c for c in cols if c in rr.columns]].head(20),use_container_width=True,hide_index=True)
 
 
@@ -308,4 +358,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.5A.2: Inverse ETF 예측점수 방향 보정 + STOCK/Leveraged/Inverse 분리 + 성공군/False Positive 구성요소 비교.')
+st.caption('V1.5B: 최근/과거 구간 안정성 + BULL/BEAR/MIXED + 반도체 Regime별 Validation. 장세별 가중치는 아직 자동 변경하지 않습니다.')

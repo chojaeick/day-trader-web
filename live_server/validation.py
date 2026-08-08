@@ -14,6 +14,65 @@ def asset_group(symbol:str)->str:
     if symbol in LEVERAGED_LONG: return 'LEVERAGED_LONG'
     return 'STOCK'
 
+
+def classify_regime(history_rows, current_index):
+    """Ex-ante regime: only completed bars before the target day."""
+    if current_index is None or current_index < 20:
+        return {'regime':'UNKNOWN','ma20':None,'ma20_slope_pct':None,'prev_close':None}
+    prev = history_rows[:current_index]
+    closes = [r['close'] for r in prev[-20:]]
+    ma20 = mean(closes)
+    prev_close = closes[-1]
+    recent5 = mean(closes[-5:])
+    prior5 = mean(closes[-10:-5])
+    slope = (recent5/prior5-1)*100 if prior5 else 0.0
+    above = prev_close >= ma20*1.003
+    below = prev_close <= ma20*0.997
+    if above and slope > 0.15:
+        rg='BULL'
+    elif below and slope < -0.15:
+        rg='BEAR'
+    else:
+        rg='MIXED'
+    return {'regime':rg,'ma20':ma20,'ma20_slope_pct':slope,'prev_close':prev_close}
+
+def classify_semi_regime(history_rows, current_index):
+    x=classify_regime(history_rows,current_index)
+    label={'BULL':'SEMI_STRONG','BEAR':'SEMI_WEAK','MIXED':'SEMI_MIXED','UNKNOWN':'SEMI_UNKNOWN'}[x['regime']]
+    return {'semi_regime':label,'semi_ma20':x['ma20'],'semi_ma20_slope_pct':x['ma20_slope_pct']}
+
+def safe_rank_corr(rows):
+    if len(rows)<3:
+        return None
+    pred=pd.Series([r['pred_rank'] for r in rows],dtype=float)
+    act=pd.Series([r['actual_rank'] for r in rows],dtype=float)
+    rho=pred.corr(act,method='pearson')
+    return None if pd.isna(rho) else float(rho)
+
+def summarize_slice(rows):
+    if not rows:
+        return {'n':0,'days':0,'rank_corr':None,'precision_at_5':None,'top5_excess_avg':None}
+    by_day={}
+    for r in rows:
+        by_day.setdefault(r['trade_date'],[]).append(r)
+    rhos=[]; precisions=[]; top5_ex=[]
+    for dr in by_day.values():
+        dr=sorted(dr,key=lambda x:x['pred_rank'])
+        rho=safe_rank_corr(dr)
+        if rho is not None:
+            rhos.append(rho)
+        actual=sorted(dr,key=lambda x:x['actual_rank'])
+        p5={x['symbol'] for x in dr[:5]}
+        a5={x['symbol'] for x in actual[:5]}
+        precisions.append(len(p5&a5)/max(1,len(p5))*100)
+        top5_ex.append(mean([x['excess_pct'] for x in dr[:5]]))
+    return {
+        'n':len(rows),'days':len(by_day),
+        'rank_corr':mean(rhos) if rhos else None,
+        'precision_at_5':mean(precisions) if precisions else None,
+        'top5_excess_avg':mean(top5_ex) if top5_ex else None
+    }
+
 def num(v, default=0.0):
     try: return float(str(v).replace(',','').strip())
     except Exception: return default
@@ -195,6 +254,11 @@ class HistoricalValidator:
                 sgap=(scur['open']/sprev['close']-1)*100
                 sret=(scur['close']/scur['open']-1)*100
 
+            regime_info=classify_regime(qrows,qi)
+            semi_info=classify_semi_regime(srows,si) if si is not None else {
+                'semi_regime':'SEMI_UNKNOWN','semi_ma20':None,'semi_ma20_slope_pct':None
+            }
+
             rows=[]
             for sym,h in hist.items():
                 if sym in ('QQQ','SMH'): continue
@@ -213,6 +277,7 @@ class HistoricalValidator:
                     bench=sret if sym in SEMI and si is not None else qret
                 rows.append({'trade_date':day,'symbol':sym,'exchange':exchanges.get(sym,''),
                              'model':'OPEN_V0','asset_group':f['asset_group'],
+                             'market_regime':regime_info['regime'],'semi_regime':semi_info['semi_regime'],
                              'score':f['score'],'gap_pct':gap,'effective_gap_pct':f['effective_gap_pct'],
                              'ma5':f['ma5'],'ma5_slope_pct':f['ma5_slope_pct'],
                              'atr5_pct':f['atr5_pct'],'avg5_dollar_volume':f['avg5_dollar_volume'],
@@ -251,7 +316,12 @@ class HistoricalValidator:
                         'avg_excess':mean([r['excess_pct'] for r in gr]),
                         'top3_avg_excess':mean([r['excess_pct'] for r in gr[:3]])
                     }
-            daily.append({'trade_date':day,'spearman':rho,
+            daily.append({'trade_date':day,
+                          'market_regime':regime_info['regime'],
+                          'semi_regime':semi_info['semi_regime'],
+                          'market_ma20_slope_pct':regime_info['ma20_slope_pct'],
+                          'semi_ma20_slope_pct':semi_info['semi_ma20_slope_pct'],
+                          'spearman':rho,
                           'top5_excess_avg':mean([r['excess_pct'] for r in top5]),
                           'top5_close_avg':mean([r['open_to_close_pct'] for r in top5]),
                           'top5_positive_excess_rate':mean([1 if r['excess_pct']>0 else 0 for r in top5])*100,
@@ -299,6 +369,46 @@ class HistoricalValidator:
             'true_positive_avg_parts':avg_parts(tp),
             'false_positive_avg_parts':avg_parts(fp)
         }
+
+
+        regime_summary={}
+        for rg in ('BULL','BEAR','MIXED'):
+            regime_summary[rg]=summarize_slice([r for r in all_rows if r.get('market_regime')==rg])
+        summary['regime_summary']=regime_summary
+
+        semi_regime_summary={}
+        for rg in ('SEMI_STRONG','SEMI_WEAK','SEMI_MIXED'):
+            semi_regime_summary[rg]=summarize_slice([r for r in all_rows if r.get('semi_regime')==rg])
+        summary['semi_regime_summary']=semi_regime_summary
+
+        dates=sorted({r['trade_date'] for r in all_rows})
+        blocks=[
+            ('RECENT_20',dates[-20:]),
+            ('PRIOR_20',dates[-40:-20]),
+            ('OLDER_20',dates[-60:-40]),
+        ]
+        time_windows=[]
+        for label,ds in blocks:
+            if not ds:
+                continue
+            ds_set=set(ds)
+            x=summarize_slice([r for r in all_rows if r['trade_date'] in ds_set])
+            x.update({'window':label,'start_date':ds[0],'end_date':ds[-1]})
+            time_windows.append(x)
+        summary['time_window_summary']=time_windows
+
+        regime_components={}
+        for rg in ('BULL','BEAR','MIXED'):
+            grp=[r for r in all_rows if r.get('market_regime')==rg]
+            gtp=[r for r in grp if r.get('validation_tag')=='TRUE_POSITIVE']
+            gfp=[r for r in grp if r.get('validation_tag')=='FALSE_POSITIVE']
+            regime_components[rg]={
+                'true_positive_count':len(gtp),
+                'false_positive_count':len(gfp),
+                'true_positive_avg_parts':avg_parts(gtp),
+                'false_positive_avg_parts':avg_parts(gfp)
+            }
+        summary['regime_component_diagnostics']=regime_components
         result={'summary':summary,'daily':daily,'rows':all_rows}
         summary['run_id']=self.store.save(result)
         return result

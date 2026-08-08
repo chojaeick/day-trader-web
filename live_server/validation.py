@@ -137,6 +137,110 @@ def open_model_score(open_px, prev5, gap_pct, qqq_gap=0.0, smh_gap=0.0, symbol='
             'gap_pct':gap_pct,'effective_gap_pct':effective_gap,'asset_group':asset_group(symbol),
             'parts':parts}
 
+
+MODEL_WEIGHTS = {
+    'GLOBAL_CURRENT': {
+        'Open>MA5':1.0,'MA5 slope':1.0,'Liquidity':1.0,'ATR':1.0,'Gap momentum':1.0,
+        'Market/Sector':1.0,'Liquid leveraged ETF':1.0,'Core liquidity':1.0,'Relative Strength':0.0
+    },
+    'GLOBAL_CANDIDATE': {
+        'Open>MA5':1.15,'MA5 slope':1.15,'Liquidity':0.55,'ATR':0.95,'Gap momentum':0.65,
+        'Market/Sector':0.85,'Liquid leveraged ETF':1.15,'Core liquidity':0.75,'Relative Strength':1.0
+    },
+    'BULL_CANDIDATE': {
+        'Open>MA5':1.25,'MA5 slope':1.25,'Liquidity':0.45,'ATR':0.9,'Gap momentum':0.55,
+        'Market/Sector':0.8,'Liquid leveraged ETF':1.4,'Core liquidity':0.7,'Relative Strength':1.15
+    },
+    'BEAR_CANDIDATE': {
+        'Open>MA5':0.8,'MA5 slope':0.85,'Liquidity':0.55,'ATR':1.05,'Gap momentum':0.45,
+        'Market/Sector':1.15,'Liquid leveraged ETF':0.5,'Core liquidity':0.7,'Relative Strength':1.35
+    },
+    'MIXED_CANDIDATE': {
+        'Open>MA5':1.0,'MA5 slope':1.05,'Liquidity':0.5,'ATR':0.95,'Gap momentum':0.45,
+        'Market/Sector':0.85,'Liquid leveraged ETF':0.9,'Core liquidity':0.7,'Relative Strength':1.5
+    }
+}
+
+def five_day_return(rows):
+    if len(rows) < 5:
+        return 0.0
+    a=rows[-5]['close']; b=rows[-1]['close']
+    return (b/a-1)*100 if a else 0.0
+
+def relative_strength_score(symbol, symbol_prev, qqq_prev, smh_prev):
+    own=five_day_return(symbol_prev)
+    if symbol in SEMI or INVERSE.get(symbol)=='SMH' or LEVERAGED_LONG.get(symbol)=='SMH':
+        bench=five_day_return(smh_prev)
+    else:
+        bench=five_day_return(qqq_prev)
+    raw=own-bench
+    # Inverse ETFs are favorable when their own 5d move beats the inverse benchmark.
+    if symbol in INVERSE:
+        raw=own-(-bench)
+    # map roughly +/-6% RS into +/-12 points
+    pts=max(-12,min(12,raw*2.0))
+    return {'relative_strength_pct':raw,'relative_strength_points':pts}
+
+def weighted_score(parts, rs_points, model_name):
+    weights=MODEL_WEIGHTS[model_name]
+    total=0.0
+    for k,val in (parts or {}).items():
+        total += float(val)*weights.get(k,1.0)
+    total += rs_points*weights.get('Relative Strength',0.0)
+    return max(0,min(100,round(total,2)))
+
+def model_for_regime(regime):
+    return {'BULL':'BULL_CANDIDATE','BEAR':'BEAR_CANDIDATE','MIXED':'MIXED_CANDIDATE'}.get(regime,'GLOBAL_CANDIDATE')
+
+def evaluate_model_rows(rows, score_key):
+    by={}
+    for r in rows:
+        by.setdefault(r['trade_date'],[]).append(r)
+    daily=[]; all_ranked=[]
+    for day,dr in by.items():
+        dr=sorted(dr,key=lambda x:(x.get(score_key,0),x.get('avg5_dollar_volume',0)),reverse=True)
+        for i,r in enumerate(dr,1):
+            x=dict(r); x['model_pred_rank']=i; all_ranked.append(x)
+        actual=sorted(dr,key=lambda x:x['excess_pct'],reverse=True)
+        ar={r['symbol']:i for i,r in enumerate(actual,1)}
+        pred=pd.Series(list(range(1,len(dr)+1)),dtype=float)
+        act=pd.Series([ar[r['symbol']] for r in dr],dtype=float)
+        rho=pred.corr(act,method='pearson')
+        rho=None if pd.isna(rho) else float(rho)
+        p5={r['symbol'] for r in dr[:5]}
+        a5={r['symbol'] for r in actual[:5]}
+        daily.append({
+            'trade_date':day,
+            'rank_corr':rho,
+            'precision_at_5':len(p5&a5)/max(1,len(p5))*100,
+            'top5_excess_avg':mean([r['excess_pct'] for r in dr[:5]])
+        })
+    rhos=[x['rank_corr'] for x in daily if x['rank_corr'] is not None]
+    return {
+        'days':len(daily),
+        'rank_corr':mean(rhos) if rhos else None,
+        'precision_at_5':mean([x['precision_at_5'] for x in daily]) if daily else None,
+        'top5_excess_avg':mean([x['top5_excess_avg'] for x in daily]) if daily else None,
+        'daily':daily,
+        'ranked_rows':all_ranked
+    }
+
+def walk_forward_summary(rows, score_key, train_days=80, test_days=40):
+    dates=sorted({r['trade_date'] for r in rows})
+    if len(dates) < train_days+test_days:
+        return {'available':False}
+    train=set(dates[-(train_days+test_days):-test_days])
+    test=set(dates[-test_days:])
+    train_res=evaluate_model_rows([r for r in rows if r['trade_date'] in train],score_key)
+    test_res=evaluate_model_rows([r for r in rows if r['trade_date'] in test],score_key)
+    return {
+        'available':True,
+        'train_start':min(train),'train_end':max(train),
+        'test_start':min(test),'test_end':max(test),
+        'train':{k:v for k,v in train_res.items() if k not in ('daily','ranked_rows')},
+        'test':{k:v for k,v in test_res.items() if k not in ('daily','ranked_rows')}
+    }
+
 class ValidationStore:
     def __init__(self, live_db_path:str):
         p=Path(live_db_path)
@@ -309,6 +413,9 @@ class HistoricalValidator:
                 cur=h[idx]; prev=h[idx-1]; prev5=h[idx-5:idx]
                 gap=(cur['open']/prev['close']-1)*100
                 f=open_model_score(cur['open'],prev5,gap,qgap,sgap,sym)
+                qprev_hist=qrows[max(0,qi-10):qi]
+                sprev_hist=srows[max(0,si-10):si] if si is not None else []
+                rs=relative_strength_score(sym,h[max(0,idx-10):idx],qprev_hist,sprev_hist)
                 ret=(cur['close']/cur['open']-1)*100
                 mfe=(cur['high']/cur['open']-1)*100
                 mae=(cur['low']/cur['open']-1)*100
@@ -322,8 +429,17 @@ class HistoricalValidator:
                              'score':f['score'],'gap_pct':gap,'effective_gap_pct':f['effective_gap_pct'],
                              'ma5':f['ma5'],'ma5_slope_pct':f['ma5_slope_pct'],
                              'atr5_pct':f['atr5_pct'],'avg5_dollar_volume':f['avg5_dollar_volume'],
+                             'relative_strength_pct':rs['relative_strength_pct'],
+                             'relative_strength_points':rs['relative_strength_points'],
                              'open_to_close_pct':ret,'mfe_pct':mfe,'mae_pct':mae,
                              'benchmark_pct':bench,'excess_pct':ret-bench,'parts':f['parts']})
+                rows[-1]['score_GLOBAL_CURRENT']=weighted_score(f['parts'],rs['relative_strength_points'],'GLOBAL_CURRENT')
+                rows[-1]['score_GLOBAL_CANDIDATE']=weighted_score(f['parts'],rs['relative_strength_points'],'GLOBAL_CANDIDATE')
+                rows[-1]['score_BULL_CANDIDATE']=weighted_score(f['parts'],rs['relative_strength_points'],'BULL_CANDIDATE')
+                rows[-1]['score_BEAR_CANDIDATE']=weighted_score(f['parts'],rs['relative_strength_points'],'BEAR_CANDIDATE')
+                rows[-1]['score_MIXED_CANDIDATE']=weighted_score(f['parts'],rs['relative_strength_points'],'MIXED_CANDIDATE')
+                rows[-1]['score_REGIME_CANDIDATE']=weighted_score(
+                    f['parts'],rs['relative_strength_points'],model_for_regime(regime_info['regime']))
 
             if len(rows)<3: continue
             rows.sort(key=lambda r:(r['score'],r['avg5_dollar_volume']),reverse=True)
@@ -460,6 +576,32 @@ class HistoricalValidator:
                 'false_positive_avg_parts':avg_parts(gfp)
             }
         summary['regime_component_diagnostics']=regime_components
+        # V1.6 model study: compare current weights with candidate weight sets.
+        model_study={}
+        for model_name in ('GLOBAL_CURRENT','GLOBAL_CANDIDATE','BULL_CANDIDATE','BEAR_CANDIDATE','MIXED_CANDIDATE','REGIME_CANDIDATE'):
+            key='score_'+model_name
+            res=evaluate_model_rows(all_rows,key)
+            model_study[model_name]={
+                'days':res['days'],'rank_corr':res['rank_corr'],
+                'precision_at_5':res['precision_at_5'],'top5_excess_avg':res['top5_excess_avg'],
+                'walk_forward':walk_forward_summary(all_rows,key,80,40)
+            }
+        summary['model_study']=model_study
+
+        # Regime-specific test results for candidate models.
+        regime_model_study={}
+        for rg in ('BULL','BEAR','MIXED'):
+            rr=[r for r in all_rows if r.get('market_regime')==rg]
+            regime_model_study[rg]={}
+            for model_name in ('GLOBAL_CURRENT','GLOBAL_CANDIDATE',f'{rg}_CANDIDATE'):
+                key='score_'+model_name
+                res=evaluate_model_rows(rr,key)
+                regime_model_study[rg][model_name]={
+                    'days':res['days'],'rank_corr':res['rank_corr'],
+                    'precision_at_5':res['precision_at_5'],'top5_excess_avg':res['top5_excess_avg']
+                }
+        summary['regime_model_study']=regime_model_study
+
         result={'summary':summary,'daily':daily,'rows':all_rows}
         summary['run_id']=self.store.save(result)
         return result

@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.5B.2') if live else '1.5B.2'
+version=(health or {}).get('version','1.6') if live else '1.6'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -280,6 +280,33 @@ if live:
                 st.dataframe(pd.DataFrame(comp),use_container_width=True,hide_index=True)
             st.caption(f"성공 TOP5 표본 {cd.get('true_positive_count',0)}건 · False Positive 표본 {cd.get('false_positive_count',0)}건")
 
+        if sm.get('model_study'):
+            st.subheader('V1.6 Weight Study · 운영 가중치는 아직 변경하지 않음')
+            ms=[]
+            for name,x in (sm.get('model_study') or {}).items():
+                wf=x.get('walk_forward') or {}
+                test=(wf.get('test') or {}) if wf.get('available') else {}
+                ms.append({
+                    '모델':name,'전체 Rank Corr':x.get('rank_corr'),
+                    '전체 Precision@5':x.get('precision_at_5'),
+                    '전체 TOP5 초과%':x.get('top5_excess_avg'),
+                    'WF Test Rank Corr':test.get('rank_corr'),
+                    'WF Test Precision@5':test.get('precision_at_5'),
+                    'WF Test TOP5 초과%':test.get('top5_excess_avg')
+                })
+            st.dataframe(pd.DataFrame(ms),use_container_width=True,hide_index=True)
+            st.caption('WF = 앞 80거래일과 분리된 뒤 40거래일 테스트. 후보모델이 전체기간뿐 아니라 미사용 테스트구간에서도 개선되는지 확인합니다.')
+
+        if sm.get('regime_model_study'):
+            st.caption('Regime별 Current vs Candidate 비교')
+            rms=[]
+            for rg,models in (sm.get('regime_model_study') or {}).items():
+                for name,x in (models or {}).items():
+                    rms.append({'Regime':rg,'모델':name,'거래일':x.get('days'),
+                                'Rank Corr':x.get('rank_corr'),'Precision@5':x.get('precision_at_5'),
+                                'TOP5 초과%':x.get('top5_excess_avg')})
+            st.dataframe(pd.DataFrame(rms),use_container_width=True,hide_index=True)
+
         if sm.get('time_window_summary'):
             st.caption('시간 구간별 안정성 · 같은 가중치가 최근/과거에도 유지되는가')
             tw=pd.DataFrame(sm.get('time_window_summary') or [])
@@ -342,8 +369,8 @@ if live:
             st.caption(f'{last} 예상순위 vs 실제 시장초과수익 순위')
             rr=rowsv[rowsv['trade_date']==last]
             cols=['pred_rank','actual_rank','symbol','asset_group','market_regime','semi_regime',
-                  'validation_tag','score','gap_pct','effective_gap_pct',
-                  'open_to_close_pct','mfe_pct','mae_pct','excess_pct']
+                  'validation_tag','score','relative_strength_pct','relative_strength_points',
+                  'gap_pct','effective_gap_pct','open_to_close_pct','mfe_pct','mae_pct','excess_pct']
             st.dataframe(rr[[c for c in cols if c in rr.columns]].head(20),use_container_width=True,hide_index=True)
 
 
@@ -374,4 +401,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.5B.2: usa06012 최신일자 anchor + 연속조회 pagination. 최근 120거래일을 정확히 확보한 뒤 Regime/가중치 연구에 사용합니다.')
+st.caption('V1.6: Current vs 후보 가중치 + Relative Strength + Regime 모델 + 80/40 Walk-forward Study. 실제 운영 가중치는 아직 자동 변경하지 않습니다.')

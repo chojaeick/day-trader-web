@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.5B') if live else '1.5B'
+version=(health or {}).get('version','1.5B.1') if live else '1.5B.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -237,9 +237,24 @@ if live:
         q2.metric('과거데이터 실패',sm.get('symbols_failed','-'))
         q3.metric('평균 Universe',f"{float(sm.get('avg_universe') or 0):.1f}")
         q4.metric('Precision@5',f"{float(sm.get('precision_at_5') or 0):.1f}%")
+
+        d1,d2,d3,d4=st.columns(4)
+        d1.metric('요청 거래일',sm.get('requested_sessions',sm.get('days_requested','-')))
+        d2.metric('후보 거래일 확보',sm.get('candidate_sessions_loaded','-'))
+        d3.metric('실제 검증 거래일',sm.get('validated_sessions',sm.get('days_validated','-')))
+        d4.metric('UNKNOWN Regime',sm.get('unknown_regime_days','-'))
+        if sm.get('history_start') and sm.get('history_end'):
+            st.caption(f"Historical Range: {sm.get('history_start')} → {sm.get('history_end')}")
         if sm.get('failed_symbols'):
             with st.expander('과거데이터 조회 실패 종목/원인',expanded=False):
                 st.json(sm.get('failed_symbols'))
+        if sm.get('load_meta'):
+            with st.expander('Historical API 페이지/행수 확인',expanded=False):
+                lm=[]
+                for sym,x in (sm.get('load_meta') or {}).items():
+                    lm.append({'종목':sym,'거래소':x.get('exchange'),'페이지':x.get('pages'),
+                               '원시행':x.get('raw_rows'),'사용가능 일봉':x.get('usable_rows')})
+                st.dataframe(pd.DataFrame(lm),use_container_width=True,hide_index=True)
 
         if sm.get('group_summary'):
             st.caption('자산군별 검증 성과')
@@ -358,4 +373,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.5B: 최근/과거 구간 안정성 + BULL/BEAR/MIXED + 반도체 Regime별 Validation. 장세별 가중치는 아직 자동 변경하지 않습니다.')
+st.caption('V1.5B.1: usa06012 연속조회 pagination + 최신 연속 Historical Range 검증 + 20일 블록 최대 120일 안정성 분석.')

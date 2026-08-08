@@ -183,9 +183,8 @@ class HistoricalValidator:
         self.k=kiwoom
         self.store=ValidationStore(live_db_path)
 
-    def daily_history(self,symbol,exchange,calendar_days=260):
+    def daily_history(self,symbol,exchange,calendar_days=420,max_pages=10):
         start=(datetime.now(timezone.utc)-timedelta(days=calendar_days)).strftime('%Y%m%d')
-        # Official chart API uses NY / ND / NA. Retry alternate exchanges and transient API failures.
         candidates=[]
         for ex in [exchange,'ND','NY','NA']:
             ex='NA' if ex=='AM' else ex
@@ -195,40 +194,70 @@ class HistoricalValidator:
         for ex in candidates:
             for attempt in range(3):
                 try:
-                    r=requests.post(self.k.s.rest_base+'/api/us/chart',headers=self.k.headers('usa06012'),json={
-                        'stex_tp':ex,'stk_cd':symbol,'strt_dt':start,
-                        'upd_stkpc_tp':'1','exrt_appl_tp':'0'
-                    },timeout=30)
-                    d=r.json()
-                    if d.get('return_code')!=0:
-                        last_error=f"{d.get('return_code')} {d.get('return_msg')}"
-                        time.sleep(.35*(attempt+1))
-                        continue
+                    all_rows=[]
+                    cont_yn=None
+                    next_key=None
+                    for page in range(max_pages):
+                        headers=self.k.headers('usa06012')
+                        if cont_yn is not None:
+                            headers['cont-yn']=cont_yn
+                        if next_key is not None:
+                            headers['next-key']=next_key
+
+                        resp=requests.post(
+                            self.k.s.rest_base+'/api/us/chart',
+                            headers=headers,
+                            json={
+                                'stex_tp':ex,'stk_cd':symbol,'strt_dt':start,
+                                'upd_stkpc_tp':'1','exrt_appl_tp':'0'
+                            },
+                            timeout=30
+                        )
+                        d=resp.json()
+                        if d.get('return_code')!=0:
+                            last_error=f"{d.get('return_code')} {d.get('return_msg')}"
+                            break
+
+                        page_rows=d.get('result_list') or []
+                        all_rows.extend(page_rows)
+
+                        cont_yn=resp.headers.get('cont-yn') or resp.headers.get('Cont-Yn')
+                        next_key=resp.headers.get('next-key') or resp.headers.get('Next-Key')
+                        if cont_yn!='Y':
+                            break
+                        time.sleep(.22)
+
                     rows=[]
-                    for x in d.get('result_list') or []:
+                    for x in all_rows:
                         dt=str(x.get('dt') or '')
                         op=abs(num(x.get('open_pric'))); close=abs(num(x.get('cur_prc')))
                         hi=abs(num(x.get('high_pric'))); lo=abs(num(x.get('low_pric')))
                         vol=abs(num(x.get('acc_trde_qty')))
                         if len(dt)>=8 and op>0 and close>0:
-                            rows.append({'date':dt[:8],'open':op,'high':hi or max(op,close),
-                                         'low':lo or min(op,close),'close':close,'volume':vol})
+                            rows.append({
+                                'date':dt[:8],'open':op,'high':hi or max(op,close),
+                                'low':lo or min(op,close),'close':close,'volume':vol
+                            })
+
                     by={r['date']:r for r in rows}
                     out=[by[d] for d in sorted(by)]
-                    if len(out)>=10:
-                        return out,ex,''
-                    last_error=f"only {len(out)} usable rows"
+                    if len(out)>=40:
+                        return out,ex,'',len(all_rows),page+1
+                    last_error=f"only {len(out)} usable rows after {page+1} pages"
                 except Exception as e:
                     last_error=str(e)
-                time.sleep(.35*(attempt+1))
-        return [],exchange,last_error or 'no usable history'
+                time.sleep(.5*(attempt+1))
+        return [],exchange,last_error or 'no usable history',0,0
 
     def run(self,symbols,days=60):
-        hist={}; exchanges={}; failures={}
+        hist={}; exchanges={}; failures={}; load_meta={}
+        # Need requested sessions + at least 30 warm-up sessions. Use generous calendar range.
+        calendar_days=max(420,int((days+40)*1.8))
         for sym in symbols:
             ex=self.k.active_exchange(sym)
-            rows,used_ex,err=self.daily_history(sym,ex,max(220,int(days*3.0)))
+            rows,used_ex,err,raw_rows,pages=self.daily_history(sym,ex,calendar_days,max_pages=10)
             hist[sym]=rows; exchanges[sym]=used_ex
+            load_meta[sym]={'usable_rows':len(rows),'raw_rows':raw_rows,'pages':pages,'exchange':used_ex}
             if not rows: failures[sym]=err
             time.sleep(.12)
 
@@ -237,7 +266,13 @@ class HistoricalValidator:
         srows=hist.get('SMH',[])
         qmap={r['date']:i for i,r in enumerate(qrows)}
         smap={r['date']:i for i,r in enumerate(srows)}
-        dates=sorted(qmap.keys())[-days:]
+        # Use latest completed historical sessions. If today's row exists while market is open,
+        # drop it so validation never evaluates an incomplete day.
+        all_dates=sorted(qmap.keys())
+        today_utc=datetime.now(timezone.utc).strftime('%Y%m%d')
+        if all_dates and all_dates[-1]>=today_utc:
+            all_dates=all_dates[:-1]
+        dates=all_dates[-days:]
         all_rows=[]; daily=[]
 
         for day in dates:
@@ -341,6 +376,13 @@ class HistoricalValidator:
                  'symbols_loaded':len([x for x in hist if hist[x]]),
                  'symbols_failed':len(failures),
                  'failed_symbols':failures,
+                 'load_meta':load_meta,
+                 'requested_sessions':days,
+                 'candidate_sessions_loaded':len(dates),
+                 'validated_sessions':len(daily),
+                 'history_start':dates[0] if dates else None,
+                 'history_end':dates[-1] if dates else None,
+                 'unknown_regime_days':len([x for x in daily if x.get('market_regime')=='UNKNOWN']),
                  'avg_universe':mean([x['universe'] for x in daily]),
                  'created_at':datetime.now(timezone.utc).isoformat(),
                  'note':'OPEN_V0 uses previous completed daily bars plus the current-day opening print only. Current-day high/low/close/volume are evaluation-only. Inverse ETF score direction and benchmark are both adjusted.'}
@@ -381,16 +423,19 @@ class HistoricalValidator:
             semi_regime_summary[rg]=summarize_slice([r for r in all_rows if r.get('semi_regime')==rg])
         summary['semi_regime_summary']=semi_regime_summary
 
-        dates=sorted({r['trade_date'] for r in all_rows})
-        blocks=[
-            ('RECENT_20',dates[-20:]),
-            ('PRIOR_20',dates[-40:-20]),
-            ('OLDER_20',dates[-60:-40]),
-        ]
+        dates_used=sorted({r['trade_date'] for r in all_rows})
         time_windows=[]
-        for label,ds in blocks:
+        max_blocks=min(6,(len(dates_used)+19)//20)
+        for block in range(max_blocks):
+            end_idx=len(dates_used)-block*20
+            start_idx=max(0,end_idx-20)
+            ds=dates_used[start_idx:end_idx]
             if not ds:
                 continue
+            if block==0:
+                label='RECENT_20'
+            else:
+                label=f'{block*20+1}_{(block+1)*20}_DAYS_AGO'
             ds_set=set(ds)
             x=summarize_slice([r for r in all_rows if r['trade_date'] in ds_set])
             x.update({'window':label,'start_date':ds[0],'end_date':ds[-1]})

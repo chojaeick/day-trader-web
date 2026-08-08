@@ -23,10 +23,10 @@ st.markdown('''<style>
 [data-testid="stMetricValue"]{font-size:1.85rem}
 </style>''',unsafe_allow_html=True)
 
-def api(path):
+def api(path, timeout=8):
     if not API_URL: return None
     try:
-        r=requests.get(API_URL+path,timeout=8); r.raise_for_status(); return r.json()
+        r=requests.get(API_URL+path,timeout=timeout); r.raise_for_status(); return r.json()
     except Exception as e:
         st.sidebar.warning(f'LIVE API 연결 대기: {e}'); return None
 
@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.4.3') if live else '1.4.3'
+version=(health or {}).get('version','1.5A') if live else '1.5A'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -191,4 +191,48 @@ if selected:
         bars=demo_bars(selected); sig=intraday_signal(selected,bars,market_bias=.7,sector_bias=.6,cfg=cfg)
         st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
 
-st.caption('V1.4.3: 자동 Universe 품질 게이트 + ±30% EXTREME 분리 + ETF/레버리지 구분 + 최종 TOP10 유동성/추격위험 강화.')
+
+if live:
+    st.divider()
+    st.subheader('Historical Validation Lab · OPEN_V0')
+    st.caption('과거 각 거래일의 전일까지 데이터 + 당일 시가만으로 순위를 만든 뒤 장마감 결과와 비교합니다. 당일 고가·저가·종가·거래량은 예측 점수에 사용하지 않습니다.')
+    vc1,vc2,vc3=st.columns([1,1,2])
+    with vc1: vdays=st.selectbox('검증 거래일',[20,40,60,90,120],index=2)
+    with vc2: vsymbols=st.selectbox('검증 종목 수',[12,16,20,24,28,32],index=2)
+    with vc3:
+        st.write(''); st.write('')
+        run_v=st.button('과거 시뮬레이션 실행',type='primary')
+
+    if run_v:
+        with st.spinner('키움 과거 일봉 조회 및 OPEN_V0 순위 검증 중...'):
+            vr=api(f'/api/validation/run?days={vdays}&max_symbols={vsymbols}',timeout=240) or {}
+        if vr.get('summary'): st.session_state['validation_result']=vr
+
+    vr=st.session_state.get('validation_result')
+    if not vr:
+        runs=(api('/api/validation/runs?limit=1') or {}).get('data',[])
+        if runs: vr=api(f"/api/validation/result/{runs[0]['id']}",timeout=20)
+
+    if vr and vr.get('summary'):
+        sm=vr['summary']; rho=sm.get('mean_spearman')
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric('검증일수',sm.get('days_validated','-'))
+        c2.metric('평균 Rank Corr','-' if rho is None else f"{float(rho):+.3f}")
+        c3.metric('TOP5 시장초과',f"{float(sm.get('top5_excess_avg') or 0):+.2f}%")
+        c4.metric('TOP5 초과수익 적중',f"{float(sm.get('top5_positive_excess_rate') or 0):.1f}%")
+        st.caption(sm.get('note',''))
+
+        daily=pd.DataFrame(vr.get('daily') or [])
+        if not daily.empty:
+            st.caption('최근 20 거래일 검증 결과')
+            st.dataframe(daily.tail(20),use_container_width=True,hide_index=True)
+
+        rowsv=pd.DataFrame(vr.get('rows') or [])
+        if not rowsv.empty:
+            last=sorted(rowsv['trade_date'].dropna().unique())[-1]
+            st.caption(f'{last} 예상순위 vs 실제 시장초과수익 순위')
+            rr=rowsv[rowsv['trade_date']==last]
+            cols=['pred_rank','actual_rank','symbol','score','gap_pct','open_to_close_pct','mfe_pct','mae_pct','excess_pct']
+            st.dataframe(rr[[c for c in cols if c in rr.columns]].head(15),use_container_width=True,hide_index=True)
+
+st.caption('V1.5A: Historical Validation Lab · OPEN_V0. 과거 시가 기준 순위와 장마감 성과를 비교하며 실제 가중치는 자동 변경하지 않습니다.')

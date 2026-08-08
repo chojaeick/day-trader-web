@@ -5,13 +5,14 @@ from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from .config import Settings
+from .config import Settings, FALLBACK_UNIVERSE, _symbols
 from .db import DB
 from .kiwoom import KiwoomClient
 from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, context_for
+from .validation import HistoricalValidator
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
-s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); tasks=[]
+s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); tasks=[]
 
 async def checkpoint_forever():
     done=set()
@@ -42,13 +43,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.4.3',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.5A',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.4.3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.5A','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -90,3 +91,23 @@ def raw(limit:int=20): return db.raw(min(limit,100))
 @app.get('/api/universe')
 def universe():
     return k.discovery
+
+
+@app.get('/api/validation/runs')
+def validation_runs(limit:int=Query(20,ge=1,le=100)):
+    return {'data':validator.store.runs(limit)}
+
+@app.get('/api/validation/result/{run_id}')
+def validation_result(run_id:int):
+    x=validator.store.result(run_id)
+    if not x: raise HTTPException(404,'validation run not found')
+    return x
+
+@app.get('/api/validation/run')
+def validation_run(days:int=Query(60,ge=20,le=120), max_symbols:int=Query(20,ge=8,le=32)):
+    base=_symbols(FALLBACK_UNIVERSE)
+    ordered=[]
+    for sym in ['QQQ','SMH']+base:
+        if sym not in ordered: ordered.append(sym)
+    research=[x for x in ordered if x not in ('QQQ','SMH')][:max_symbols]
+    return validator.run(['QQQ','SMH']+research,days)

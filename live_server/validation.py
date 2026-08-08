@@ -184,7 +184,9 @@ class HistoricalValidator:
         self.store=ValidationStore(live_db_path)
 
     def daily_history(self,symbol,exchange,calendar_days=420,max_pages=10):
-        start=(datetime.now(timezone.utc)-timedelta(days=calendar_days)).strftime('%Y%m%d')
+        # usa06012 returns history backward from strt_dt. To obtain the latest history,
+        # anchor strt_dt at today and follow continuation pages backward.
+        start=datetime.now(timezone.utc).strftime('%Y%m%d')
         candidates=[]
         for ex in [exchange,'ND','NY','NA']:
             ex='NA' if ex=='AM' else ex
@@ -257,7 +259,11 @@ class HistoricalValidator:
             ex=self.k.active_exchange(sym)
             rows,used_ex,err,raw_rows,pages=self.daily_history(sym,ex,calendar_days,max_pages=10)
             hist[sym]=rows; exchanges[sym]=used_ex
-            load_meta[sym]={'usable_rows':len(rows),'raw_rows':raw_rows,'pages':pages,'exchange':used_ex}
+            load_meta[sym]={
+                'usable_rows':len(rows),'raw_rows':raw_rows,'pages':pages,'exchange':used_ex,
+                'first_date':rows[0]['date'] if rows else None,
+                'last_date':rows[-1]['date'] if rows else None
+            }
             if not rows: failures[sym]=err
             time.sleep(.12)
 
@@ -385,7 +391,7 @@ class HistoricalValidator:
                  'unknown_regime_days':len([x for x in daily if x.get('market_regime')=='UNKNOWN']),
                  'avg_universe':mean([x['universe'] for x in daily]),
                  'created_at':datetime.now(timezone.utc).isoformat(),
-                 'note':'OPEN_V0 uses previous completed daily bars plus the current-day opening print only. Current-day high/low/close/volume are evaluation-only. Inverse ETF score direction and benchmark are both adjusted.'}
+                 'note':'OPEN_V0 uses previous completed daily bars plus the current-day opening print only. Current-day high/low/close/volume are evaluation-only. Inverse ETF score direction and benchmark are both adjusted. Historical data is anchored at the latest date and paginated backward.'}
 
         # Aggregate group performance and component diagnostics.
         group_summary={}

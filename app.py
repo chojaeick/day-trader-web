@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.5B.1') if live else '1.5B.1'
+version=(health or {}).get('version','1.5B.2') if live else '1.5B.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -253,7 +253,8 @@ if live:
                 lm=[]
                 for sym,x in (sm.get('load_meta') or {}).items():
                     lm.append({'종목':sym,'거래소':x.get('exchange'),'페이지':x.get('pages'),
-                               '원시행':x.get('raw_rows'),'사용가능 일봉':x.get('usable_rows')})
+                               '원시행':x.get('raw_rows'),'사용가능 일봉':x.get('usable_rows'),
+                               '첫 일자':x.get('first_date'),'마지막 일자':x.get('last_date')})
                 st.dataframe(pd.DataFrame(lm),use_container_width=True,hide_index=True)
 
         if sm.get('group_summary'):
@@ -373,4 +374,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.5B.1: usa06012 연속조회 pagination + 최신 연속 Historical Range 검증 + 20일 블록 최대 120일 안정성 분석.')
+st.caption('V1.5B.2: usa06012 최신일자 anchor + 연속조회 pagination. 최근 120거래일을 정확히 확보한 뒤 Regime/가중치 연구에 사용합니다.')

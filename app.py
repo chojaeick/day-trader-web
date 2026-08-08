@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.4.1') if live else '1.4.1'
+version=(health or {}).get('version','1.4.2') if live else '1.4.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -72,11 +72,14 @@ if live:
             if drows:
                 udf=pd.DataFrame(drows)
                 keep=['origin','symbol','name','exchange','price','change_pct',
-                      'volume_rank','dollar_rank','discovery_score','chase_risk']
+                      'volume_rank','dollar_rank','gainer_rank','loser_rank','surge_rank',
+                      'surge_pct','discovery_score','chase_risk','sources']
                 udf=udf[[c for c in keep if c in udf.columns]].rename(columns={
                     'origin':'구분','symbol':'종목','name':'이름','exchange':'거래소',
                     'price':'현재가','change_pct':'당일%','volume_rank':'거래량순위',
-                    'dollar_rank':'거래대금순위','discovery_score':'발굴점수','chase_risk':'추격위험'
+                    'dollar_rank':'거래대금순위','gainer_rank':'상승률순위','loser_rank':'하락률순위',
+                    'surge_rank':'거래량급증순위','surge_pct':'급증률','discovery_score':'발굴점수',
+                    'chase_risk':'추격위험','sources':'발굴근거'
                 })
                 st.dataframe(udf,use_container_width=True,hide_index=True)
 st.subheader('오늘의 단타 후보 TOP 10')
@@ -176,4 +179,4 @@ if selected:
         bars=demo_bars(selected); sig=intraday_signal(selected,bars,market_bias=.7,sector_bias=.6,cfg=cfg)
         st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
 
-st.caption('V1.4.1: 미국장 ALL/NYSE/NASDAQ/AMEX 자동 발굴 확대 → 약 30~40개 Universe → CORE/AUTO 구분 → 추격위험 표시 → 정밀 TOP10.')
+st.caption('V1.4.2: 거래량·거래대금 + 상승률·하락률 + 거래량급증을 통합 발굴 → 30~50개 후보 → 추격위험 → 정밀 TOP10.')

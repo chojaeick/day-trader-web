@@ -18,52 +18,111 @@ class DiscoveryResult:
     updated_at: str
 
 def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str],
-                   limit:int=35, min_price:float=5.0, min_dollar:float=20_000_000) -> DiscoveryResult:
+                   limit:int=40, min_price:float=5.0, min_dollar:float=5_000_000,
+                   gainers:list[dict]|None=None, losers:list[dict]|None=None,
+                   volume_surge:list[dict]|None=None) -> DiscoveryResult:
     merged={}
+    source_weights={
+        'volume': 1.0,
+        'dollar': 1.2,
+        'gainer': 0.9,
+        'loser': 0.9,
+        'surge': 1.15,
+    }
+
     def ingest(rows, source):
-        for pos,x in enumerate(rows,1):
+        for pos,x in enumerate(rows or [],1):
             sym=str(x.get('stk_cd') or '').strip().upper()
-            if not sym or len(sym)>12: continue
-            price=abs(num(x.get('cur_prc'))); dollar=abs(num(x.get('trde_prica')))
-            volume=abs(num(x.get('acc_trde_qty'))); chg=num(x.get('flu_rt'))
-            if price < min_price: continue
+            if not sym or len(sym)>12:
+                continue
+            price=abs(num(x.get('cur_prc')))
+            dollar=abs(num(x.get('trde_prica')))
+            volume=abs(num(x.get('acc_trde_qty') or x.get('trde_qty')))
+            chg=num(x.get('flu_rt'))
+            surge=num(x.get('sdnin_rt'))
+            if price < min_price:
+                continue
             rec=merged.setdefault(sym,{
-                'symbol':sym,'exchange':exchange_code(x.get('stex_tp')),
+                'symbol':sym,
+                'exchange':exchange_code(x.get('stex_tp')),
                 'name':x.get('stk_enm') or x.get('stk_nm') or '',
                 'price':price,'change_pct':chg,'volume':volume,'dollar_volume':dollar,
-                'volume_rank':9999,'dollar_rank':9999,'sources':set()
+                'volume_rank':9999,'dollar_rank':9999,'gainer_rank':9999,
+                'loser_rank':9999,'surge_rank':9999,'surge_pct':0.0,
+                'sources':set()
             })
-            rec['price']=price or rec['price']; rec['change_pct']=chg
-            rec['volume']=max(rec['volume'],volume); rec['dollar_volume']=max(rec['dollar_volume'],dollar)
-            rec[source+'_rank']=min(rec[source+'_rank'],pos); rec['sources'].add(source)
-    ingest(volume_rows,'volume'); ingest(dollar_rows,'dollar')
+            rec['price']=price or rec['price']
+            if chg:
+                rec['change_pct']=chg
+            rec['volume']=max(rec['volume'],volume)
+            rec['dollar_volume']=max(rec['dollar_volume'],dollar)
+            if surge:
+                rec['surge_pct']=surge
+            rec[source+'_rank']=min(rec.get(source+'_rank',9999),pos)
+            rec['sources'].add(source)
+
+    ingest(volume_rows,'volume')
+    ingest(dollar_rows,'dollar')
+    ingest(gainers or [],'gainer')
+    ingest(losers or [],'loser')
+    ingest(volume_surge or [],'surge')
+
     for rec in merged.values():
-        vr=rec['volume_rank'] if rec['volume_rank']<9999 else 100
-        dr=rec['dollar_rank'] if rec['dollar_rank']<9999 else 100
-        rank_score=max(0,60-vr*0.35-dr*0.35)
-        momentum=min(20,abs(rec['change_pct'])*2)
-        liq=min(20,rec['dollar_volume']/100_000_000*4)
+        source_score=0.0
+        for source,weight in source_weights.items():
+            rank=rec.get(source+'_rank',9999)
+            if rank < 9999:
+                source_score += max(0, 24-rank*0.55)*weight
+
+        # Strong dollar liquidity still matters most, but don't require it at the
+        # discovery stage because change-rate and surge APIs don't always return it.
+        liq=min(22,rec['dollar_volume']/100_000_000*5)
+        move=min(18,abs(rec['change_pct'])*1.5)
+        surge_bonus=min(16,max(0,rec['surge_pct'])/25) if rec['surge_pct'] else 0
+
         chase_penalty=0
-        if abs(rec['change_pct']) >= 20:
-            chase_penalty=18
+        if abs(rec['change_pct']) >= 25:
+            chase_penalty=22
+        elif abs(rec['change_pct']) >= 18:
+            chase_penalty=15
         elif abs(rec['change_pct']) >= 12:
-            chase_penalty=10
+            chase_penalty=9
         elif abs(rec['change_pct']) >= 8:
-            chase_penalty=5
-        rec['chase_risk']='HIGH' if chase_penalty>=10 else ('MEDIUM' if chase_penalty else 'NORMAL')
-        rec['discovery_score']=round(rank_score+momentum+liq-chase_penalty,1)
-    eligible=[r for r in merged.values() if r['dollar_volume']>=min_dollar or r['volume_rank']<=25]
-    eligible.sort(key=lambda r:(r['discovery_score'],r['dollar_volume']), reverse=True)
+            chase_penalty=4
+
+        rec['chase_risk']='HIGH' if chase_penalty>=15 else ('MEDIUM' if chase_penalty else 'NORMAL')
+        rec['discovery_score']=round(source_score+liq+move+surge_bonus-chase_penalty,1)
+
+    eligible=[]
+    for r in merged.values():
+        liquid = r['dollar_volume'] >= min_dollar
+        top_volume = r['volume_rank'] <= 35
+        top_dollar = r['dollar_rank'] <= 35
+        event_source = r['gainer_rank'] <= 25 or r['loser_rank'] <= 25 or r['surge_rank'] <= 25
+        if liquid or top_volume or top_dollar or event_source:
+            eligible.append(r)
+
+    eligible.sort(key=lambda r:(r['discovery_score'],r['dollar_volume'],r['volume']), reverse=True)
     picked=eligible[:limit]
+
     for sym in reversed(core):
         if sym not in [r['symbol'] for r in picked]:
-            picked.insert(0,{'symbol':sym,'exchange':'','name':'CORE','price':0,'change_pct':0,'volume':0,
-                             'dollar_volume':0,'volume_rank':9999,'dollar_rank':9999,
-                             'sources':{'core'},'discovery_score':999})
+            picked.insert(0,{
+                'symbol':sym,'exchange':'','name':'CORE','price':0,'change_pct':0,
+                'volume':0,'dollar_volume':0,'volume_rank':9999,'dollar_rank':9999,
+                'gainer_rank':9999,'loser_rank':9999,'surge_rank':9999,'surge_pct':0.0,
+                'sources':{'core'},'chase_risk':'NORMAL','discovery_score':999
+            })
+
     seen=set(); symbols=[]
     for r in picked:
         if r['symbol'] not in seen:
             symbols.append(r['symbol']); seen.add(r['symbol'])
         r['sources']=','.join(sorted(r['sources']))
         r['origin']='CORE' if r['symbol'] in core else 'AUTO'
-    return DiscoveryResult(symbols=symbols,rows=picked,updated_at=datetime.now(timezone.utc).isoformat())
+
+    return DiscoveryResult(
+        symbols=symbols,
+        rows=picked,
+        updated_at=datetime.now(timezone.utc).isoformat()
+    )

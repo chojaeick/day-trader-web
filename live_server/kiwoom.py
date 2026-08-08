@@ -105,15 +105,80 @@ class KiwoomClient:
             time.sleep(0.18)
         return combined
 
+    def ranking_change_rate(self, sort_tp: str='1') -> list[dict]:
+        """Kiwoom usa20910: 1=gainers, 4=losers."""
+        combined=[]
+        seen=set()
+        import time
+        for stex in ('0','1','2','3'):
+            body={
+                'stex_tp':stex,'inds_cd':'','inds_cls_tp':'0','sort_tp':str(sort_tp),
+                'stk_tp':'0','stk_cnd':'0','pric_cnd':'0',
+                'trde_prica_cnd':'0','trde_qty_tp':''
+            }
+            r=requests.post(
+                self.s.rest_base+'/api/us/rkinfo',
+                headers=self.headers('usa20910'),
+                json=body,timeout=20
+            )
+            d=r.json()
+            if d.get('return_code') not in (None,0):
+                log.warning('ranking usa20910/%s/%s: %s %s',
+                            sort_tp,stex,d.get('return_code'),d.get('return_msg'))
+                continue
+            for row in d.get('result_list') or []:
+                sym=str(row.get('stk_cd') or '').upper().strip()
+                if sym and sym not in seen:
+                    combined.append(row); seen.add(sym)
+            time.sleep(0.18)
+        return combined
+
+    def ranking_volume_surge(self) -> list[dict]:
+        """Kiwoom usa20520: volume surge vs 5-day average."""
+        combined=[]
+        seen=set()
+        import time
+        for stex in ('0','1','2','3'):
+            body={
+                'stex_tp':stex,'inds_cd':'','tm':'5','stk_tp':'0',
+                'stk_cnd':'0','pric_cnd':'0','trde_prica_cnd':'0','trde_qty_tp':'0'
+            }
+            r=requests.post(
+                self.s.rest_base+'/api/us/stkinfo',
+                headers=self.headers('usa20520'),
+                json=body,timeout=20
+            )
+            d=r.json()
+            if d.get('return_code') not in (None,0):
+                log.warning('ranking usa20520/%s: %s %s',
+                            stex,d.get('return_code'),d.get('return_msg'))
+                continue
+            for row in d.get('result_list') or []:
+                sym=str(row.get('stk_cd') or '').upper().strip()
+                if sym and sym not in seen:
+                    combined.append(row); seen.add(sym)
+            time.sleep(0.18)
+        return combined
+
     def discover_universe(self) -> dict:
         volume=self.ranking_today_volume('0')
         dollar=self.ranking_today_volume('1')
-        result=merge_rankings(volume,dollar,self.s.core_symbols,self.s.discovery_limit,
-                              self.s.discovery_min_price,self.s.discovery_min_dollar)
+        gainers=self.ranking_change_rate('1')
+        losers=self.ranking_change_rate('4')
+        surge=self.ranking_volume_surge()
+        result=merge_rankings(
+            volume,dollar,self.s.core_symbols,self.s.discovery_limit,
+            self.s.discovery_min_price,self.s.discovery_min_dollar,
+            gainers=gainers,losers=losers,volume_surge=surge
+        )
         exchanges={r['symbol']:r.get('exchange') for r in result.rows if r.get('exchange')}
         self.s.symbols=list(result.symbols)
-        self.discovery={'symbols':list(result.symbols),'rows':result.rows,'updated_at':result.updated_at,
-                        'count':len(result.symbols),'core':list(self.s.core_symbols),'exchanges':exchanges,'auto_count':len([x for x in result.symbols if x not in self.s.core_symbols])}
+        self.discovery={
+            'symbols':list(result.symbols),'rows':result.rows,'updated_at':result.updated_at,
+            'count':len(result.symbols),'core':list(self.s.core_symbols),'exchanges':exchanges,
+            'auto_count':len([x for x in result.symbols if x not in self.s.core_symbols]),
+            'sources':['volume','dollar','gainer','loser','surge']
+        }
         log.info('universe discovery: %s symbols',len(result.symbols))
         return self.discovery
 

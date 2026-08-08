@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 import asyncio, logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -14,6 +15,7 @@ from .archive import RankingArchive
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); tasks=[]
+manual_scan_state={'last_started_monotonic':0.0,'last_result':None}
 
 async def checkpoint_forever():
     done=set()
@@ -50,13 +52,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.7',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.7.1',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.7','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.7.1','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -131,6 +133,63 @@ def raw(limit:int=20): return db.raw(min(limit,100))
 def universe():
     return k.discovery
 
+
+
+@app.post('/api/scan/market')
+async def scan_market_now():
+    cooldown=int(getattr(s,'manual_scan_cooldown_seconds',45))
+    now=time.monotonic()
+    elapsed=now-float(manual_scan_state.get('last_started_monotonic') or 0)
+    if elapsed < cooldown:
+        return {
+            'ok':False,'cooldown':True,
+            'retry_after':round(cooldown-elapsed,1),
+            'last_result':manual_scan_state.get('last_result')
+        }
+
+    manual_scan_state['last_started_monotonic']=now
+    before_top=screener_rows(db.quotes(),db.daily_metrics(),10)
+    before_syms=[x.get('symbol') for x in before_top]
+
+    res=await k.manual_discover_now()
+
+    # Recalculate with whatever data is available after priming.
+    after_top=screener_rows(db.quotes(),db.daily_metrics(),10)
+    after_syms=[x.get('symbol') for x in after_top]
+    changed=[x for x in after_syms if x not in before_syms]
+
+    ny=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+    label='MANUAL_SCAN_'+ny.strftime('%H%M')
+    captured=datetime.now(timezone.utc).isoformat()
+    qmap={q.get('symbol'):q for q in db.quotes()}
+    if after_top:
+        archive.save(
+            ny.strftime('%Y-%m-%d'),label,'CURRENT',after_top,captured,
+            float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+            float((qmap.get('SMH') or {}).get('change_pct') or 0)
+        )
+
+    out={
+        **res,
+        'cooldown_seconds':cooldown,
+        'archive_label':label,
+        'top10_before':before_syms,
+        'top10_after':after_syms,
+        'top10_new':changed
+    }
+    manual_scan_state['last_result']=out
+    return out
+
+@app.get('/api/scan/status')
+def scan_status():
+    cooldown=int(getattr(s,'manual_scan_cooldown_seconds',45))
+    elapsed=time.monotonic()-float(manual_scan_state.get('last_started_monotonic') or 0)
+    return {
+        'cooldown_seconds':cooldown,
+        'retry_after':max(0,round(cooldown-elapsed,1)),
+        'last_result':manual_scan_state.get('last_result'),
+        'last_manual_scan_at':getattr(k,'last_manual_scan_at',None)
+    }
 
 @app.get('/api/validation/runs')
 def validation_runs(limit:int=Query(20,ge=1,le=100)):

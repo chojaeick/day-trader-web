@@ -12,6 +12,16 @@ try: API_URL=st.secrets.get('DAYTRADER_API_URL','')
 except Exception: API_URL=os.getenv('DAYTRADER_API_URL','')
 API_URL=str(API_URL).rstrip('/')
 
+
+def api_post(path):
+    try:
+        r=requests.post(API+path,timeout=180)
+        if r.status_code>=400:
+            return {'ok':False,'error':r.text,'status_code':r.status_code}
+        return r.json()
+    except Exception as e:
+        return {'ok':False,'error':str(e)}
+
 st.set_page_config(page_title='DAY TRADER WEB',page_icon='📈',layout='wide',initial_sidebar_state='collapsed')
 st.markdown('''<style>
 .block-container{padding-top:1rem;max-width:1550px}
@@ -47,7 +57,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.7') if live else '1.7'
+version=(health or {}).get('version','1.7.1') if live else '1.7.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 st.caption('V1.7 · Trading / Research / Archive / Live Validation 분리를 위한 UI 개편 시작 · 이번 버전은 Daily Ranking Archive를 우선 적용')
@@ -105,6 +115,41 @@ if live:
                     'price':'현재가','change_pct':'당일%','volume':'거래량','sources':'발굴근거','chase_risk':'추격위험'
                 })
                 st.dataframe(ex,use_container_width=True,hide_index=True)
+
+    scan_status=api('/api/scan/status') or {}
+    sc1,sc2,sc3=st.columns([1.1,1.2,3.7])
+    with sc1:
+        if st.button('↻ 점수 새로고침',use_container_width=True,key='score_refresh'):
+            st.rerun()
+    with sc2:
+        if st.button('🔍 시장 재검색',use_container_width=True,key='market_rescan'):
+            with st.spinner('시장 랭킹 재조회 → Universe 재구성 → 신규 종목 데이터 준비 중...'):
+                res=api_post('/api/scan/market') or {}
+            if res.get('ok'):
+                added=res.get('added') or []
+                removed=res.get('removed') or []
+                newtop=res.get('top10_new') or []
+                st.success(
+                    f"시장 재검색 완료 · Universe {res.get('before_count')} → {res.get('after_count')} "
+                    f"· 신규 {len(added)} · 제외 {len(removed)} · TOP10 신규 {len(newtop)}"
+                )
+                if added:
+                    st.caption('신규 후보: '+', '.join(added[:15]))
+                if newtop:
+                    st.caption('새 TOP10 진입: '+', '.join(newtop))
+                st.rerun()
+            elif res.get('cooldown'):
+                st.warning(f"재검색 쿨다운 중입니다. 약 {res.get('retry_after')}초 후 다시 눌러주세요.")
+            else:
+                st.error('시장 재검색 실패: '+str(res.get('error') or res))
+    with sc3:
+        lr=(scan_status.get('last_result') or {})
+        if lr:
+            st.caption(
+                f"마지막 수동검색: {lr.get('finished_at','-')} · "
+                f"Universe {lr.get('before_count','-')}→{lr.get('after_count','-')} · "
+                f"Archive {lr.get('archive_label','-')}"
+            )
 st.subheader('오늘의 단타 후보 TOP 10')
 if live:
     payload=api('/api/screener?top_n=10') or {'data':[]}; rows=payload.get('data',[])
@@ -568,4 +613,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.7: Daily Ranking Archive + CLOSE 자동저장 + 일자/시점별 순위 조회. 다음 단계에서 Trading/Research/Archive/Live Validation 탭을 완전 분리합니다.')
+st.caption('V1.7.1: 즉시 시장 재검색 + 점수 새로고침 + 수동검색 Archive 저장. 운영 점수와 자동주문은 변경하지 않습니다.')

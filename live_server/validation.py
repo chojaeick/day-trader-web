@@ -2,11 +2,12 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from statistics import mean
 from pathlib import Path
-import json, sqlite3
+import json, sqlite3, time
 import pandas as pd
 import requests
 
 SEMI={'SOXL','SOXS','SMH','NVDA','AMD','AVGO','MU','ARM','TSM','ASML','INTC','QCOM'}
+INVERSE={'SOXS':'SMH','SQQQ':'QQQ'}
 
 def num(v, default=0.0):
     try: return float(str(v).replace(',','').strip())
@@ -114,31 +115,52 @@ class HistoricalValidator:
 
     def daily_history(self,symbol,exchange,calendar_days=260):
         start=(datetime.now(timezone.utc)-timedelta(days=calendar_days)).strftime('%Y%m%d')
-        r=requests.post(self.k.s.rest_base+'/api/us/chart',headers=self.k.headers('usa06012'),json={
-            'stex_tp':exchange,'stk_cd':symbol,'strt_dt':start,
-            'upd_stkpc_tp':'1','exrt_appl_tp':'0'
-        },timeout=25)
-        d=r.json()
-        if d.get('return_code')!=0:
-            raise RuntimeError(f"daily {symbol}/{exchange}: {d.get('return_code')} {d.get('return_msg')}")
-        rows=[]
-        for x in d.get('result_list') or []:
-            dt=str(x.get('dt') or '')
-            op=abs(num(x.get('open_pric'))); close=abs(num(x.get('cur_prc')))
-            hi=abs(num(x.get('high_pric'))); lo=abs(num(x.get('low_pric')))
-            vol=abs(num(x.get('acc_trde_qty')))
-            if len(dt)>=8 and op>0 and close>0:
-                rows.append({'date':dt[:8],'open':op,'high':hi or max(op,close),
-                             'low':lo or min(op,close),'close':close,'volume':vol})
-        by={r['date']:r for r in rows}
-        return [by[d] for d in sorted(by)]
+        # Official chart API uses NY / ND / NA. Retry alternate exchanges and transient API failures.
+        candidates=[]
+        for ex in [exchange,'ND','NY','NA']:
+            ex='NA' if ex=='AM' else ex
+            if ex and ex not in candidates: candidates.append(ex)
+
+        last_error=''
+        for ex in candidates:
+            for attempt in range(3):
+                try:
+                    r=requests.post(self.k.s.rest_base+'/api/us/chart',headers=self.k.headers('usa06012'),json={
+                        'stex_tp':ex,'stk_cd':symbol,'strt_dt':start,
+                        'upd_stkpc_tp':'1','exrt_appl_tp':'0'
+                    },timeout=30)
+                    d=r.json()
+                    if d.get('return_code')!=0:
+                        last_error=f"{d.get('return_code')} {d.get('return_msg')}"
+                        time.sleep(.35*(attempt+1))
+                        continue
+                    rows=[]
+                    for x in d.get('result_list') or []:
+                        dt=str(x.get('dt') or '')
+                        op=abs(num(x.get('open_pric'))); close=abs(num(x.get('cur_prc')))
+                        hi=abs(num(x.get('high_pric'))); lo=abs(num(x.get('low_pric')))
+                        vol=abs(num(x.get('acc_trde_qty')))
+                        if len(dt)>=8 and op>0 and close>0:
+                            rows.append({'date':dt[:8],'open':op,'high':hi or max(op,close),
+                                         'low':lo or min(op,close),'close':close,'volume':vol})
+                    by={r['date']:r for r in rows}
+                    out=[by[d] for d in sorted(by)]
+                    if len(out)>=10:
+                        return out,ex,''
+                    last_error=f"only {len(out)} usable rows"
+                except Exception as e:
+                    last_error=str(e)
+                time.sleep(.35*(attempt+1))
+        return [],exchange,last_error or 'no usable history'
 
     def run(self,symbols,days=60):
-        hist={}; exchanges={}
+        hist={}; exchanges={}; failures={}
         for sym in symbols:
-            ex=self.k.active_exchange(sym); exchanges[sym]=ex
-            try: hist[sym]=self.daily_history(sym,ex,max(220,int(days*3.0)))
-            except Exception: hist[sym]=[]
+            ex=self.k.active_exchange(sym)
+            rows,used_ex,err=self.daily_history(sym,ex,max(220,int(days*3.0)))
+            hist[sym]=rows; exchanges[sym]=used_ex
+            if not rows: failures[sym]=err
+            time.sleep(.12)
 
         qrows=hist.get('QQQ',[])
         if len(qrows)<10: raise RuntimeError('QQQ historical data unavailable')
@@ -174,7 +196,10 @@ class HistoricalValidator:
                 ret=(cur['close']/cur['open']-1)*100
                 mfe=(cur['high']/cur['open']-1)*100
                 mae=(cur['low']/cur['open']-1)*100
-                bench=sret if sym in SEMI and si is not None else qret
+                if sym in INVERSE:
+                    bench=-(sret if INVERSE[sym]=='SMH' and si is not None else qret)
+                else:
+                    bench=sret if sym in SEMI and si is not None else qret
                 rows.append({'trade_date':day,'symbol':sym,'exchange':exchanges.get(sym,''),
                              'model':'OPEN_V0','score':f['score'],'gap_pct':gap,
                              'ma5':f['ma5'],'ma5_slope_pct':f['ma5_slope_pct'],
@@ -194,10 +219,14 @@ class HistoricalValidator:
             rho=pred.corr(act,method='pearson')
             rho=None if pd.isna(rho) else float(rho)
             top5=rows[:5]
+            actual_top5={r['symbol'] for r in actual[:5]}
+            pred_top5={r['symbol'] for r in top5}
+            precision5=len(actual_top5 & pred_top5)/max(1,len(pred_top5))*100
             daily.append({'trade_date':day,'spearman':rho,
                           'top5_excess_avg':mean([r['excess_pct'] for r in top5]),
                           'top5_close_avg':mean([r['open_to_close_pct'] for r in top5]),
                           'top5_positive_excess_rate':mean([1 if r['excess_pct']>0 else 0 for r in top5])*100,
+                          'precision_at_5':precision5,
                           'universe':len(rows),'qqq_return':qret,'smh_return':sret})
             all_rows.extend(rows)
 
@@ -209,8 +238,85 @@ class HistoricalValidator:
                  'top5_excess_avg':mean([x['top5_excess_avg'] for x in daily]),
                  'top5_close_avg':mean([x['top5_close_avg'] for x in daily]),
                  'top5_positive_excess_rate':mean([x['top5_positive_excess_rate'] for x in daily]),
+                 'precision_at_5':mean([x['precision_at_5'] for x in daily]),
+                 'symbols_loaded':len([x for x in hist if hist[x]]),
+                 'symbols_failed':len(failures),
+                 'failed_symbols':failures,
+                 'avg_universe':mean([x['universe'] for x in daily]),
                  'created_at':datetime.now(timezone.utc).isoformat(),
-                 'note':'OPEN_V0 uses previous completed daily bars plus the current-day opening print only. Current-day high/low/close/volume are evaluation-only.'}
+                 'note':'OPEN_V0 uses previous completed daily bars plus the current-day opening print only. Current-day high/low/close/volume are evaluation-only. Inverse ETF benchmarks are direction-adjusted.'}
         result={'summary':summary,'daily':daily,'rows':all_rows}
         summary['run_id']=self.store.save(result)
         return result
+
+
+class LiveTop10Validator:
+    """Evaluates saved live ranking snapshots against subsequent tick data."""
+    def __init__(self,live_db_path:str):
+        self.path=live_db_path
+
+    def evaluate(self,trade_date:str|None=None):
+        from zoneinfo import ZoneInfo
+        et=ZoneInfo('America/New_York')
+        with sqlite3.connect(self.path) as c:
+            c.row_factory=sqlite3.Row
+            if not trade_date:
+                r=c.execute('SELECT MAX(trade_date) d FROM ranking_snapshots').fetchone()
+                trade_date=r['d'] if r else None
+            if not trade_date:
+                return {'trade_date':None,'snapshots':[]}
+            snaps=[dict(r) for r in c.execute(
+                'SELECT * FROM ranking_snapshots WHERE trade_date=? ORDER BY captured_at,rank',(trade_date,)).fetchall()]
+            if not snaps:
+                return {'trade_date':trade_date,'snapshots':[]}
+
+            groups={}
+            for s in snaps: groups.setdefault(s['label'],[]).append(s)
+            out=[]
+            for label,rows in groups.items():
+                evaluated=[]
+                for s in rows:
+                    try:
+                        t0=pd.Timestamp(s['captured_at'])
+                        if t0.tzinfo is None: t0=t0.tz_localize('UTC')
+                        else: t0=t0.tz_convert('UTC')
+                    except Exception:
+                        continue
+                    ticks=[dict(r) for r in c.execute(
+                        'SELECT price,ts FROM ticks WHERE symbol=? AND ts>=? ORDER BY ts',
+                        (s['symbol'],t0.isoformat())).fetchall()]
+                    pts=[]
+                    for x in ticks:
+                        try:
+                            ts=pd.Timestamp(x['ts'])
+                            if ts.tzinfo is None: ts=ts.tz_localize('UTC')
+                            else: ts=ts.tz_convert('UTC')
+                            if ts.tz_convert(et).strftime('%Y-%m-%d')==trade_date:
+                                pts.append((ts,float(x['price'])))
+                        except Exception:
+                            pass
+                    if not pts: continue
+                    p0=float(s['price'] or pts[0][1])
+                    def horizon(minutes):
+                        target=t0+pd.Timedelta(minutes=minutes)
+                        vals=[p for ts,p in pts if ts>=target]
+                        return vals[0] if vals else None
+                    p30=horizon(30); p60=horizon(60); pcl=pts[-1][1]
+                    prices=[p for _,p in pts]
+                    evaluated.append({
+                        'rank':s['rank'],'symbol':s['symbol'],'score':s['score'],'price0':p0,
+                        'ret_30m':None if p30 is None else (p30/p0-1)*100,
+                        'ret_60m':None if p60 is None else (p60/p0-1)*100,
+                        'ret_to_last':(pcl/p0-1)*100,
+                        'mfe_to_last':(max(prices)/p0-1)*100,
+                        'mae_to_last':(min(prices)/p0-1)*100
+                    })
+                if evaluated:
+                    out.append({
+                        'label':label,'captured':len(rows),'evaluated':len(evaluated),
+                        'top5_30m':mean([x['ret_30m'] for x in evaluated[:5] if x['ret_30m'] is not None]) if any(x['ret_30m'] is not None for x in evaluated[:5]) else None,
+                        'top5_60m':mean([x['ret_60m'] for x in evaluated[:5] if x['ret_60m'] is not None]) if any(x['ret_60m'] is not None for x in evaluated[:5]) else None,
+                        'top5_to_last':mean([x['ret_to_last'] for x in evaluated[:5]]),
+                        'rows':evaluated
+                    })
+            return {'trade_date':trade_date,'snapshots':out}

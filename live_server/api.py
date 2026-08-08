@@ -9,17 +9,17 @@ from .config import Settings, FALLBACK_UNIVERSE, _symbols
 from .db import DB
 from .kiwoom import KiwoomClient
 from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, context_for
-from .validation import HistoricalValidator
+from .validation import HistoricalValidator, LiveTop10Validator
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
-s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); tasks=[]
+s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); tasks=[]
 
 async def checkpoint_forever():
     done=set()
     while True:
         now=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
         day=now.strftime('%Y-%m-%d'); minute=now.hour*60+now.minute
-        targets={'T-10':9*60+20,'T-1':9*60+29,'T+7':9*60+37}
+        targets={'T-10':9*60+20,'T-1':9*60+29,'T+7':9*60+37,'T+30':10*60,'T+60':10*60+30}
         for label,target in targets.items():
             key=(day,label)
             if key not in done and target<=minute<=target+1 and now.weekday()<5:
@@ -43,13 +43,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.5A',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.5A.1',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.5A','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.5A.1','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -111,3 +111,8 @@ def validation_run(days:int=Query(60,ge=20,le=120), max_symbols:int=Query(20,ge=
         if sym not in ordered: ordered.append(sym)
     research=[x for x in ordered if x not in ('QQQ','SMH')][:max_symbols]
     return validator.run(['QQQ','SMH']+research,days)
+
+
+@app.get('/api/validation/live')
+def validation_live(trade_date:str|None=None):
+    return live_validator.evaluate(trade_date)

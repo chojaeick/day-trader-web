@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.5A') if live else '1.5A'
+version=(health or {}).get('version','1.5A.1') if live else '1.5A.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -71,6 +71,18 @@ if live:
             drows=uni.get('rows') or []
             if drows:
                 udf=pd.DataFrame(drows)
+                # CORE rows are discovery placeholders; overlay current live quote values for display.
+                try:
+                    qdf=pd.DataFrame(api('/api/quotes') or [])
+                    if not qdf.empty and 'symbol' in qdf.columns:
+                        qmap=qdf.set_index('symbol').to_dict('index')
+                        for idx,row in udf.iterrows():
+                            if row.get('origin')=='CORE' and row.get('symbol') in qmap:
+                                qv=qmap[row.get('symbol')]
+                                udf.at[idx,'price']=qv.get('price',row.get('price'))
+                                udf.at[idx,'change_pct']=qv.get('change_pct',row.get('change_pct'))
+                except Exception:
+                    pass
                 keep=['origin','symbol','name','asset_type','exchange','price','change_pct',
                       'volume_rank','dollar_rank','gainer_rank','loser_rank','surge_rank',
                       'surge_pct','discovery_score','chase_risk','sources']
@@ -78,7 +90,7 @@ if live:
                     'origin':'구분','symbol':'종목','name':'이름','asset_type':'유형','exchange':'거래소',
                     'price':'현재가','change_pct':'당일%','volume_rank':'거래량순위',
                     'dollar_rank':'거래대금순위','gainer_rank':'상승률순위','loser_rank':'하락률순위',
-                    'surge_rank':'거래량급증순위','surge_pct':'급증률','discovery_score':'발굴점수',
+                    'surge_rank':'거래량급증순위','surge_pct':'급증률','discovery_score':'Discovery Score',
                     'chase_risk':'추격위험','sources':'발굴근거'
                 })
                 st.dataframe(udf,use_container_width=True,hide_index=True)
@@ -97,7 +109,7 @@ if live:
     if rows:
         show=pd.DataFrame(rows); show.insert(0,'순위',range(1,len(show)+1))
         cols=['순위','symbol','score','bias','price','change_pct','ma5','ma5_slope_pct','rvol','atr_pct','dollar_volume','exchange']
-        show=show[[c for c in cols if c in show.columns]].rename(columns={'symbol':'종목','score':'점수','bias':'방향','price':'현재가','change_pct':'당일%','ma5':'MA5','ma5_slope_pct':'MA5기울기%','rvol':'RVOL','atr_pct':'ATR%','dollar_volume':'거래대금','exchange':'거래소'})
+        show=show[[c for c in cols if c in show.columns]].rename(columns={'symbol':'종목','score':'Trading Score','bias':'방향','price':'현재가','change_pct':'당일%','ma5':'MA5','ma5_slope_pct':'MA5기울기%','rvol':'RVOL','atr_pct':'ATR%','dollar_volume':'거래대금','exchange':'거래소'})
         for c in ['현재가','MA5','MA5기울기%','RVOL','ATR%','당일%']:
             if c in show.columns: show[c]=pd.to_numeric(show[c],errors='coerce').round(2)
         if '거래대금' in show.columns: show['거래대금']=pd.to_numeric(show['거래대금'],errors='coerce').round(0)
@@ -220,6 +232,14 @@ if live:
         c2.metric('평균 Rank Corr','-' if rho is None else f"{float(rho):+.3f}")
         c3.metric('TOP5 시장초과',f"{float(sm.get('top5_excess_avg') or 0):+.2f}%")
         c4.metric('TOP5 초과수익 적중',f"{float(sm.get('top5_positive_excess_rate') or 0):.1f}%")
+        q1,q2,q3,q4=st.columns(4)
+        q1.metric('과거데이터 성공',sm.get('symbols_loaded','-'))
+        q2.metric('과거데이터 실패',sm.get('symbols_failed','-'))
+        q3.metric('평균 Universe',f"{float(sm.get('avg_universe') or 0):.1f}")
+        q4.metric('Precision@5',f"{float(sm.get('precision_at_5') or 0):.1f}%")
+        if sm.get('failed_symbols'):
+            with st.expander('과거데이터 조회 실패 종목/원인',expanded=False):
+                st.json(sm.get('failed_symbols'))
         st.caption(sm.get('note',''))
 
         daily=pd.DataFrame(vr.get('daily') or [])
@@ -235,4 +255,32 @@ if live:
             cols=['pred_rank','actual_rank','symbol','score','gap_pct','open_to_close_pct','mfe_pct','mae_pct','excess_pct']
             st.dataframe(rr[[c for c in cols if c in rr.columns]].head(15),use_container_width=True,hide_index=True)
 
-st.caption('V1.5A: Historical Validation Lab · OPEN_V0. 과거 시가 기준 순위와 장마감 성과를 비교하며 실제 가중치는 자동 변경하지 않습니다.')
+
+if live:
+    st.divider()
+    st.subheader('Live TOP10 Validation')
+    st.caption('메인 TOP10 스냅샷(T-10 / T-1 / T+7 / T+30 / T+60)을 저장하고 이후 +30분, +60분, 현재/마감까지의 성과를 비교합니다.')
+    lv=api('/api/validation/live',timeout=20) or {}
+    if lv.get('snapshots'):
+        summary_rows=[]
+        for x in lv['snapshots']:
+            summary_rows.append({
+                '시점':x.get('label'),'저장종목':x.get('captured'),'평가종목':x.get('evaluated'),
+                'TOP5 +30m%':x.get('top5_30m'),'TOP5 +60m%':x.get('top5_60m'),
+                'TOP5 현재/마감%':x.get('top5_to_last')
+            })
+        sdf=pd.DataFrame(summary_rows)
+        for c in ['TOP5 +30m%','TOP5 +60m%','TOP5 현재/마감%']:
+            if c in sdf.columns: sdf[c]=pd.to_numeric(sdf[c],errors='coerce').round(3)
+        st.dataframe(sdf,use_container_width=True,hide_index=True)
+        with st.expander('Live TOP10 종목별 검증 상세',expanded=False):
+            detail=[]
+            for x in lv['snapshots']:
+                for r in x.get('rows') or []:
+                    detail.append({'시점':x.get('label'),**r})
+            if detail:
+                st.dataframe(pd.DataFrame(detail),use_container_width=True,hide_index=True)
+    else:
+        st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
+
+st.caption('V1.5A.1: Historical 데이터 품질/Inverse benchmark 보정 + Precision@5 + Live TOP10 Snapshot Validation.')

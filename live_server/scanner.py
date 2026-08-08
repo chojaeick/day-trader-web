@@ -11,11 +11,20 @@ def exchange_code(v: str) -> str:
     s=str(v or '').strip().upper()
     return {'1':'NY','2':'ND','3':'AM','NYSE':'NY','NASDAQ':'ND','AMEX':'AM','NY':'NY','ND':'ND','AM':'AM'}.get(s,'ND')
 
+def asset_type(name: str) -> str:
+    n=str(name or '').upper()
+    if 'ETF' in n or 'TRUST' in n or 'SPDR' in n or 'ISHARES' in n:
+        if any(x in n for x in (' 2X',' 3X','2X ','3X ','ULTRA','BULL 2','BEAR 2','BULL 3','BEAR 3')):
+            return 'LEVERAGED_ETF'
+        return 'ETF'
+    return 'STOCK'
+
 @dataclass
 class DiscoveryResult:
     symbols: list[str]
     rows: list[dict]
     updated_at: str
+    extreme_rows: list[dict]
 
 def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str],
                    limit:int=40, min_price:float=5.0, min_dollar:float=5_000_000,
@@ -49,7 +58,7 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
                 'price':price,'change_pct':chg,'volume':volume,'dollar_volume':dollar,
                 'volume_rank':9999,'dollar_rank':9999,'gainer_rank':9999,
                 'loser_rank':9999,'surge_rank':9999,'surge_pct':0.0,
-                'sources':set()
+                'sources':set(),'asset_type':asset_type(x.get('stk_enm') or x.get('stk_nm') or '')
             })
             rec['price']=price or rec['price']
             if chg:
@@ -94,12 +103,24 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
         rec['discovery_score']=round(source_score+liq+move+surge_bonus-chase_penalty,1)
 
     eligible=[]
+    extreme_rows=[]
     for r in merged.values():
         liquid = r['dollar_volume'] >= min_dollar
         top_volume = r['volume_rank'] <= 35
         top_dollar = r['dollar_rank'] <= 35
         event_source = r['gainer_rank'] <= 25 or r['loser_rank'] <= 25 or r['surge_rank'] <= 25
-        if liquid or top_volume or top_dollar or event_source:
+
+        # V1.4.3 quality gate:
+        # - regular AUTO names need either known dollar liquidity or meaningful share turnover.
+        # - ±30% movers are separated into EXTREME rather than mixed into normal candidates.
+        volume_fallback = r['volume'] >= 1_000_000 and r['price'] >= min_price
+        if abs(r['change_pct']) >= 30:
+            r['origin']='EXTREME'
+            r['chase_risk']='EXTREME'
+            extreme_rows.append(r)
+            continue
+
+        if liquid or top_dollar or (top_volume and volume_fallback) or (event_source and volume_fallback):
             eligible.append(r)
 
     eligible.sort(key=lambda r:(r['discovery_score'],r['dollar_volume'],r['volume']), reverse=True)
@@ -111,7 +132,7 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
                 'symbol':sym,'exchange':'','name':'CORE','price':0,'change_pct':0,
                 'volume':0,'dollar_volume':0,'volume_rank':9999,'dollar_rank':9999,
                 'gainer_rank':9999,'loser_rank':9999,'surge_rank':9999,'surge_pct':0.0,
-                'sources':{'core'},'chase_risk':'NORMAL','discovery_score':999
+                'sources':{'core'},'chase_risk':'NORMAL','discovery_score':999,'asset_type':'CORE'
             })
 
     seen=set(); symbols=[]
@@ -121,8 +142,13 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
         r['sources']=','.join(sorted(r['sources']))
         r['origin']='CORE' if r['symbol'] in core else 'AUTO'
 
+    extreme_rows.sort(key=lambda r:(abs(r['change_pct']),r['volume']),reverse=True)
+    for r in extreme_rows:
+        r['sources']=','.join(sorted(r['sources']))
+        r['origin']='EXTREME'
     return DiscoveryResult(
         symbols=symbols,
         rows=picked,
-        updated_at=datetime.now(timezone.utc).isoformat()
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        extreme_rows=extreme_rows[:20]
     )

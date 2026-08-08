@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.4.2') if live else '1.4.2'
+version=(health or {}).get('version','1.4.3') if live else '1.4.3'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -65,23 +65,32 @@ if live:
     if uni.get('count'):
         st.caption(
             f"자동 Universe {uni.get('count')}개 · AUTO {uni.get('auto_count', max(0, uni.get('count',0)-len(uni.get('core') or [])))}개 "
-            f"· Core {len(uni.get('core') or [])}개 · 약 10분마다 재검색"
+            f"· Core {len(uni.get('core') or [])}개 · EXTREME 제외 {uni.get('extreme_count',0)}개 · 약 10분마다 재검색"
         )
         with st.expander('오늘 자동 발굴 Universe 보기', expanded=False):
             drows=uni.get('rows') or []
             if drows:
                 udf=pd.DataFrame(drows)
-                keep=['origin','symbol','name','exchange','price','change_pct',
+                keep=['origin','symbol','name','asset_type','exchange','price','change_pct',
                       'volume_rank','dollar_rank','gainer_rank','loser_rank','surge_rank',
                       'surge_pct','discovery_score','chase_risk','sources']
                 udf=udf[[c for c in keep if c in udf.columns]].rename(columns={
-                    'origin':'구분','symbol':'종목','name':'이름','exchange':'거래소',
+                    'origin':'구분','symbol':'종목','name':'이름','asset_type':'유형','exchange':'거래소',
                     'price':'현재가','change_pct':'당일%','volume_rank':'거래량순위',
                     'dollar_rank':'거래대금순위','gainer_rank':'상승률순위','loser_rank':'하락률순위',
                     'surge_rank':'거래량급증순위','surge_pct':'급증률','discovery_score':'발굴점수',
                     'chase_risk':'추격위험','sources':'발굴근거'
                 })
                 st.dataframe(udf,use_container_width=True,hide_index=True)
+        if uni.get('extreme_rows'):
+            with st.expander(f"EXTREME 제외 종목 {uni.get('extreme_count',0)}개 보기", expanded=False):
+                ex=pd.DataFrame(uni.get('extreme_rows') or [])
+                keep=['symbol','name','asset_type','exchange','price','change_pct','volume','sources','chase_risk']
+                ex=ex[[c for c in keep if c in ex.columns]].rename(columns={
+                    'symbol':'종목','name':'이름','asset_type':'유형','exchange':'거래소',
+                    'price':'현재가','change_pct':'당일%','volume':'거래량','sources':'발굴근거','chase_risk':'추격위험'
+                })
+                st.dataframe(ex,use_container_width=True,hide_index=True)
 st.subheader('오늘의 단타 후보 TOP 10')
 if live:
     payload=api('/api/screener?top_n=10') or {'data':[]}; rows=payload.get('data',[])
@@ -94,6 +103,9 @@ if live:
         if '거래대금' in show.columns: show['거래대금']=pd.to_numeric(show['거래대금'],errors='coerce').round(0)
         st.dataframe(show,use_container_width=True,hide_index=True)
         symbols=[r['symbol'] for r in rows]
+        for sym in (uni.get('core') or []):
+            if sym not in symbols:
+                symbols.append(sym)
         if rows[0]['score'] < cfg.watch_score:
             st.info('현재 WATCH 기준(70점)을 넘는 후보가 없습니다. NO TRADE도 유효한 판단입니다.')
     else:
@@ -179,4 +191,4 @@ if selected:
         bars=demo_bars(selected); sig=intraday_signal(selected,bars,market_bias=.7,sector_bias=.6,cfg=cfg)
         st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
 
-st.caption('V1.4.2: 거래량·거래대금 + 상승률·하락률 + 거래량급증을 통합 발굴 → 30~50개 후보 → 추격위험 → 정밀 TOP10.')
+st.caption('V1.4.3: 자동 Universe 품질 게이트 + ±30% EXTREME 분리 + ETF/레버리지 구분 + 최종 TOP10 유동성/추격위험 강화.')

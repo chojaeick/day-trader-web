@@ -177,7 +177,9 @@ class KiwoomClient:
             'symbols':list(result.symbols),'rows':result.rows,'updated_at':result.updated_at,
             'count':len(result.symbols),'core':list(self.s.core_symbols),'exchanges':exchanges,
             'auto_count':len([x for x in result.symbols if x not in self.s.core_symbols]),
-            'sources':['volume','dollar','gainer','loser','surge']
+            'sources':['volume','dollar','gainer','loser','surge'],
+            'extreme_count':len(result.extreme_rows),'extreme_rows':result.extreme_rows,
+            'quality_gate':'AUTO: $5M dollar volume OR >=1M shares with rank/event source; |change|>=30% separated'
         }
         log.info('universe discovery: %s symbols',len(result.symbols))
         return self.discovery

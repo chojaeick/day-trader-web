@@ -2,7 +2,6 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS quotes (
@@ -17,6 +16,15 @@ CREATE TABLE IF NOT EXISTS quotes (
   prev_close REAL,
   updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS daily_metrics (
+  symbol TEXT PRIMARY KEY,
+  ma5 REAL,
+  ma5_slope_pct REAL,
+  avg5_volume REAL,
+  avg5_dollar_volume REAL,
+  atr5_pct REAL,
+  updated_at TEXT
+);
 CREATE TABLE IF NOT EXISTS ticks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   symbol TEXT NOT NULL,
@@ -26,6 +34,17 @@ CREATE TABLE IF NOT EXISTS ticks (
   ts TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ticks_symbol_ts ON ticks(symbol, ts);
+CREATE TABLE IF NOT EXISTS ranking_snapshots (
+  trade_date TEXT NOT NULL,
+  label TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  rank INTEGER NOT NULL,
+  score REAL NOT NULL,
+  bias TEXT,
+  price REAL,
+  captured_at TEXT NOT NULL,
+  PRIMARY KEY(trade_date,label,symbol)
+);
 CREATE TABLE IF NOT EXISTS raw_ws (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   payload TEXT NOT NULL,
@@ -58,10 +77,31 @@ class DB:
               change_pct=excluded.change_pct, volume=excluded.volume, open=excluded.open, high=excluded.high,
               low=excluded.low, prev_close=excluded.prev_close, updated_at=excluded.updated_at''', q)
 
+    def upsert_daily_metrics(self, m: dict):
+        with self.conn() as c:
+            c.execute('''INSERT INTO daily_metrics(symbol,ma5,ma5_slope_pct,avg5_volume,avg5_dollar_volume,atr5_pct,updated_at)
+              VALUES(:symbol,:ma5,:ma5_slope_pct,:avg5_volume,:avg5_dollar_volume,:atr5_pct,:updated_at)
+              ON CONFLICT(symbol) DO UPDATE SET ma5=excluded.ma5,ma5_slope_pct=excluded.ma5_slope_pct,
+              avg5_volume=excluded.avg5_volume,avg5_dollar_volume=excluded.avg5_dollar_volume,
+              atr5_pct=excluded.atr5_pct,updated_at=excluded.updated_at''', m)
+
+    def daily_metric(self, symbol: str):
+        with self.conn() as c:
+            r=c.execute('SELECT * FROM daily_metrics WHERE symbol=?',(symbol.upper(),)).fetchone()
+            return dict(r) if r else None
+
+    def daily_metrics(self):
+        with self.conn() as c:
+            return [dict(r) for r in c.execute('SELECT * FROM daily_metrics ORDER BY symbol').fetchall()]
+
     def add_tick(self, symbol: str, price: float, qty: float, cum_volume: float, ts: str):
         with self.conn() as c:
             c.execute('INSERT INTO ticks(symbol,price,qty,cum_volume,ts) VALUES(?,?,?,?,?)',
                       (symbol, price, qty, cum_volume, ts))
+            # keep roughly a few trading days per symbol
+            c.execute('''DELETE FROM ticks WHERE id IN (
+              SELECT id FROM ticks WHERE symbol=? ORDER BY id DESC LIMIT -1 OFFSET 250000
+            )''',(symbol,))
 
     def add_raw(self, payload: str, ts: str):
         with self.conn() as c:
@@ -82,6 +122,22 @@ class DB:
             rows = c.execute('SELECT symbol,price,qty,cum_volume,ts FROM ticks WHERE symbol=? ORDER BY ts DESC LIMIT ?',
                              (symbol.upper(), limit)).fetchall()
             return [dict(r) for r in reversed(rows)]
+
+    def save_ranking_snapshot(self, trade_date: str, label: str, rows: list[dict], captured_at: str):
+        with self.conn() as c:
+            for i,row in enumerate(rows,1):
+                c.execute('''INSERT OR REPLACE INTO ranking_snapshots
+                  (trade_date,label,symbol,rank,score,bias,price,captured_at) VALUES(?,?,?,?,?,?,?,?)''',
+                  (trade_date,label,row['symbol'],i,row['score'],row.get('bias'),row.get('price'),captured_at))
+
+    def ranking_history(self, trade_date: str | None=None):
+        with self.conn() as c:
+            if not trade_date:
+                r=c.execute('SELECT MAX(trade_date) AS d FROM ranking_snapshots').fetchone()
+                trade_date=r['d'] if r else None
+            if not trade_date: return []
+            return [dict(r) for r in c.execute('''SELECT * FROM ranking_snapshots WHERE trade_date=?
+                ORDER BY CASE label WHEN 'T-10' THEN 1 WHEN 'T-1' THEN 2 WHEN 'T+7' THEN 3 ELSE 9 END, rank''',(trade_date,)).fetchall()]
 
     def raw(self, limit: int = 20):
         with self.conn() as c:

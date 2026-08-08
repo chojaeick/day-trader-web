@@ -47,8 +47,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.6.3') if live else '1.6.3'
+version=(health or {}).get('version','1.7') if live else '1.7'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
+
+st.caption('V1.7 · Trading / Research / Archive / Live Validation 분리를 위한 UI 개편 시작 · 이번 버전은 Daily Ranking Archive를 우선 적용')
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
 qqq_pct=float((qqq or {}).get('change_pct') or 0); smh_pct=float((smh or {}).get('change_pct') or 0)
@@ -133,6 +135,60 @@ if live:
         st.caption('추천 유지도: 미국장 T-10분 → T-1분 → 개장 +7분')
         h=pd.DataFrame(hist); pivot=h.pivot_table(index='symbol',columns='label',values='score',aggfunc='first').reset_index()
         st.dataframe(pivot,use_container_width=True,hide_index=True)
+
+
+if live:
+    with st.expander('📚 저장된 일자별 순위 Archive', expanded=False):
+        adates=(api('/api/archive/dates?limit=120') or {}).get('data',[])
+        if not adates:
+            st.info('아직 Archive에 저장된 순위가 없습니다. 다음 미국장부터 T-10 / T-1 / T+7 / T+30 / T+60 / CLOSE 순위가 자동 저장됩니다.')
+            if st.button('현재 TOP10을 MANUAL로 저장',key='archive_manual_empty'):
+                x=api('/api/archive/save-now?label=MANUAL') or {}
+                if x.get('ok'): st.success(f"{x.get('trade_date')} MANUAL 저장 완료")
+        else:
+            adf=pd.DataFrame(adates)
+            st.dataframe(adf.rename(columns={
+                'trade_date':'일자','snapshots':'스냅샷 수','first_capture':'첫 저장','last_capture':'마지막 저장'
+            }),use_container_width=True,hide_index=True)
+
+            date_options=[x.get('trade_date') for x in adates if x.get('trade_date')]
+            ac1,ac2=st.columns([2,1])
+            with ac1:
+                archive_date=st.selectbox('조회 일자',date_options,key='archive_date')
+            with ac2:
+                st.write(''); st.write('')
+                if st.button('현재 TOP10 MANUAL 저장',key='archive_manual'):
+                    x=api('/api/archive/save-now?label=MANUAL') or {}
+                    if x.get('ok'): st.success(f"{x.get('trade_date')} MANUAL 저장 완료")
+
+            snaps=(api(f'/api/archive/snapshots?trade_date={archive_date}') or {}).get('data',[])
+            if snaps:
+                sdf=pd.DataFrame(snaps)
+                st.caption('해당 일자의 저장 시점')
+                st.dataframe(sdf.rename(columns={
+                    'trade_date':'일자','label':'시점','model':'모델','captured_at':'저장시각',
+                    'row_count':'종목수','qqq_pct':'QQQ%','smh_pct':'SMH%'
+                }),use_container_width=True,hide_index=True)
+
+                labels=[]
+                for x in snaps:
+                    key=f"{x.get('label')} | {x.get('model')}"
+                    if key not in labels: labels.append(key)
+                pick=st.selectbox('순위 스냅샷',labels,key='archive_snapshot')
+                plabel,pmodel=[x.strip() for x in pick.split('|',1)]
+                ar=api(f'/api/archive/ranking?trade_date={archive_date}&label={plabel}&model={pmodel}') or {}
+                rows_archive=ar.get('rows') or []
+                if rows_archive:
+                    rdf=pd.DataFrame(rows_archive)
+                    keep=['rank','symbol','score','bias','price','change_pct','ma5','ma5_slope_pct',
+                          'rvol','atr_pct','dollar_volume','exchange']
+                    rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
+                        'rank':'순위','symbol':'종목','score':'점수','bias':'방향','price':'현재가',
+                        'change_pct':'당일%','ma5':'MA5','ma5_slope_pct':'MA5기울기%',
+                        'rvol':'RVOL','atr_pct':'ATR%','dollar_volume':'거래대금','exchange':'거래소'
+                    })
+                    st.caption(f"{archive_date} · {plabel} · {pmodel} 저장 순위")
+                    st.dataframe(rdf,use_container_width=True,hide_index=True)
 
 selected=st.selectbox('오늘 집중 감시 종목',symbols,index=0 if symbols else None)
 if selected:
@@ -512,4 +568,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.6.3: Paired Fold + Bootstrap CI + RS Paired Study. 같은 OOS 구간에서 후보가 Current를 실제로 얼마나 자주 이기는지 검증합니다.')
+st.caption('V1.7: Daily Ranking Archive + CLOSE 자동저장 + 일자/시점별 순위 조회. 다음 단계에서 Trading/Research/Archive/Live Validation 탭을 완전 분리합니다.')

@@ -10,22 +10,29 @@ from .db import DB
 from .kiwoom import KiwoomClient
 from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, context_for
 from .validation import HistoricalValidator, LiveTop10Validator
+from .archive import RankingArchive
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
-s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); tasks=[]
+s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); tasks=[]
 
 async def checkpoint_forever():
     done=set()
     while True:
         now=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
         day=now.strftime('%Y-%m-%d'); minute=now.hour*60+now.minute
-        targets={'T-10':9*60+20,'T-1':9*60+29,'T+7':9*60+37,'T+30':10*60,'T+60':10*60+30}
+        targets={'T-10':9*60+20,'T-1':9*60+29,'T+7':9*60+37,'T+30':10*60,'T+60':10*60+30,'CLOSE':15*60+59}
         for label,target in targets.items():
             key=(day,label)
             if key not in done and target<=minute<=target+1 and now.weekday()<5:
                 rows=screener_rows(db.quotes(),db.daily_metrics(),10)
                 if rows:
-                    db.save_ranking_snapshot(day,label,rows,datetime.now(timezone.utc).isoformat()); done.add(key)
+                    captured=datetime.now(timezone.utc).isoformat()
+                    db.save_ranking_snapshot(day,label,rows,captured)
+                    qmap={q.get('symbol'):q for q in db.quotes()}
+                    archive.save(day,label,'CURRENT',rows,captured,
+                                 float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+                                 float((qmap.get('SMH') or {}).get('change_pct') or 0))
+                    done.add(key)
         await asyncio.sleep(20)
 
 @asynccontextmanager
@@ -43,13 +50,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.6.3',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.7',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.6.3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.7','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -70,6 +77,38 @@ def screener(top_n:int=Query(10,ge=1,le=30)):
 
 @app.get('/api/ranking-history')
 def ranking_history(): return {'data':db.ranking_history()}
+
+
+@app.get('/api/archive/dates')
+def archive_dates(limit:int=Query(120,ge=1,le=500)):
+    return {'data':archive.dates(limit)}
+
+@app.get('/api/archive/snapshots')
+def archive_snapshots(trade_date:str):
+    return {'data':archive.snapshots(trade_date)}
+
+@app.get('/api/archive/ranking')
+def archive_ranking(trade_date:str,label:str,model:str='CURRENT'):
+    x=archive.ranking(trade_date,label,model)
+    if not x: raise HTTPException(404,'archived ranking not found')
+    return x
+
+@app.get('/api/archive/recent')
+def archive_recent(limit:int=Query(50,ge=1,le=500)):
+    return {'data':archive.recent(limit)}
+
+@app.get('/api/archive/save-now')
+def archive_save_now(label:str='MANUAL'):
+    now=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+    day=now.strftime('%Y-%m-%d')
+    rows=screener_rows(db.quotes(),db.daily_metrics(),10)
+    if not rows: raise HTTPException(409,'screener rows not ready')
+    captured=datetime.now(timezone.utc).isoformat()
+    qmap={q.get('symbol'):q for q in db.quotes()}
+    meta_id=archive.save(day,label,'CURRENT',rows,captured,
+                         float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+                         float((qmap.get('SMH') or {}).get('change_pct') or 0))
+    return {'ok':True,'id':meta_id,'trade_date':day,'label':label.upper(),'model':'CURRENT','rows':len(rows)}
 
 @app.get('/api/bars/{symbol}')
 def bars(symbol:str,minutes:int=Query(1,ge=1,le=60),limit:int=Query(200,ge=10,le=1000)):

@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from statistics import mean
 from pathlib import Path
-import json, sqlite3, time, statistics
+import json, sqlite3, time, statistics, random
 import pandas as pd
 import requests
 
@@ -397,6 +397,97 @@ def regime_rolling_walk_forward(rows, score_key, regime, train_days=40, test_day
     result.update(robustness_stats(folds))
     return result
 
+
+def bootstrap_mean_ci(values, iterations=5000, seed=20260809):
+    """Deterministic percentile bootstrap CI for fold-level mean deltas."""
+    vals=[float(x) for x in values if x is not None]
+    if not vals:
+        return {'low':None,'high':None,'iterations':iterations}
+    if len(vals)==1:
+        return {'low':vals[0],'high':vals[0],'iterations':iterations}
+    rng=random.Random(seed)
+    n=len(vals)
+    means=[]
+    for _ in range(iterations):
+        sample=[vals[rng.randrange(n)] for _ in range(n)]
+        means.append(sum(sample)/n)
+    means.sort()
+    lo_idx=max(0,int(0.025*iterations)-1)
+    hi_idx=min(iterations-1,int(0.975*iterations)-1)
+    return {'low':means[lo_idx],'high':means[hi_idx],'iterations':iterations}
+
+def paired_fold_compare(base_roll, candidate_roll, base_name, candidate_name):
+    """Compare two models on the exact same chronological OOS folds."""
+    base_map={(f.get('test_start'),f.get('test_end')):f for f in (base_roll or {}).get('folds',[])}
+    cand_map={(f.get('test_start'),f.get('test_end')):f for f in (candidate_roll or {}).get('folds',[])}
+    keys=sorted(set(base_map) & set(cand_map))
+    pairs=[]
+    deltas=[]
+    rank_deltas=[]
+    precision_deltas=[]
+    wins=losses=ties=0
+
+    for i,k in enumerate(keys,1):
+        b=base_map[k]; c=cand_map[k]
+        bret=b.get('test_top5_excess_avg'); cret=c.get('test_top5_excess_avg')
+        if bret is None or cret is None:
+            continue
+        delta=float(cret)-float(bret)
+        deltas.append(delta)
+
+        br=b.get('test_rank_corr'); cr=c.get('test_rank_corr')
+        pr=b.get('test_precision_at_5'); pc=c.get('test_precision_at_5')
+        rd=(float(cr)-float(br)) if br is not None and cr is not None else None
+        pd=(float(pc)-float(pr)) if pr is not None and pc is not None else None
+        if rd is not None: rank_deltas.append(rd)
+        if pd is not None: precision_deltas.append(pd)
+
+        if delta > 1e-12: wins += 1
+        elif delta < -1e-12: losses += 1
+        else: ties += 1
+
+        pairs.append({
+            'fold':i,'test_start':k[0],'test_end':k[1],
+            'base_top5_excess':bret,'candidate_top5_excess':cret,
+            'delta_top5_excess':delta,
+            'base_rank_corr':br,'candidate_rank_corr':cr,'delta_rank_corr':rd,
+            'base_precision_at_5':pr,'candidate_precision_at_5':pc,'delta_precision_at_5':pd
+        })
+
+    ci=bootstrap_mean_ci(deltas)
+    avg=(sum(deltas)/len(deltas)) if deltas else None
+    med=statistics.median(deltas) if deltas else None
+    worst=min(deltas) if deltas else None
+    best=max(deltas) if deltas else None
+    win_rate=(wins/len(deltas)*100) if deltas else None
+    positive_ci=(ci['low'] is not None and ci['low']>0)
+
+    # Research label only; never changes live weights.
+    if deltas and positive_ci and win_rate is not None and win_rate>=60:
+        evidence='STRONG'
+    elif deltas and avg is not None and avg>0 and win_rate is not None and win_rate>=60:
+        evidence='PROMISING'
+    elif deltas and avg is not None and avg>0:
+        evidence='INCONCLUSIVE'
+    else:
+        evidence='WEAK'
+
+    return {
+        'base_model':base_name,'candidate_model':candidate_name,
+        'folds':len(deltas),'wins':wins,'losses':losses,'ties':ties,
+        'win_rate':win_rate,
+        'avg_delta_top5_excess':avg,
+        'median_delta_top5_excess':med,
+        'worst_delta_top5_excess':worst,
+        'best_delta_top5_excess':best,
+        'avg_delta_rank_corr':(sum(rank_deltas)/len(rank_deltas)) if rank_deltas else None,
+        'avg_delta_precision_at_5':(sum(precision_deltas)/len(precision_deltas)) if precision_deltas else None,
+        'bootstrap_ci95_low':ci['low'],'bootstrap_ci95_high':ci['high'],
+        'bootstrap_iterations':ci['iterations'],
+        'evidence':evidence,
+        'pairs':pairs
+    }
+
 class HistoricalValidator:
     def __init__(self,kiwoom,live_db_path):
         self.k=kiwoom
@@ -775,6 +866,30 @@ class HistoricalValidator:
             })
         stability.sort(key=lambda x:x['stability_score'],reverse=True)
         summary['stability_ranking']=stability
+
+        # V1.6.3 paired-fold evidence study:
+        # exact same OOS folds, candidate minus baseline.
+        paired_study={}
+        base_roll=rolling_models.get('GLOBAL_CURRENT') or {}
+        for candidate_name in ('GLOBAL_CANDIDATE','BULL_CANDIDATE','BEAR_CANDIDATE',
+                               'MIXED_CANDIDATE','REGIME_CANDIDATE'):
+            paired_study[candidate_name]=paired_fold_compare(
+                base_roll, rolling_models.get(candidate_name) or {},
+                'GLOBAL_CURRENT',candidate_name
+            )
+        summary['paired_fold_study']=paired_study
+
+        # RS paired sensitivity: isolate RS contribution against RS_OFF on the same folds.
+        rs_rolls={}
+        for model_name in ('RS_OFF','RS_LOW','RS_MEDIUM','RS_HIGH'):
+            rs_rolls[model_name]=rolling_walk_forward(
+                all_rows,'score_'+model_name,train_days=40,test_days=20,step_days=20)
+        rs_paired={}
+        for model_name in ('RS_LOW','RS_MEDIUM','RS_HIGH'):
+            rs_paired[model_name]=paired_fold_compare(
+                rs_rolls['RS_OFF'],rs_rolls[model_name],'RS_OFF',model_name
+            )
+        summary['rs_paired_study']=rs_paired
 
         result={'summary':summary,'daily':daily,'rows':all_rows}
         summary['run_id']=self.store.save(result)

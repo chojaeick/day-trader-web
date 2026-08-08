@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.6.2') if live else '1.6.2'
+version=(health or {}).get('version','1.6.3') if live else '1.6.3'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -297,6 +297,48 @@ if live:
             st.dataframe(pd.DataFrame(ms),use_container_width=True,hide_index=True)
             st.caption('WF = 앞 80거래일과 분리된 뒤 40거래일 테스트. 후보모델이 전체기간뿐 아니라 미사용 테스트구간에서도 개선되는지 확인합니다.')
 
+        if sm.get('paired_fold_study'):
+            st.subheader('Paired Fold Comparison · 같은 OOS 구간에서 직접 대결')
+            pf=[]
+            for name,x in (sm.get('paired_fold_study') or {}).items():
+                pf.append({
+                    '후보모델':name,'Fold':x.get('folds'),
+                    '승':x.get('wins'),'패':x.get('losses'),'무':x.get('ties'),
+                    '승률%':x.get('win_rate'),
+                    '평균 개선 TOP5%':x.get('avg_delta_top5_excess'),
+                    '중앙 개선 TOP5%':x.get('median_delta_top5_excess'),
+                    '최악 상대차%':x.get('worst_delta_top5_excess'),
+                    '95% CI Low':x.get('bootstrap_ci95_low'),
+                    '95% CI High':x.get('bootstrap_ci95_high'),
+                    '평균 Rank Corr 개선':x.get('avg_delta_rank_corr'),
+                    '평균 Precision@5 개선':x.get('avg_delta_precision_at_5'),
+                    'Evidence':x.get('evidence')
+                })
+            st.dataframe(pd.DataFrame(pf),use_container_width=True,hide_index=True)
+            st.caption('개선값 = 후보모델 - GLOBAL_CURRENT. Bootstrap 95% CI가 0 위에 있으면 Fold 평균 개선에 대한 근거가 더 강합니다.')
+            with st.expander('Paired Fold 상세',expanded=False):
+                choice=st.selectbox('후보모델 선택',list((sm.get('paired_fold_study') or {}).keys()),key='paired_model')
+                pairs=((sm.get('paired_fold_study') or {}).get(choice) or {}).get('pairs') or []
+                if pairs:
+                    st.dataframe(pd.DataFrame(pairs),use_container_width=True,hide_index=True)
+
+        if sm.get('rs_paired_study'):
+            st.subheader('RS Paired Study · RS_OFF와 같은 Fold에서 비교')
+            rp=[]
+            for name,x in (sm.get('rs_paired_study') or {}).items():
+                rp.append({
+                    'RS 모델':name,'Fold':x.get('folds'),'승률%':x.get('win_rate'),
+                    '평균 개선 TOP5%':x.get('avg_delta_top5_excess'),
+                    '중앙 개선 TOP5%':x.get('median_delta_top5_excess'),
+                    '최악 상대차%':x.get('worst_delta_top5_excess'),
+                    '95% CI Low':x.get('bootstrap_ci95_low'),
+                    '95% CI High':x.get('bootstrap_ci95_high'),
+                    'Rank Corr 개선':x.get('avg_delta_rank_corr'),
+                    'Precision@5 개선':x.get('avg_delta_precision_at_5'),
+                    'Evidence':x.get('evidence')
+                })
+            st.dataframe(pd.DataFrame(rp),use_container_width=True,hide_index=True)
+
         if sm.get('stability_ranking'):
             st.subheader('Robustness Ranking · 평균만 좋고 흔들리는 모델은 감점')
             stab=pd.DataFrame(sm.get('stability_ranking') or [])
@@ -470,4 +512,4 @@ if live:
     else:
         st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
-st.caption('V1.6.2: 최대 250거래일 Robustness Study + Rolling Fold 분산/최악값 + 안정성 Ranking. 운영 가중치는 아직 변경하지 않습니다.')
+st.caption('V1.6.3: Paired Fold + Bootstrap CI + RS Paired Study. 같은 OOS 구간에서 후보가 Current를 실제로 얼마나 자주 이기는지 검증합니다.')

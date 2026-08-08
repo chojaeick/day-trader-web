@@ -32,18 +32,23 @@ async def lifespan(app: FastAPI):
     if not s.app_key or not s.app_secret:
         logging.error('KIWOOM_APP_KEY / KIWOOM_APP_SECRET missing')
     else:
+        try:
+            await asyncio.to_thread(k.discover_universe)
+        except Exception as e:
+            logging.warning('startup universe discovery failed; using fallback universe: %s', e)
         tasks.extend([asyncio.create_task(k.websocket_forever()),asyncio.create_task(k.snapshot_poll_forever()),
-                      asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(k.backfill_forever_once()),asyncio.create_task(checkpoint_forever())])
+                      asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(k.backfill_forever_once()),
+                      asyncio.create_task(k.discovery_forever()),asyncio.create_task(checkpoint_forever())])
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.3.2',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.4',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.3.2','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.4','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -80,3 +85,8 @@ def position(symbol:str,entry:float=Query(...,gt=0),side:str=Query('LONG',patter
 
 @app.get('/api/raw')
 def raw(limit:int=20): return db.raw(min(limit,100))
+
+
+@app.get('/api/universe')
+def universe():
+    return k.discovery

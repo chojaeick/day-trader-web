@@ -5,6 +5,7 @@ import requests, websockets
 from zoneinfo import ZoneInfo
 from .config import Settings
 from .db import DB
+from .scanner import merge_rankings
 
 log = logging.getLogger('kiwoom')
 
@@ -18,6 +19,7 @@ class KiwoomClient:
     def __init__(self, settings: Settings, db: DB):
         self.s, self.db = settings, db
         self.token = None
+        self.discovery = {'symbols': list(settings.symbols), 'rows': [], 'updated_at': None, 'count': len(settings.symbols), 'core': list(settings.core_symbols), 'exchanges': {}}
 
     def get_token(self):
         r = requests.post(self.s.rest_base + '/oauth2/token', json={
@@ -77,6 +79,52 @@ class KiwoomClient:
            'avg5_dollar_volume':avg_dv,'atr5_pct':atr_pct,'updated_at':datetime.now(timezone.utc).isoformat()}
         self.db.upsert_daily_metrics(m); return m
 
+
+    def ranking_today_volume(self, sort_mode: str='0') -> list[dict]:
+        body={'stex_tp':'0','inds_cd':'','stk_tp':'0','trde_qty_tp':'0',
+              'qry_tp':str(sort_mode),'stk_cnd':'0','pric_cnd':'0','trde_prica_cnd':'0'}
+        r=requests.post(self.s.rest_base+'/api/us/rkinfo',headers=self.headers('usa20530'),json=body,timeout=20)
+        d=r.json()
+        if d.get('return_code') not in (None,0):
+            raise RuntimeError(f"ranking usa20530/{sort_mode}: {d.get('return_code')} {d.get('return_msg')}")
+        return d.get('result_list') or []
+
+    def discover_universe(self) -> dict:
+        volume=self.ranking_today_volume('0')
+        dollar=self.ranking_today_volume('1')
+        result=merge_rankings(volume,dollar,self.s.core_symbols,self.s.discovery_limit,
+                              self.s.discovery_min_price,self.s.discovery_min_dollar)
+        exchanges={r['symbol']:r.get('exchange') for r in result.rows if r.get('exchange')}
+        self.s.symbols=list(result.symbols)
+        self.discovery={'symbols':list(result.symbols),'rows':result.rows,'updated_at':result.updated_at,
+                        'count':len(result.symbols),'core':list(self.s.core_symbols),'exchanges':exchanges}
+        log.info('universe discovery: %s symbols',len(result.symbols))
+        return self.discovery
+
+    def active_exchange(self, symbol:str) -> str:
+        return (self.discovery.get('exchanges') or {}).get(symbol.upper()) or self.s.exchange_for(symbol)
+
+    async def discovery_forever(self):
+        while True:
+            try:
+                old=set(self.s.symbols)
+                await asyncio.to_thread(self.discover_universe)
+                added=[x for x in self.s.symbols if x not in old]
+                for sym in added:
+                    try:
+                        ex=self.active_exchange(sym)
+                        await asyncio.to_thread(self.quote,sym,ex)
+                        await asyncio.to_thread(self.daily_metrics,sym,ex)
+                        await asyncio.to_thread(self.backfill_symbol,sym,ex,80)
+                    except Exception as e:
+                        log.warning('prime discovered %s: %s',sym,e)
+                    await asyncio.sleep(0.25)
+                if set(self.s.symbols)!=old:
+                    log.info('universe changed: +%s -%s',sorted(set(self.s.symbols)-old),sorted(old-set(self.s.symbols)))
+            except Exception as e:
+                log.warning('universe discovery failed; keeping current universe: %s',e)
+            await asyncio.sleep(self.s.discovery_seconds)
+
     def minute_chart(self, symbol: str, exchange: str, minutes: int = 1, start_date: str | None = None):
         if start_date is None:
             et = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
@@ -128,7 +176,7 @@ class KiwoomClient:
         await asyncio.sleep(1.0)
         for symbol in self.s.symbols:
             try:
-                inserted,bars=self.backfill_symbol(symbol,self.s.exchange_for(symbol),80)
+                inserted,bars=self.backfill_symbol(symbol,self.active_exchange(symbol),80)
                 log.info('minute backfill %s: bars=%s inserted=%s',symbol,bars,inserted)
             except Exception as e:
                 log.warning('minute backfill %s: %s',symbol,e)
@@ -159,23 +207,37 @@ class KiwoomClient:
                         if d.get('trnm')=='LOGIN':
                             if d.get('return_code')!=0: raise RuntimeError(f'LOGIN failed: {d}')
                             break
-                    reg={'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':self.s.symbols,'type':['F5']}]}
-                    await ws.send(json.dumps(reg)); reg_d=json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+                    registered=tuple(self.s.symbols)
+                    await ws.send(json.dumps({'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':list(registered),'type':['F5']}]}))
+                    reg_d=json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
                     if reg_d.get('return_code') != 0: raise RuntimeError(f'REG failed: {reg_d}')
-                    log.info('WebSocket live: %s', ','.join(self.s.symbols))
+                    log.info('WebSocket live: %s', ','.join(registered))
                     while True:
-                        raw=await ws.recv(); now=datetime.now(timezone.utc).isoformat(); d=json.loads(raw)
-                        if d.get('trnm')=='PING': await ws.send(raw); continue
+                        current=tuple(self.s.symbols)
+                        if current != registered:
+                            await ws.send(json.dumps({'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':list(current),'type':['F5']}]}))
+                            registered=current
+                            log.info('WebSocket universe refreshed: %s',','.join(registered))
+                        try:
+                            raw=await asyncio.wait_for(ws.recv(),timeout=15)
+                        except asyncio.TimeoutError:
+                            continue
+                        now=datetime.now(timezone.utc).isoformat(); d=json.loads(raw)
+                        if d.get('trnm')=='PING':
+                            await ws.send(raw); continue
                         self.db.add_raw(raw, now)
-                        for symbol,price,qty,cumvol in self._extract_f5(d): self.db.add_tick(symbol,price,qty,cumvol,now)
-            except asyncio.CancelledError: raise
+                        for symbol,price,qty,cumvol in self._extract_f5(d):
+                            self.db.add_tick(symbol,price,qty,cumvol,now)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                log.exception('websocket reconnect after error: %s', e); await asyncio.sleep(5)
+                log.exception('websocket reconnect after error: %s', e)
+                await asyncio.sleep(5)
 
     async def snapshot_poll_forever(self):
         while True:
             for symbol in self.s.symbols:
-                try: self.quote(symbol,self.s.exchange_for(symbol))
+                try: self.quote(symbol,self.active_exchange(symbol))
                 except Exception as e: log.warning('snapshot %s: %s',symbol,e)
                 await asyncio.sleep(0.22)
             await asyncio.sleep(self.s.poll_seconds)
@@ -183,7 +245,7 @@ class KiwoomClient:
     async def daily_refresh_forever(self):
         while True:
             for symbol in self.s.symbols:
-                try: self.daily_metrics(symbol,self.s.exchange_for(symbol))
+                try: self.daily_metrics(symbol,self.active_exchange(symbol))
                 except Exception as e: log.warning('daily metrics %s: %s',symbol,e)
                 await asyncio.sleep(0.25)
             await asyncio.sleep(self.s.daily_refresh_seconds)

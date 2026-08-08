@@ -47,7 +47,7 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.3.2') if live else '1.3.2'
+version=(health or {}).get('version','1.4') if live else '1.4'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -60,6 +60,10 @@ c2.metric('Semiconductor',f'{semi_label} {smh_pct:+.2f}%')
 c3.metric('Market Mode','TREND' if abs(qqq_pct)>=.4 else 'MIXED')
 c4.metric('Data','LIVE' if live else 'DEMO')
 
+if live:
+    uni=api('/api/universe') or {}
+    if uni.get('count'):
+        st.caption(f"자동 Universe {uni.get('count')}개 · Core {len(uni.get('core') or [])}개 · 약 10분마다 재검색")
 st.subheader('오늘의 단타 후보 TOP 10')
 if live:
     payload=api('/api/screener?top_n=10') or {'data':[]}; rows=payload.get('data',[])
@@ -157,4 +161,4 @@ if selected:
         bars=demo_bars(selected); sig=intraday_signal(selected,bars,market_bias=.7,sector_bias=.6,cfg=cfg)
         st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
 
-st.caption('V1.3.2: 키움 미국주식 분봉 시간 파서 정식 수정 + 신호 가격 소수점 정리 + QQQ/SMH 표시 개선. 다음 단계: V1.4 미국장 전체 Universe 자동 스캔.')
+st.caption('V1.4: 미국장 자동 발굴(거래량/거래대금 순위) → 유동성 필터 → 정밀 TOP10 → 1·5분봉 Signal. Core ETF는 항상 감시.')

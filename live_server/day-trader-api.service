@@ -1,0 +1,16 @@
+[Unit]
+Description=DAY TRADER LIVE API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/day-trader-api
+EnvironmentFile=/home/ubuntu/day-trader-api/.env
+ExecStart=/home/ubuntu/day-trader-api/venv/bin/uvicorn live_server.api:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

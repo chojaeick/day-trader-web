@@ -126,8 +126,8 @@ def context_for(symbol:str, quotes:list[dict]):
 def multi_timeframe_signal(symbol: str, ticks: list[dict], quotes:list[dict]):
     b1=ticks_to_bars(ticks,1); b5=ticks_to_bars(ticks,5); market_bias,sector_bias,ctx=context_for(symbol,quotes)
     if len(b1)<20:
-        return {'symbol':symbol,'state':'WARMING','score':0,'bias':'NEUTRAL','reason':f'1분봉 {len(b1)}/20 수집 중',
-                'risks':'','bars1':len(b1),'bars5':len(b5),'context':ctx}
+        return {'symbol':symbol,'state':'DATA WARMUP','score':0,'bias':'NEUTRAL','reason':f'지표 준비 중 · 1분봉 {len(b1)}/20',
+                'risks':'','bars1':len(b1),'bars5':len(b5),'warmup_required':20,'warmup_progress':min(100,round(len(b1)/20*100)),'context':ctx}
     s1=intraday_signal(symbol,b1,market_bias=market_bias,sector_bias=sector_bias,cfg=CFG)
     conf=0; conf_reason=[]
     if len(b5)>=3:
@@ -161,7 +161,7 @@ def multi_timeframe_signal(symbol: str, ticks: list[dict], quotes:list[dict]):
 
 def position_from_ticks(symbol:str,ticks:list[dict],entry:float,side:str,quotes:list[dict]):
     b=ticks_to_bars(ticks,1)
-    if len(b)<5: return {'symbol':symbol,'state':'WARMING','reason':'포지션 분석 데이터 수집 중'}
+    if len(b)<5: return {'symbol':symbol,'state':'DATA WARMUP','reason':'포지션 분석 데이터 수집 중'}
     mb,sb,ctx=context_for(symbol,quotes); s=position_signal(symbol,b,entry,side,mb,sb,CFG)
     pnl=(s.price/entry-1)*100 if side.upper()=='LONG' else (entry/s.price-1)*100
     return {'symbol':symbol,'state':s.state,'side':side.upper(),'price':s.price,'entry':entry,'pnl_pct':pnl,'reason':s.reason,

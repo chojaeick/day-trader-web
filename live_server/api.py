@@ -33,16 +33,16 @@ async def lifespan(app: FastAPI):
         logging.error('KIWOOM_APP_KEY / KIWOOM_APP_SECRET missing')
     else:
         tasks.extend([asyncio.create_task(k.websocket_forever()),asyncio.create_task(k.snapshot_poll_forever()),
-                      asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(checkpoint_forever())])
+                      asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(k.backfill_forever_once()),asyncio.create_task(checkpoint_forever())])
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.3',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.3.1',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
-    qs=db.quotes(); return {'ok':True,'mode':'LIVE','version':'1.3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    qs=db.quotes(); return {'ok':True,'mode':'LIVE','version':'1.3.1','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()

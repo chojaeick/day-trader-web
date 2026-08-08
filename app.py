@@ -1,4 +1,5 @@
 import os, requests, pandas as pd
+import altair as alt
 import streamlit as st
 from dotenv import load_dotenv
 from trader.config import TradingConfig
@@ -22,7 +23,7 @@ def api(path):
         st.sidebar.warning(f'LIVE API 연결 대기: {e}'); return None
 
 health=api('/health') if API_URL else None; live=bool(health and health.get('ok')); mode='LIVE DATA' if live else 'DEMO DATA'
-st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v1.3</span></div></div>''',unsafe_allow_html=True)
+st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v1.3.1</span></div></div>''',unsafe_allow_html=True)
 
 # Market context is intentionally a compact summary; signal engine uses live QQQ/SMH context.
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -58,24 +59,43 @@ if selected:
     if live:
         q=api(f'/api/quote/{selected}') or {}; sig=api(f'/api/signal/{selected}') or {}; b1=api(f'/api/bars/{selected}?minutes=1&limit=200') or {'data':[]}; b5=api(f'/api/bars/{selected}?minutes=5&limit=100') or {'data':[]}
         m1,m2,m3,m4,m5,m6=st.columns(6)
-        m1.metric('상태',sig.get('state','WARMING')); m2.metric('방향',sig.get('bias','NEUTRAL')); m3.metric('Signal',f"{sig.get('score',0)}/100")
+        m1.metric('상태',sig.get('state','DATA WARMUP')); m2.metric('방향',sig.get('bias','NEUTRAL')); m3.metric('Signal',f"{sig.get('score',0)}/100")
         m4.metric('LONG / SHORT',f"{sig.get('long_score',0)} / {sig.get('short_score',0)}"); m5.metric('5M Confirm',sig.get('confirm_5m',0)); m6.metric('현재가',f"${float(q.get('price') or 0):,.2f}")
-        state=sig.get('state','WARMING'); bias=sig.get('bias','NEUTRAL')
+        state=sig.get('state','DATA WARMUP'); bias=sig.get('bias','NEUTRAL')
         st.markdown(f'''<div class="signal"><b>{selected} · {bias} · {state}</b><br>{sig.get('reason','데이터 수집 중')}<br><small>무효화 {sig.get('invalidation','-')} · T1 {sig.get('target1','-')} · T2 {sig.get('target2','-')}</small></div>''',unsafe_allow_html=True)
         if sig.get('risks'): st.markdown(f'''<div class="risk"><b>리스크</b> · {sig.get('risks')}</div>''',unsafe_allow_html=True)
         ind=sig.get('indicators') or {}; ctx=sig.get('context') or {}
         if ind:
             i1,i2,i3,i4,i5,i6=st.columns(6); i1.metric('VWAP',f"{ind.get('vwap') or 0:.2f}"); i2.metric('EMA9',f"{ind.get('ema9') or 0:.2f}"); i3.metric('EMA20',f"{ind.get('ema20') or 0:.2f}"); i4.metric('RSI',f"{ind.get('rsi14') or 0:.1f}"); i5.metric('Bar RVOL',f"{ind.get('rvol') or 0:.2f}x"); i6.metric('QQQ / SMH',f"{ctx.get('qqq_pct',0):+.2f}% / {ctx.get('smh_pct',0):+.2f}%")
+        def intraday_chart(rows, title):
+            df=pd.DataFrame(rows)
+            st.caption(title)
+            if df.empty:
+                st.info('분봉 데이터 준비 중')
+                return
+            df['time']=pd.to_datetime(df['time'],utc=True,errors='coerce')
+            for c in ['open','high','low','close','volume']:
+                df[c]=pd.to_numeric(df.get(c),errors='coerce')
+            df=df.dropna(subset=['time','close']).sort_values('time')
+            if df.empty: return
+            df['ema9']=df['close'].ewm(span=9,adjust=False).mean()
+            df['ema20']=df['close'].ewm(span=20,adjust=False).mean()
+            typ=(df['high'].fillna(df['close'])+df['low'].fillna(df['close'])+df['close'])/3
+            vol=df['volume'].fillna(0).clip(lower=0)
+            denom=vol.cumsum().replace(0,pd.NA)
+            df['vwap']=(typ*vol).cumsum()/denom
+            long=df.melt(id_vars=['time'],value_vars=['close','ema9','ema20','vwap'],var_name='series',value_name='price').dropna()
+            chart=alt.Chart(long).mark_line().encode(
+                x=alt.X('time:T',title=None),
+                y=alt.Y('price:Q',title='Price',scale=alt.Scale(zero=False)),
+                color=alt.Color('series:N',title=None),
+                tooltip=[alt.Tooltip('time:T'),alt.Tooltip('series:N'),alt.Tooltip('price:Q',format='.4f')]
+            ).properties(height=300).interactive()
+            st.altair_chart(chart,use_container_width=True)
+
         l,r=st.columns(2)
-        with l:
-            df=pd.DataFrame(b1['data']); st.caption('1분봉 LIVE')
-            if not df.empty:
-                # Overlay close + indicators when enough data exists.
-                chart=df.set_index('time')[['close']].copy()
-                st.line_chart(chart,height=280)
-        with r:
-            df5=pd.DataFrame(b5['data']); st.caption('5분봉 LIVE')
-            if not df5.empty: st.line_chart(df5.set_index('time')['close'],height=280)
+        with l: intraday_chart(b1['data'],'1분봉 LIVE · Close / EMA9 / EMA20 / VWAP')
+        with r: intraday_chart(b5['data'],'5분봉 LIVE · Close / EMA9 / EMA20 / VWAP')
 
         st.subheader('포지션 관리')
         pc1,pc2=st.columns([1,2])
@@ -89,4 +109,4 @@ if selected:
     else:
         bars=demo_bars(selected); sig=intraday_signal(selected,bars,market_bias=.7,sector_bias=.6,cfg=cfg); st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
 
-st.caption('V1.3: TOP10 튜닝(Price>MA5, MA5 slope, RVOL tiers, ATR sweet spot, 유동성, 레버리지 ETF, 추격감점) + 선택종목 LONG/SHORT 1M·5M Signal + 진입 후 ADD/TRIM/EXIT. 뉴스/카카오 긴급알림은 다음 연결 단계입니다.')
+st.caption('V1.3.1: 자동 1분봉 Backfill + DATA WARMUP + 확대 차트/EMA/VWAP + SMH·ORCL 거래소 수정. TOP10 튜닝(Price>MA5, MA5 slope, RVOL tiers, ATR sweet spot, 유동성, 레버리지 ETF, 추격감점) + 선택종목 LONG/SHORT 1M·5M Signal + 진입 후 ADD/TRIM/EXIT. 뉴스/카카오 긴급알림은 다음 연결 단계입니다.')

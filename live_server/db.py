@@ -94,6 +94,20 @@ class DB:
         with self.conn() as c:
             return [dict(r) for r in c.execute('SELECT * FROM daily_metrics ORDER BY symbol').fetchall()]
 
+    def add_tick_if_missing(self, symbol: str, price: float, qty: float, cum_volume: float, ts: str) -> int:
+        with self.conn() as c:
+            found=c.execute('SELECT 1 FROM ticks WHERE symbol=? AND ts=? AND ABS(price-?)<0.0000001 LIMIT 1',
+                            (symbol.upper(),ts,float(price))).fetchone()
+            if found: return 0
+            c.execute('INSERT INTO ticks(symbol,price,qty,cum_volume,ts) VALUES(?,?,?,?,?)',
+                      (symbol.upper(),float(price),float(qty),float(cum_volume),ts))
+            return 1
+
+    def delete_zero_qty_ticks(self, symbol: str):
+        # Removes REST snapshot pseudo-ticks left by versions <=1.3.
+        with self.conn() as c:
+            c.execute('DELETE FROM ticks WHERE symbol=? AND COALESCE(qty,0)=0',(symbol.upper(),))
+
     def add_tick(self, symbol: str, price: float, qty: float, cum_volume: float, ts: str):
         with self.conn() as c:
             c.execute('INSERT INTO ticks(symbol,price,qty,cum_volume,ts) VALUES(?,?,?,?,?)',

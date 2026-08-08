@@ -29,11 +29,11 @@ class Settings:
     def exchange_for(self, symbol: str) -> str:
         overrides = {
             # NYSE/Arca family (verified SOXL=NY during setup; common NY/Arca ETFs use NY in Kiwoom)
-            'SOXL':'NY','SOXS':'NY','SPY':'NY','SMH':'NY','IWM':'NY','DIA':'NY',
+            'SOXL':'NY','SOXS':'NY','SPY':'NY','IWM':'NY','DIA':'NY',
             # Nasdaq
-            'NVDA':'ND','TQQQ':'ND','SQQQ':'ND','QQQ':'ND','PLTR':'ND','AMD':'ND','AAPL':'ND','MSFT':'ND',
+            'SMH':'ND','NVDA':'ND','TQQQ':'ND','SQQQ':'ND','QQQ':'ND','PLTR':'ND','AMD':'ND','AAPL':'ND','MSFT':'ND',
             'MU':'ND','AMZN':'ND','GOOGL':'ND','TSLA':'ND','AVGO':'ND','ARM':'ND','ASML':'ND','INTC':'ND',
-            'QCOM':'ND','META':'ND','NFLX':'ND','COIN':'ND','MSTR':'ND','CRWD':'ND','APP':'ND','ORCL':'ND',
+            'QCOM':'ND','META':'ND','NFLX':'ND','COIN':'ND','MSTR':'ND','CRWD':'ND','APP':'ND','ORCL':'NY',
             'DELL':'NY','HOOD':'ND','RKLB':'ND','TSM':'NY'
         }
         return overrides.get(symbol.upper(), 'ND')

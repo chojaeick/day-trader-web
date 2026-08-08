@@ -1,47 +1,21 @@
-# DAY TRADER WEB + LIVE SERVER v1.3
+# DAY TRADER WEB + LIVE SERVER v1.3.1
 
-V1.3 tunes the user-requested day-trading screener and adds a live selected-symbol signal/position engine.
+V1.3.1 is a reliability/visualization update to the live signal system.
 
-## Added / changed in v1.3
+## Added / fixed
 
-### TOP10 tuning
-- Current price > 5-day average is a strong requirement
-- Positive MA5 slope gets more weight; negative slope is penalized
-- Time-adjusted RVOL tiers: 1.5x / 2x / 3x
-- ATR day-trading sweet spot (roughly 3-8%)
-- Dollar-volume / liquidity scoring
-- Liquid leveraged ETF bonus (SOXL/SOXS/TQQQ/SQQQ)
-- +3% to +10% momentum sweet spot; extreme chasing is penalized
-- QQQ / SMH alignment
-- Near-high price-action score
+- Kiwoom official US minute chart (`usa06011`, `/api/us/chart`) startup backfill
+- Recent 1-minute bars are seeded after service restart so indicators do not need ~20 live minutes to warm up
+- REST quote snapshots are no longer written as fake intraday ticks while markets are closed
+- Warmup state renamed from `WARNING` to `DATA WARMUP`
+- 1-minute and 5-minute charts use dynamic non-zero price scaling
+- Close + EMA9 + EMA20 + VWAP overlays on charts
+- SMH exchange mapping corrected to NASDAQ (`ND`)
+- ORCL exchange mapping corrected to NYSE (`NY`)
+- API/health version: `1.3.1`
 
-### Selected-symbol live signal
-- 1-minute + 5-minute confirmation
-- VWAP, EMA9, EMA20, EMA50, RSI, bar RVOL
-- 20-bar breakout / breakdown
-- LONG and SHORT scores are calculated separately
-- WAIT / WATCH / SETUP / TRIGGER
-- Shows reason, risks, invalidation, T1, T2
-- Market/sector context comes from QQQ/SMH, not from the selected stock itself
+## Architecture
 
-### Position mode
-- User enters the real fill price manually
-- LONG or SHORT side
-- HOLD / HOLD_CAUTION / ADD / TRIM_30 / TRIM_30_RUNNER / TRIM_MORE / EXIT
-- Hard loss cap remains -2% reference; technical stop can be tighter
-- No averaging down signal
-- No automated order execution
+Kiwoom REST/WebSocket -> AWS Lightsail live server -> SQLite/Signal Engine -> FastAPI -> Streamlit Web.
 
-## Deployment update
-Upload the entire package contents to the existing GitHub repository, then on Lightsail:
-
-```bash
-cd ~/day-trader-api-repo
-git pull
-cp -r live_server trader /home/ubuntu/day-trader-api/
-cd /home/ubuntu/day-trader-api
-sudo systemctl restart day-trader-api
-curl http://127.0.0.1:8000/health
-```
-
-Expected health version: `1.3`.
+No automatic order execution is included.

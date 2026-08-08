@@ -1,7 +1,8 @@
 from __future__ import annotations
 import asyncio, json, logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import requests, websockets
+from zoneinfo import ZoneInfo
 from .config import Settings
 from .db import DB
 
@@ -41,7 +42,8 @@ class KiwoomClient:
            'volume':abs(num(d.get('acc_trde_qty'))),'open':abs(num(d.get('open_pric'))),'high':abs(num(d.get('high_pric'))),
            'low':abs(num(d.get('low_pric'))),'prev_close':abs(num(d.get('base_close_pric'))),'updated_at':now}
         self.db.upsert_quote(q)
-        if q['price'] > 0: self.db.add_tick(symbol, q['price'], 0, q['volume'], now)
+        # REST quote snapshots are intentionally NOT stored as intraday ticks.
+        # Doing so while the market is closed creates fake flat 1-minute bars.
         return q
 
     def daily_metrics(self, symbol: str, exchange: str):
@@ -80,6 +82,76 @@ class KiwoomClient:
         m={'symbol':symbol,'ma5':ma5,'ma5_slope_pct':slope,'avg5_volume':avg_vol,
            'avg5_dollar_volume':avg_dv,'atr5_pct':atr_pct,'updated_at':datetime.now(timezone.utc).isoformat()}
         self.db.upsert_daily_metrics(m); return m
+
+
+    def minute_chart(self, symbol: str, exchange: str, minutes: int = 1, start_date: str | None = None):
+        """Fetch Kiwoom US minute bars (usa06011 /api/us/chart).
+
+        Official fields: cur_prc, trde_qty, open_pric, high_pric, low_pric,
+        cntr_tm, bus_dt.  We use this only to warm up indicators after restart;
+        live data continues to come from F5 WebSocket trades.
+        """
+        if start_date is None:
+            et = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+            start_date = (et.date() - timedelta(days=7)).strftime('%Y%m%d')
+        r = requests.post(self.s.rest_base + '/api/us/chart', headers=self.headers('usa06011'), json={
+            'stex_tp': exchange, 'stk_cd': symbol, 'strt_dt': start_date,
+            'tic_scope': str(minutes), 'upd_stkpc_tp': '0', 'exrt_appl_tp': '1'
+        }, timeout=20)
+        d = r.json()
+        if d.get('return_code') != 0:
+            raise RuntimeError(f"minute {symbol}/{exchange}: {d.get('return_code')} {d.get('return_msg')}")
+        rows = d.get('result_list') or []
+        parsed=[]
+        etz=ZoneInfo('America/New_York')
+        for x in rows:
+            close=abs(num(x.get('cur_prc'))); op=abs(num(x.get('open_pric'))); hi=abs(num(x.get('high_pric'))); lo=abs(num(x.get('low_pric')))
+            vol=abs(num(x.get('trde_qty')))
+            bus=str(x.get('bus_dt') or '').strip(); tm=''.join(ch for ch in str(x.get('cntr_tm') or '') if ch.isdigit())
+            if close <= 0 or len(bus) < 8: continue
+            tm=(tm+'000000')[:6]
+            try:
+                local=datetime.strptime(bus[:8]+tm,'%Y%m%d%H%M%S').replace(tzinfo=etz)
+                ts=local.astimezone(timezone.utc)
+            except Exception:
+                continue
+            parsed.append({'time':ts,'open':op or close,'high':hi or close,'low':lo or close,'close':close,'volume':vol})
+        parsed.sort(key=lambda x:x['time'])
+        return parsed
+
+    def backfill_symbol(self, symbol: str, exchange: str, min_bars: int = 80):
+        """Seed recent 1-minute history into ticks so signal calculations are ready after restart."""
+        rows=self.minute_chart(symbol, exchange, 1)
+        if not rows:
+            raise RuntimeError(f'backfill {symbol}: empty minute chart')
+        rows=rows[-max(min_bars, 30):]
+        self.db.delete_zero_qty_ticks(symbol)
+        cumulative_by_day={}
+        inserted=0
+        for bar in rows:
+            day=bar['time'].astimezone(ZoneInfo('America/New_York')).date().isoformat()
+            running=cumulative_by_day.get(day,0.0)
+            barvol=max(0.0,float(bar.get('volume') or 0))
+            seq=[bar['open'], bar['low'], bar['high'], bar['close']] if bar['close']>=bar['open'] else [bar['open'],bar['high'],bar['low'],bar['close']]
+            portions=[0.20,0.25,0.25,0.30]
+            for sec,(price,portion) in enumerate(zip(seq,portions),start=1):
+                qty=barvol*portion; running += qty
+                ts=(bar['time'].replace(second=0,microsecond=0)+timedelta(seconds=(5,20,40,55)[sec-1])).isoformat()
+                inserted += self.db.add_tick_if_missing(symbol,float(price),qty,running,ts)
+            cumulative_by_day[day]=running
+        return inserted, len(rows)
+
+    async def backfill_forever_once(self):
+        # A short, rate-limited warmup pass at service start. Kiwoom US chart limits
+        # comfortably allow one request per symbol at this pace.
+        await asyncio.sleep(1.0)
+        for symbol in self.s.symbols:
+            try:
+                inserted,bars=self.backfill_symbol(symbol,self.s.exchange_for(symbol),80)
+                log.info('minute backfill %s: bars=%s inserted=%s',symbol,bars,inserted)
+            except Exception as e:
+                log.warning('minute backfill %s: %s',symbol,e)
+            await asyncio.sleep(0.35)
 
     def _extract_f5(self, msg: dict):
         for row in msg.get('data') or []:

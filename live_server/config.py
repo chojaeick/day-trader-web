@@ -26,6 +26,7 @@ class Settings:
     ws_url: str = os.getenv('KIWOOM_WS_URL', 'wss://api.kiwoom.com:10000/api/us/websocket')
     poll_seconds: float = float(os.getenv('DAYTRADER_POLL_SECONDS', '12'))
     daily_refresh_seconds: float = float(os.getenv('DAYTRADER_DAILY_REFRESH_SECONDS', '3600'))
+    manual_scan_cooldown_seconds:int = 45
     discovery_seconds: float = float(os.getenv('DAYTRADER_DISCOVERY_SECONDS', '600'))
     discovery_limit: int = int(os.getenv('DAYTRADER_DISCOVERY_LIMIT', '40'))
     discovery_min_price: float = float(os.getenv('DAYTRADER_DISCOVERY_MIN_PRICE', '5'))

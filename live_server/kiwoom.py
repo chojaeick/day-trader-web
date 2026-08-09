@@ -17,6 +17,8 @@ def num(v, default=0.0):
 
 class KiwoomClient:
     def __init__(self, settings: Settings, db: DB):
+        self.manual_scan_lock=asyncio.Lock()
+        self.last_manual_scan_at=None
         self.s, self.db = settings, db
         self.token = None
         self.discovery = {'symbols': list(settings.symbols), 'rows': [], 'updated_at': None, 'count': len(settings.symbols), 'core': list(settings.core_symbols), 'exchanges': {}}
@@ -186,6 +188,47 @@ class KiwoomClient:
 
     def active_exchange(self, symbol:str) -> str:
         return (self.discovery.get('exchanges') or {}).get(symbol.upper()) or self.s.exchange_for(symbol)
+
+
+    async def manual_discover_now(self):
+        """Force a fresh market-wide discovery and prime newly added symbols."""
+        async with self.manual_scan_lock:
+            before=list(self.active_symbols())
+            before_set=set(before)
+            started=datetime.now(timezone.utc)
+            result=await self.discover_universe()
+            after=list(self.active_symbols())
+            after_set=set(after)
+
+            added=sorted(after_set-before_set)
+            removed=sorted(before_set-after_set)
+
+            # Prime only genuinely new symbols. Keep this bounded so a manual click stays responsive.
+            for sym in added[:12]:
+                try:
+                    await asyncio.to_thread(self.snapshot_symbol, sym)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.to_thread(self.refresh_daily_symbol, sym)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.to_thread(self.minute_backfill_symbol, sym, 80)
+                except Exception:
+                    pass
+
+            self.last_manual_scan_at=datetime.now(timezone.utc)
+            return {
+                'ok':True,
+                'started_at':started.isoformat(),
+                'finished_at':self.last_manual_scan_at.isoformat(),
+                'before_count':len(before),
+                'after_count':len(after),
+                'added':added,
+                'removed':removed,
+                'result':result
+            }
 
     async def discovery_forever(self):
         while True:

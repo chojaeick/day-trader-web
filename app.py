@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.5') if live else '2.5'
+version=(health or {}).get('version','2.5.1') if live else '2.5.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.5a · KOREA BASE 추가 · 국내주식 REST 연결 테스트 + 국장 전용 UI 틀 · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.5.1 · KOREA Universe + TOP10 ALPHA · ka10032 거래대금상위 실데이터 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,12 +73,12 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
-        st.caption('V2.5는 국장 데이터 어댑터/화면 틀을 먼저 고정합니다. CURRENT 한국장 점수는 V2.5.1부터 별도로 계산합니다.')
+        st.caption('V2.5.1은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
-        k2.metric('Universe','NEXT')
-        k3.metric('Trading Score','NEXT')
+        k2.metric('Universe',str((ks or {}).get('universe_count') or 0))
+        k3.metric('Trading Score','ALPHA' if (ks or {}).get('score_live') else 'WAIT')
         k4.metric('자동주문','OFF')
 
         c1,c2=st.columns([1,3])
@@ -98,18 +98,40 @@ with tab_trading:
             with st.expander('국내주식 연결 테스트 RAW 응답',expanded=False):
                 st.json(qtest)
 
-        planned=(ks or {}).get('planned_sources') or []
-        if planned:
-            st.markdown('### V2.5 → V2.5.1 국내 후보발굴 소스')
-            st.dataframe(pd.DataFrame(planned),use_container_width=True,hide_index=True)
+        st.markdown('### 🇰🇷 한국장 Universe')
+        if live and st.button('🔍 한국장 시장 재검색',use_container_width=True,key='kr_market_scan'):
+            with st.spinner('KOSPI/KOSDAQ 거래대금 상위 → Universe → KOREA TOP10 계산 중...'):
+                rr=api_post('/api/korea/scan?limit=40') or {}
+            if rr.get('ok'):
+                st.success(f"한국장 Universe {rr.get('count',0)}개 생성 · KOSPI 원천 {((rr.get('market_breakdown') or {}).get('KOSPI',0))} · KOSDAQ 원천 {((rr.get('market_breakdown') or {}).get('KOSDAQ',0))}")
+                st.rerun()
+            else:
+                st.error('한국장 재검색 실패: '+str(rr.get('error') or rr))
 
-        st.markdown('### 🇰🇷 한국장 예정 구조')
-        st.info(
-            'KOSPI/KOSDAQ → 거래대금/거래량/급증/등락률 후보 병합 → 관리/저유동성 필터 → '
-            '한국장 CURRENT/SHADOW TOP10 → 체결강도/VI/갭 보강 → 08:30 KST PREOPEN 저장 → News AI 브리핑'
-        )
-        st.markdown('### 한국장 TOP10')
-        st.warning('V2.5 BASE 단계입니다. 실제 한국장 TOP10은 V2.5.1에서 순위 API를 연결한 뒤 활성화합니다.')
+        ku=api('/api/korea/universe') if live else {}
+        urows=(ku or {}).get('rows') or []
+        if urows:
+            udf=pd.DataFrame(urows)
+            keep=['value_rank','symbol','name','market','price','change_pct','volume','trading_value','score','bias','source']
+            udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
+            st.dataframe(udf,use_container_width=True,hide_index=True)
+
+        st.markdown('### 🇰🇷 한국장 TOP10 · KOREA_CURRENT_V1_ALPHA')
+        kt=api('/api/korea/top10') if live else {}
+        trows=(kt or {}).get('data') or []
+        if trows:
+            tdf=pd.DataFrame(trows); tdf.insert(0,'순위',range(1,len(tdf)+1))
+            keep=['순위','symbol','name','market','score','bias','price','change_pct','value_rank','trading_value']
+            tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={'symbol':'종목','name':'종목명','market':'시장','score':'Trading Score','bias':'방향','price':'현재가','change_pct':'등락률%','value_rank':'거래대금순위','trading_value':'거래대금'})
+            st.dataframe(tdf,use_container_width=True,hide_index=True)
+        else:
+            st.info('아직 한국장 Universe가 없습니다. 위의 한국장 시장 재검색을 한 번 눌러주세요.')
+
+        nexts=(ks or {}).get('next_sources') or []
+        if nexts:
+            with st.expander('V2.5.2 확장 예정 데이터 소스',expanded=False):
+                st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.5.2에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}

@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.1.3') if live else '2.1.3'
+version=(health or {}).get('version','2.2') if live else '2.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.1.3 · News AI timeout/retry + TOP5 우선 검색 + PREMARKET freshness · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.2 · News Catalyst 유형·신뢰도·출처·영향 투명화 + TOP5 web search + PREMARKET freshness · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -337,22 +337,54 @@ with tab_brief:
             rdf=pd.DataFrame(r)
             keep=['symbol','current_rank','shadow_rank','current_score','shadow_score',
                   'data_mode','premarket_change_pct','premarket_volume_pct_avg_daily',
-                  'long_power','short_power','catalyst_strength','news_bias','ai_confidence',
-                  'price_reaction','final_long_power','final_short_power','final_signal',
-                  'news_summary_ko','news_risk_ko','rationale']
+                  'long_power','short_power','catalyst_strength','catalyst_type','news_bias',
+                  'ai_confidence','confidence_score','source_quality','event_recency','impact_horizon',
+                  'price_reaction','news_weight_pct','news_delta_long',
+                  'final_long_power','final_short_power','final_signal',
+                  'news_headline_ko','news_why_now_ko','news_summary_ko','news_risk_ko',
+                  'source_title','source_url','rationale']
             rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
                 'symbol':'종목','current_rank':'CURRENT','shadow_rank':'SHADOW',
                 'current_score':'Current Score','shadow_score':'Shadow Score',
                 'data_mode':'Data Mode','premarket_change_pct':'PM %',
                 'premarket_volume_pct_avg_daily':'PM거래량/5일평균일거래량%',
                 'long_power':'Tech LONG','short_power':'Tech SHORT',
-                'catalyst_strength':'Catalyst','news_bias':'News Bias',
-                'ai_confidence':'AI Confidence','price_reaction':'Price Reaction',
+                'catalyst_strength':'Catalyst','catalyst_type':'Catalyst Type','news_bias':'News Bias',
+                'ai_confidence':'AI Confidence','confidence_score':'AI 신뢰점수',
+                'source_quality':'Source Quality','event_recency':'뉴스시점','impact_horizon':'영향기간',
+                'price_reaction':'Price Reaction','news_weight_pct':'News 가중치%','news_delta_long':'News ΔLONG',
                 'final_long_power':'FINAL LONG','final_short_power':'FINAL SHORT',
-                'final_signal':'최종판단','news_summary_ko':'AI 뉴스판단',
-                'news_risk_ko':'뉴스 리스크','rationale':'기술근거'
+                'final_signal':'최종판단','news_headline_ko':'뉴스 헤드라인',
+                'news_why_now_ko':'왜 지금 중요한가','news_summary_ko':'AI 뉴스판단',
+                'news_risk_ko':'뉴스 리스크','source_title':'대표 출처','source_url':'대표 URL',
+                'rationale':'기술근거'
             })
             st.dataframe(rdf,use_container_width=True,hide_index=True)
+
+            # V2.2: human-readable catalyst audit trail. This is research/briefing information only.
+            material=[x for x in r[:5] if x.get('catalyst_strength') not in (None,'','NONE')]
+            if material:
+                with st.expander('🧭 TOP5 Catalyst 상세 · 유형 / 신뢰도 / 출처 / 점수 영향',expanded=True):
+                    for x in material:
+                        st.markdown(
+                            f"**{x.get('symbol')} · {x.get('catalyst_strength','N/A')} / "
+                            f"{x.get('catalyst_type','N/A')} · {x.get('news_bias','N/A')}**"
+                        )
+                        st.caption(
+                            f"AI 신뢰 {x.get('confidence_score','N/A')}/100 ({x.get('ai_confidence','N/A')}) · "
+                            f"출처 {x.get('source_quality','N/A')} · 시점 {x.get('event_recency','N/A')} · "
+                            f"영향 {x.get('impact_horizon','N/A')} · News 가중치 {x.get('news_weight_pct',0)}% · "
+                            f"FINAL LONG 영향 {float(x.get('news_delta_long') or 0):+.1f}p"
+                        )
+                        if x.get('news_headline_ko'):
+                            st.write('**핵심:** '+str(x.get('news_headline_ko')))
+                        if x.get('news_why_now_ko'):
+                            st.write('**왜 지금:** '+str(x.get('news_why_now_ko')))
+                        if x.get('news_risk_ko'):
+                            st.write('**리스크:** '+str(x.get('news_risk_ko')))
+                        if x.get('source_url'):
+                            st.markdown(f"[대표 출처: {x.get('source_title') or 'source'}]({x.get('source_url')})")
+                        st.divider()
     else:
         st.info('아직 저장된 PREOPEN 리포트가 없습니다. 수동 생성으로 먼저 테스트할 수 있습니다.')
 
@@ -732,4 +764,4 @@ with tab_live:
             st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
 
-st.caption('V2.1.3: 프로젝트 .env가 systemd 환경보다 우선하며 /health에 News AI 설정 여부만 안전하게 표시합니다. NO AUTO ORDER.')
+st.caption('V2.2: 프로젝트 .env가 systemd 환경보다 우선하며 /health에 News AI 설정 여부만 안전하게 표시합니다. NO AUTO ORDER.')

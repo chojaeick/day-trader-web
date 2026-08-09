@@ -294,11 +294,21 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
         news=((news_result or {}).get('items') or {}).get(sym)
         if news:
             row['catalyst_strength']=news.get('catalyst_strength')
+            row['catalyst_type']=news.get('catalyst_type')
             row['news_bias']=news.get('news_bias')
             row['news_long_power']=news.get('news_long_power')
             row['news_short_power']=news.get('news_short_power')
             row['ai_confidence']=news.get('ai_confidence')
+            row['confidence_score']=news.get('confidence_score')
             row['price_reaction']=news.get('price_reaction')
+            row['source_quality']=news.get('source_quality')
+            row['event_recency']=news.get('event_recency')
+            row['impact_horizon']=news.get('impact_horizon')
+            row['event_time_utc']=news.get('event_time_utc')
+            row['source_title']=news.get('source_title')
+            row['source_url']=news.get('source_url')
+            row['news_headline_ko']=news.get('headline_ko')
+            row['news_why_now_ko']=news.get('why_now_ko')
             row['news_summary_ko']=news.get('summary_ko')
             row['news_risk_ko']=news.get('risk_ko')
         rows.append(row)
@@ -348,10 +358,16 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
         final_long=float(r.get('final_long_power') or r['long_power'])
         final_short=float(r.get('final_short_power') or r['short_power'])
         catalyst=r.get('catalyst_strength') or 'N/A'
+        ctype=r.get('catalyst_type') or 'N/A'
+        conf=r.get('confidence_score')
+        conf_txt=f"{float(conf):.0f}" if conf is not None else "N/A"
+        srcq=r.get('source_quality') or 'N/A'
+        delta=float(r.get('news_delta_long') or 0)
         news_txt=r.get('news_summary_ko') or '뉴스 AI 미사용'
         text_lines.append(
             f"{i}. {r['symbol']} · {final_sig} · FINAL LONG {final_long:.0f} / SHORT {final_short:.0f} "
-            f"· PM {pm_txt} · Catalyst {catalyst} · {r['rationale']} · {news_txt}"
+            f"· PM {pm_txt} · Catalyst {catalyst}/{ctype} · AI conf {conf_txt} · Source {srcq} "
+            f"· News ΔLONG {delta:+.1f} · {r['rationale']} · {news_txt}"
         )
     text_lines += [
         "",
@@ -366,7 +382,7 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
     return {
         'market':'USA','trade_date':et.strftime('%Y-%m-%d'),'label':label,
         'generated_at':now_utc.isoformat(),'scheduled':scheduled,
-        'model_version':'V2.1_NEWS_AI_CATALYST',
+        'model_version':'V2.2_NEWS_CATALYST_QUALITY',
         'qqq_pct':qqq_context if market_mode=='PREMARKET_LIVE' else None,
         'smh_pct':smh_context if market_mode=='PREMARKET_LIVE' else None,
         'market_long_power':market_long,'market_short_power':market_short,

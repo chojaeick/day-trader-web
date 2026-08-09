@@ -85,24 +85,47 @@ Market context supplied by the trading system:
 {json.dumps(market_context,ensure_ascii=False)}
 
 Use web search to find material, recent company-specific or sector-specific news that a short-term trader
-would reasonably care about. Prefer the most recent 24 hours; if there is no material item, say NONE.
-Do not invent news. Separate price action from news: a rising price alone is not a catalyst.
-For each symbol classify:
+would reasonably care about. Prefer the most recent 24 hours. If no material item exists, return NONE.
+Do not invent news, dates, URLs, analyst actions, or catalysts. A rising/falling price alone is NOT a catalyst.
+
+For EACH symbol return a single best catalyst assessment with:
 - catalyst_strength: NONE, LOW, MEDIUM, HIGH, CRITICAL
+- catalyst_type:
+  NONE, EARNINGS_GUIDANCE, CONTRACT_CUSTOMER, MNA, FDA_REGULATORY, ANALYST,
+  FINANCING_DILUTION, PRODUCT, LITIGATION, POLICY_MACRO, SECTOR, OTHER
 - news_bias: BULLISH, BEARISH, MIXED, NEUTRAL
-- news_long_power and news_short_power, integers summing to 100
+- news_long_power and news_short_power: integers summing to 100
 - ai_confidence: LOW, MEDIUM, HIGH
+- confidence_score: integer 0-100
 - price_reaction: CONFIRMED, DIVERGENT, UNKNOWN
+- source_quality: PRIMARY, TIER1, TIER2, OTHER, NONE
+- event_recency: TODAY, ONE_DAY, TWO_THREE_DAYS, OLDER, UNKNOWN
+- impact_horizon: INTRADAY, ONE_THREE_DAYS, ONE_TWO_WEEKS, LONGER, NONE
+- event_time_utc: ISO-like UTC timestamp if confidently available, otherwise UNKNOWN
+- source_title: title/outlet for the strongest supporting source, otherwise empty string
+- source_url: strongest supporting source URL, otherwise empty string
+- headline_ko: one-line Korean catalyst headline
+- why_now_ko: one concise Korean sentence explaining why this matters NOW for a short-term trader
 - summary_ko: concise Korean explanation, max 2 sentences
 - risk_ko: concise Korean caveat, max 1 sentence
+
+Source-quality guidance:
+- PRIMARY: company IR/SEC filing, regulator/government, exchange, official corporate announcement
+- TIER1: major financial newswire/newspaper with direct reporting
+- TIER2: established finance publication/analyst summary
+- OTHER: lower-confidence secondary source
+- NONE: no material catalyst
 
 Rules:
 1. Earnings/guidance, major contract/customer, M&A, FDA/regulatory, litigation, financing/dilution,
    material analyst action, product launch, government policy directly affecting the company,
    or sector-wide semiconductor/AI events can be catalysts.
-2. Rumors/social chatter without credible confirmation must be LOW and clearly identified.
-3. If no material recent news exists, set catalyst_strength NONE, bias NEUTRAL, 50/50.
-4. Do not give personalized financial advice or certainty language.
+2. Rumors/social chatter without credible confirmation must be LOW, source_quality OTHER, and clearly identified.
+3. Analyst target-price changes alone are usually LOW/MEDIUM unless unusually material and from a credible source.
+4. If no material recent news exists: strength NONE, type NONE, bias NEUTRAL, 50/50,
+   confidence LOW, confidence_score <= 50, source_quality NONE, impact_horizon NONE.
+5. Use source_url only when supported by the web-search result. Never fabricate a URL.
+6. Do not give personalized financial advice or certainty language.
 """
 
     schema={
@@ -115,16 +138,34 @@ Rules:
                     "properties":{
                         "symbol":{"type":"string"},
                         "catalyst_strength":{"type":"string","enum":["NONE","LOW","MEDIUM","HIGH","CRITICAL"]},
+                        "catalyst_type":{"type":"string","enum":[
+                            "NONE","EARNINGS_GUIDANCE","CONTRACT_CUSTOMER","MNA","FDA_REGULATORY","ANALYST",
+                            "FINANCING_DILUTION","PRODUCT","LITIGATION","POLICY_MACRO","SECTOR","OTHER"
+                        ]},
                         "news_bias":{"type":"string","enum":["BULLISH","BEARISH","MIXED","NEUTRAL"]},
                         "news_long_power":{"type":"integer","minimum":0,"maximum":100},
                         "news_short_power":{"type":"integer","minimum":0,"maximum":100},
                         "ai_confidence":{"type":"string","enum":["LOW","MEDIUM","HIGH"]},
+                        "confidence_score":{"type":"integer","minimum":0,"maximum":100},
                         "price_reaction":{"type":"string","enum":["CONFIRMED","DIVERGENT","UNKNOWN"]},
+                        "source_quality":{"type":"string","enum":["PRIMARY","TIER1","TIER2","OTHER","NONE"]},
+                        "event_recency":{"type":"string","enum":["TODAY","ONE_DAY","TWO_THREE_DAYS","OLDER","UNKNOWN"]},
+                        "impact_horizon":{"type":"string","enum":["INTRADAY","ONE_THREE_DAYS","ONE_TWO_WEEKS","LONGER","NONE"]},
+                        "event_time_utc":{"type":"string"},
+                        "source_title":{"type":"string"},
+                        "source_url":{"type":"string"},
+                        "headline_ko":{"type":"string"},
+                        "why_now_ko":{"type":"string"},
                         "summary_ko":{"type":"string"},
                         "risk_ko":{"type":"string"}
                     },
-                    "required":["symbol","catalyst_strength","news_bias","news_long_power","news_short_power",
-                                "ai_confidence","price_reaction","summary_ko","risk_ko"],
+                    "required":[
+                        "symbol","catalyst_strength","catalyst_type","news_bias",
+                        "news_long_power","news_short_power","ai_confidence","confidence_score",
+                        "price_reaction","source_quality","event_recency","impact_horizon",
+                        "event_time_utc","source_title","source_url","headline_ko","why_now_ko",
+                        "summary_ko","risk_ko"
+                    ],
                     "additionalProperties":False
                 }
             }
@@ -174,6 +215,12 @@ Rules:
         if lp+sp!=100:
             sp=max(0,100-lp)
         x["news_long_power"]=lp; x["news_short_power"]=sp
+        try:
+            x["confidence_score"]=max(0,min(100,int(x.get("confidence_score") or 0)))
+        except Exception:
+            x["confidence_score"]=0
+        if not str(x.get("source_url") or "").startswith(("http://","https://")):
+            x["source_url"]=""
         items[sym]=x
 
     return {
@@ -192,7 +239,11 @@ def combine_technical_and_news(row:dict, news:dict|None, premarket_live:bool) ->
             "final_long_power":round(tech_long,1),
             "final_short_power":round(100-tech_long,1),
             "final_signal":row.get("recommendation") or "WATCH",
-            "news_weight":0.0
+            "news_weight":0.0,
+            "news_weight_pct":0.0,
+            "news_delta_long":0.0,
+            "tech_long_before_news":round(tech_long,1),
+            "news_long_input":50.0
         }
 
     strength=str(news.get("catalyst_strength") or "NONE").upper()
@@ -217,5 +268,9 @@ def combine_technical_and_news(row:dict, news:dict|None, premarket_live:bool) ->
         "final_long_power":final,
         "final_short_power":round(100-final,1),
         "final_signal":sig,
-        "news_weight":round(nw,3)
+        "news_weight":round(nw,3),
+        "news_weight_pct":round(nw*100,1),
+        "news_delta_long":round(final-tech_long,1),
+        "tech_long_before_news":round(tech_long,1),
+        "news_long_input":round(news_long,1)
     }

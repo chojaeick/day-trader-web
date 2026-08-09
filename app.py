@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.8') if live else '1.8'
+version=(health or {}).get('version','1.9') if live else '1.9'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V1.8 · Trading / Research / Archive / Live Validation 탭 분리 · 운영 점수/자동주문 로직은 변경하지 않음')
+st.caption('V1.9 · Current 운영모델 + Shadow 실험모델 병행 관찰 · 운영 점수/자동주문 로직은 변경하지 않음')
 
 
 tab_trading, tab_research, tab_archive, tab_live = st.tabs([
@@ -167,6 +167,28 @@ with tab_trading:
                 if c in show.columns: show[c]=pd.to_numeric(show[c],errors='coerce').round(2)
             if '거래대금' in show.columns: show['거래대금']=pd.to_numeric(show['거래대금'],errors='coerce').round(0)
             st.dataframe(show,use_container_width=True,hide_index=True)
+
+            cmp=api('/api/screener/compare?top_n=10') or {}
+            with st.expander('🌓 CURRENT vs SHADOW TOP10 비교', expanded=False):
+                st.caption('SHADOW는 연구용 LIVE_CANDIDATE_V1입니다. 실제 Trading Score나 주문에는 사용하지 않습니다.')
+                m1,m2,m3=st.columns(3)
+                m1.metric('TOP10 겹침',f"{int(cmp.get('overlap_count') or 0)}/10")
+                m2.metric('CURRENT 전용',len(cmp.get('current_only') or []))
+                m3.metric('SHADOW 전용',len(cmp.get('shadow_only') or []))
+                crows=cmp.get('rows') or []
+                if crows:
+                    cdf=pd.DataFrame(crows)
+                    keep=['symbol','current_rank','shadow_rank','rank_delta','current_score','shadow_score','change_pct','bias']
+                    cdf=cdf[[c for c in keep if c in cdf.columns]].rename(columns={
+                        'symbol':'종목','current_rank':'Current 순위','shadow_rank':'Shadow 순위',
+                        'rank_delta':'Shadow 상승칸','current_score':'Current Score',
+                        'shadow_score':'Shadow Score','change_pct':'당일%','bias':'방향'
+                    })
+                    for c in ['Current Score','Shadow Score','당일%']:
+                        if c in cdf.columns: cdf[c]=pd.to_numeric(cdf[c],errors='coerce').round(2)
+                    st.dataframe(cdf,use_container_width=True,hide_index=True)
+                if cmp.get('shadow_only'):
+                    st.caption('SHADOW 신규 후보: '+', '.join(cmp.get('shadow_only')))
             symbols=[r['symbol'] for r in rows]
             for sym in (uni.get('core') or []):
                 if sym not in symbols:
@@ -545,7 +567,7 @@ with tab_research:
 
 with tab_archive:
     st.subheader('Daily Ranking Archive')
-    st.caption('일자별 TOP10과 T-10 / T-1 / T+7 / T+30 / T+60 / CLOSE / MANUAL_SCAN 스냅샷을 조회합니다.')
+    st.caption('CURRENT / SHADOW별 TOP10과 T-10 / T-1 / T+7 / T+30 / T+60 / CLOSE / MANUAL_SCAN 스냅샷을 조회합니다.')
     if live:
         with st.expander('📚 저장된 일자별 순위 Archive', expanded=False):
             adates=(api('/api/archive/dates?limit=120') or {}).get('data',[])
@@ -630,4 +652,4 @@ with tab_live:
             st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
 
-st.caption('V1.8: 화면을 Trading / Research / Archive / Live Validation 4개 탭으로 분리. V1.7.1 scan-3 기능과 점수 로직은 그대로 유지합니다.')
+st.caption('V1.9: CURRENT 운영모델은 그대로 유지하고 SHADOW 실험모델을 병행 저장/비교합니다. NO AUTO ORDER.')

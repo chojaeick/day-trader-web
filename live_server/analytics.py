@@ -165,3 +165,88 @@ def position_from_ticks(symbol:str,ticks:list[dict],entry:float,side:str,quotes:
     pnl=(s.price/entry-1)*100 if side.upper()=='LONG' else (entry/s.price-1)*100
     return {'symbol':symbol,'state':s.state,'side':side.upper(),'price':s.price,'entry':entry,'pnl_pct':pnl,'reason':s.reason,
             'invalidation':s.invalidation,'critical':s.critical,'risks':s.risks,'signal_score':s.score,'context':ctx}
+
+
+# V1.9 experimental live Shadow Model.
+# This is intentionally NOT the production score. It applies candidate-style
+# weights to the same live features already used by CURRENT so both models can
+# be compared on identical real-time data without changing trading operations.
+SHADOW_WEIGHTS = {
+    'Price>MA5': 1.15,
+    'MA5 slope': 1.15,
+    'Liquidity': 0.65,
+    'RVOL': 0.95,
+    'ATR': 0.95,
+    'Momentum': 0.65,
+    'Market/Sector': 0.90,
+    'Price action': 1.15,
+    'Liquid leveraged ETF': 1.15,
+    'Core liquidity': 0.75,
+}
+
+def _shadow_score(parts:dict) -> float:
+    total=0.0
+    for name, value in (parts or {}).items():
+        total += float(value) * SHADOW_WEIGHTS.get(name,1.0)
+    return max(0,min(100,round(total,2)))
+
+def shadow_screener_rows(quotes:list[dict], metrics:list[dict], top_n:int=10) -> list[dict]:
+    mm={m['symbol']:m for m in metrics}; qmap={q['symbol']:q for q in quotes}
+    index_strength=float((qmap.get('QQQ') or {}).get('change_pct') or 0)
+    semi_strength=float((qmap.get('SMH') or {}).get('change_pct') or 0)
+    progress=max(0.08,market_minutes_elapsed()/390)
+    out=[]
+    for q in quotes:
+        r=_score_row(q,mm.get(q['symbol'],{}),index_strength,semi_strength,progress)
+        if not r.get('eligible'):
+            continue
+        x=dict(r)
+        x['current_score']=x.get('score')
+        x['shadow_score']=_shadow_score(x.get('parts') or {})
+        x['score']=x['shadow_score']
+        x['model']='SHADOW'
+        out.append(x)
+    out.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
+    return out[:top_n]
+
+def compare_current_shadow(quotes:list[dict], metrics:list[dict], top_n:int=10) -> dict:
+    current=screener_rows(quotes,metrics,top_n)
+    shadow=shadow_screener_rows(quotes,metrics,top_n)
+    cr={r['symbol']:i for i,r in enumerate(current,1)}
+    sr={r['symbol']:i for i,r in enumerate(shadow,1)}
+    cm={r['symbol']:r for r in current}
+    sm={r['symbol']:r for r in shadow}
+    syms=[]
+    for r in current+shadow:
+        if r['symbol'] not in syms:
+            syms.append(r['symbol'])
+    rows=[]
+    for sym in syms:
+        c=cm.get(sym) or {}
+        s=sm.get(sym) or {}
+        rows.append({
+            'symbol':sym,
+            'current_rank':cr.get(sym),
+            'shadow_rank':sr.get(sym),
+            'rank_delta':(cr[sym]-sr[sym]) if sym in cr and sym in sr else None,
+            'current_score':c.get('score'),
+            'shadow_score':s.get('score'),
+            'bias':(s or c).get('bias'),
+            'price':(s or c).get('price'),
+            'change_pct':(s or c).get('change_pct'),
+            'in_current':sym in cr,
+            'in_shadow':sym in sr,
+        })
+    overlap=sorted(set(cr)&set(sr),key=lambda x:sr[x])
+    return {
+        'model':'LIVE_CANDIDATE_V1',
+        'experimental':True,
+        'top_n':top_n,
+        'overlap_count':len(overlap),
+        'overlap_symbols':overlap,
+        'current_only':[x for x in cr if x not in sr],
+        'shadow_only':[x for x in sr if x not in cr],
+        'rows':rows,
+        'current':current,
+        'shadow':shadow,
+    }

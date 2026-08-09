@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import Settings, FALLBACK_UNIVERSE, _symbols
 from .db import DB
 from .kiwoom import KiwoomClient
-from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, context_for
+from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, shadow_screener_rows, compare_current_shadow, context_for
 from .validation import HistoricalValidator, LiveTop10Validator
 from .archive import RankingArchive
 
@@ -34,6 +34,11 @@ async def checkpoint_forever():
                     archive.save(day,label,'CURRENT',rows,captured,
                                  float((qmap.get('QQQ') or {}).get('change_pct') or 0),
                                  float((qmap.get('SMH') or {}).get('change_pct') or 0))
+                    shadow_rows=shadow_screener_rows(db.quotes(),db.daily_metrics(),10)
+                    if shadow_rows:
+                        archive.save(day,label,'SHADOW',shadow_rows,captured,
+                                     float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+                                     float((qmap.get('SMH') or {}).get('change_pct') or 0))
                     done.add(key)
         await asyncio.sleep(20)
 
@@ -52,13 +57,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.8',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='1.9',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.8','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.9','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -76,6 +81,21 @@ def market_context(symbol:str):
 @app.get('/api/screener')
 def screener(top_n:int=Query(10,ge=1,le=30)):
     return {'data':screener_rows(db.quotes(),db.daily_metrics(),top_n),'updated_at':datetime.now(timezone.utc).isoformat()}
+
+@app.get('/api/screener/shadow')
+def screener_shadow(top_n:int=Query(10,ge=1,le=30)):
+    return {
+        'data':shadow_screener_rows(db.quotes(),db.daily_metrics(),top_n),
+        'model':'LIVE_CANDIDATE_V1',
+        'experimental':True,
+        'updated_at':datetime.now(timezone.utc).isoformat()
+    }
+
+@app.get('/api/screener/compare')
+def screener_compare(top_n:int=Query(10,ge=1,le=30)):
+    x=compare_current_shadow(db.quotes(),db.daily_metrics(),top_n)
+    x['updated_at']=datetime.now(timezone.utc).isoformat()
+    return x
 
 @app.get('/api/ranking-history')
 def ranking_history(): return {'data':db.ranking_history()}
@@ -110,7 +130,14 @@ def archive_save_now(label:str='MANUAL'):
     meta_id=archive.save(day,label,'CURRENT',rows,captured,
                          float((qmap.get('QQQ') or {}).get('change_pct') or 0),
                          float((qmap.get('SMH') or {}).get('change_pct') or 0))
-    return {'ok':True,'id':meta_id,'trade_date':day,'label':label.upper(),'model':'CURRENT','rows':len(rows)}
+    shadow_rows=shadow_screener_rows(db.quotes(),db.daily_metrics(),10)
+    shadow_id=None
+    if shadow_rows:
+        shadow_id=archive.save(day,label,'SHADOW',shadow_rows,captured,
+                               float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+                               float((qmap.get('SMH') or {}).get('change_pct') or 0))
+    return {'ok':True,'id':meta_id,'shadow_id':shadow_id,'trade_date':day,'label':label.upper(),
+            'models':['CURRENT','SHADOW'],'rows':len(rows),'shadow_rows':len(shadow_rows)}
 
 @app.get('/api/bars/{symbol}')
 def bars(symbol:str,minutes:int=Query(1,ge=1,le=60),limit:int=Query(200,ge=10,le=1000)):
@@ -168,6 +195,13 @@ async def scan_market_now():
             float((qmap.get('QQQ') or {}).get('change_pct') or 0),
             float((qmap.get('SMH') or {}).get('change_pct') or 0)
         )
+        shadow_top=shadow_screener_rows(db.quotes(),db.daily_metrics(),10)
+        if shadow_top:
+            archive.save(
+                ny.strftime('%Y-%m-%d'),label,'SHADOW',shadow_top,captured,
+                float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+                float((qmap.get('SMH') or {}).get('change_pct') or 0)
+            )
 
     out={
         **res,

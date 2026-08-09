@@ -19,11 +19,13 @@ from .preopen import PreOpenReportStore, build_usa_preopen_report, build_korea_p
 from .news_ai import analyze_news_with_openai, analyze_news_resilient
 from .korea import KoreaMarketAdapter
 from .recommendation import build_usa_final_recommendations, build_korea_final_recommendations
+from .v4_engine import CleanEngine
 import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); korea=KoreaMarketAdapter(k); tasks=[]
 manual_scan_state={'last_started_monotonic':0.0,'last_result':None}
+v4=CleanEngine(s.db_path)
 
 # V2.2.1: manual briefing generation is asynchronous so the browser never
 # has to hold a multi-minute HTTP request open. Scheduled PREOPEN generation
@@ -283,6 +285,20 @@ async def preopen_scheduler_forever():
         await asyncio.sleep(20)
 
 
+async def v4_engine_forever():
+    last={'USA':0.0,'KOREA':0.0}
+    while True:
+        try:
+            now=time.monotonic()
+            if now-last['USA']>=300:
+                v4.build_usa_finder(screener_rows(db.quotes(),db.daily_metrics(),30),k.discovery,5); last['USA']=now
+            if now-last['KOREA']>=300:
+                v4.build_korea_finder(korea.discovery,5); last['KOREA']=now
+            v4.refresh_usa_tracker(db); v4.refresh_korea_tracker(korea)
+        except Exception:
+            logging.exception('V4 engine loop failed')
+        await asyncio.sleep(5)
+
 async def korea_discovery_forever():
     """Keep Korea discovery ready without requiring a browser button click.
 
@@ -328,7 +344,7 @@ async def lifespan(app: FastAPI):
                       asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(k.backfill_forever_once()),
                       asyncio.create_task(k.discovery_forever()),asyncio.create_task(checkpoint_forever()),
                       asyncio.create_task(preopen_scheduler_forever()),asyncio.create_task(korea_discovery_forever()),
-                      asyncio.create_task(korea_intraday_pulse_forever())])
+                      asyncio.create_task(korea_intraday_pulse_forever()),asyncio.create_task(v4_engine_forever())])
     yield
     for t in tasks: t.cancel()
 
@@ -428,10 +444,50 @@ def korea_quote(stk_cd:str):
         logging.exception('korea quote probe failed')
         raise HTTPException(500,str(e))
 
+@app.get('/api/v4/{market}/status')
+def v4_status(market:str):
+    market=market.upper()
+    if market not in ('USA','KOREA'): raise HTTPException(400,'market must be USA or KOREA')
+    return v4.status(market)
+
+@app.get('/api/v4/{market}/finder')
+def v4_finder(market:str):
+    market=market.upper()
+    if market=='USA': return v4.build_usa_finder(screener_rows(db.quotes(),db.daily_metrics(),30),k.discovery,5)
+    if market=='KOREA': return v4.build_korea_finder(korea.discovery,5)
+    raise HTTPException(400,'market must be USA or KOREA')
+
+@app.get('/api/v4/{market}/tracker')
+def v4_tracker(market:str):
+    market=market.upper()
+    if market=='USA': return v4.refresh_usa_tracker(db)
+    if market=='KOREA': return v4.refresh_korea_tracker(korea)
+    raise HTTPException(400,'market must be USA or KOREA')
+
+@app.get('/api/v4/positions')
+def v4_positions(market:str|None=None): return {'data':v4.store.positions(market)}
+
+@app.post('/api/v4/position/buy')
+async def v4_position_buy(payload:dict):
+    try:return {'ok':True,'position':v4.store.buy(payload.get('market'),payload.get('symbol'),payload.get('qty'),payload.get('price'),payload.get('note') or '')}
+    except Exception as e:raise HTTPException(400,str(e))
+
+@app.post('/api/v4/position/sell')
+async def v4_position_sell(payload:dict):
+    try:return {'ok':True,**v4.store.sell(payload.get('market'),payload.get('symbol'),payload.get('qty'),payload.get('price'),payload.get('note') or '')}
+    except Exception as e:raise HTTPException(400,str(e))
+
+@app.get('/api/v4/events')
+def v4_events(market:str|None=None,limit:int=Query(50,ge=1,le=500)): return {'data':v4.store.events(market,limit)}
+@app.get('/api/v4/trades')
+def v4_trades(market:str|None=None,limit:int=Query(200,ge=1,le=1000)): return {'data':v4.store.trades(market,limit)}
+@app.get('/api/v4/validation/snapshots')
+def v4_validation_snapshots(market:str|None=None,limit:int=Query(500,ge=1,le=5000)): return {'data':v4.store.snapshots(market,limit),'note':'Baseline V4 feature snapshots for Historical/Shadow calibration.'}
+
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'3.5','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'4.0','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

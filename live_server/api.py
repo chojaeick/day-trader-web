@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from dotenv import load_dotenv
 import time
+import uuid
 import asyncio, logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -21,6 +22,68 @@ import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); tasks=[]
 manual_scan_state={'last_started_monotonic':0.0,'last_result':None}
+
+# V2.2.1: manual briefing generation is asynchronous so the browser never
+# has to hold a multi-minute HTTP request open. Scheduled PREOPEN generation
+# remains server-side and is not limited by browser timeouts.
+briefing_jobs={}
+briefing_job_lock=asyncio.Lock()
+
+def _briefing_job_view(job:dict):
+    if not job:
+        return None
+    return {
+        'job_id':job.get('job_id'),
+        'market':job.get('market'),
+        'label':job.get('label'),
+        'status':job.get('status'),
+        'stage':job.get('stage'),
+        'progress':job.get('progress'),
+        'created_at':job.get('created_at'),
+        'started_at':job.get('started_at'),
+        'finished_at':job.get('finished_at'),
+        'report_id':job.get('report_id'),
+        'trade_date':job.get('trade_date'),
+        'error':job.get('error'),
+    }
+
+async def _run_briefing_job(job_id:str):
+    job=briefing_jobs[job_id]
+    job['status']='RUNNING'; job['stage']='SCANNING'; job['progress']=10
+    job['started_at']=datetime.now(timezone.utc).isoformat()
+    try:
+        # The report builder performs discovery -> premarket probes -> News AI
+        # -> archive. Stages are exposed conservatively around the long task.
+        job['stage']='NEWS_SEARCH_AI'; job['progress']=35
+        result=await generate_usa_preopen_report(scheduled=False,label=job.get('label') or 'MANUAL_PREOPEN')
+        job['stage']='SAVING'; job['progress']=90
+        job['report_id']=result.get('id')
+        job['trade_date']=result.get('trade_date')
+        job['status']='COMPLETE'; job['stage']='COMPLETE'; job['progress']=100
+        job['finished_at']=datetime.now(timezone.utc).isoformat()
+    except Exception as e:
+        logging.exception('async manual briefing generation failed')
+        job['status']='FAILED'; job['stage']='FAILED'; job['progress']=100
+        job['error']=str(e)
+        job['finished_at']=datetime.now(timezone.utc).isoformat()
+
+async def _start_manual_briefing_job(market:str='USA'):
+    async with briefing_job_lock:
+        # Prevent duplicate expensive OpenAI jobs from repeated clicks.
+        for j in briefing_jobs.values():
+            if j.get('market')==market and j.get('status') in ('QUEUED','RUNNING'):
+                return j, False
+        job_id=uuid.uuid4().hex[:12]
+        job={
+            'job_id':job_id,'market':market,'label':'MANUAL_PREOPEN',
+            'status':'QUEUED','stage':'QUEUED','progress':0,
+            'created_at':datetime.now(timezone.utc).isoformat(),
+            'started_at':None,'finished_at':None,
+            'report_id':None,'trade_date':None,'error':None
+        }
+        briefing_jobs[job_id]=job
+        asyncio.create_task(_run_briefing_job(job_id))
+        return job, True
 
 async def checkpoint_forever():
     done=set()
@@ -156,13 +219,13 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.2',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.2.1',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.2','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.2.1','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 
@@ -332,11 +395,26 @@ async def briefing_generate(market:str='USA'):
     market=market.upper()
     if market!='USA':
         raise HTTPException(501,'KOREA briefing requires the Korean-market data adapter; scheduled schema is already prepared')
-    try:
-        return await generate_usa_preopen_report(scheduled=False,label='MANUAL_PREOPEN')
-    except Exception as e:
-        logging.exception('manual briefing generation failed')
-        raise HTTPException(500,str(e))
+    job,created=await _start_manual_briefing_job(market)
+    return {'ok':True,'accepted':True,'created':created,**_briefing_job_view(job)}
+
+@app.get('/api/briefing/job/{job_id}')
+def briefing_job(job_id:str):
+    job=briefing_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404,'briefing job not found')
+    return {'ok':True,**_briefing_job_view(job)}
+
+@app.get('/api/briefing/job-active/{market}')
+def briefing_job_active(market:str='USA'):
+    market=market.upper()
+    active=None
+    # newest active job wins
+    for j in reversed(list(briefing_jobs.values())):
+        if j.get('market')==market and j.get('status') in ('QUEUED','RUNNING'):
+            active=j
+            break
+    return {'ok':True,'active':bool(active),'job':_briefing_job_view(active) if active else None}
 
 @app.get('/api/briefing/latest')
 def briefing_latest(market:str='USA'):

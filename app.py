@@ -1,4 +1,4 @@
-import os, requests, pandas as pd
+import os, time, requests, pandas as pd
 import altair as alt
 import streamlit as st
 from dotenv import load_dotenv
@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.2') if live else '2.2'
+version=(health or {}).get('version','2.2.1') if live else '2.2.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.2 · News Catalyst 유형·신뢰도·출처·영향 투명화 + TOP5 web search + PREMARKET freshness · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.2.1 · 비동기 Briefing Job + News Catalyst Quality · 브라우저 timeout 제거 · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -284,17 +284,45 @@ with tab_trading:
 
 with tab_brief:
     st.subheader('🗞️ Pre-Open Intelligence Briefing')
-    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → Intelligence Report → Archive 저장을 수행합니다.')
+    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.1부터 서버 Job으로 비동기 처리합니다.')
     c1,c2,c3=st.columns([1.2,1.2,3.6])
     with c1:
         if live and st.button('지금 미국장 브리핑 생성',use_container_width=True,key='brief_generate_now'):
-            with st.spinner('시장 재검색과 PREOPEN Intelligence Report 생성 중...'):
-                res=api_post('/api/briefing/generate?market=USA') or {}
-            if res.get('ok'):
-                st.success(f"브리핑 저장 완료 · {res.get('trade_date')} · Report #{res.get('id')}")
+            res=api_post('/api/briefing/generate?market=USA') or {}
+            if res.get('ok') and res.get('job_id'):
+                st.session_state['brief_job_id']=res.get('job_id')
+                st.session_state['brief_job_started']=time.time()
                 st.rerun()
             else:
-                st.error('브리핑 생성 실패: '+str(res.get('error') or res))
+                st.error('브리핑 작업 시작 실패: '+str(res.get('error') or res))
+
+        # Recover an already-running server job after browser refresh/reconnect.
+        if live and not st.session_state.get('brief_job_id'):
+            active=api('/api/briefing/job-active/USA') or {}
+            if active.get('active') and (active.get('job') or {}).get('job_id'):
+                st.session_state['brief_job_id']=active['job']['job_id']
+
+        job_id=st.session_state.get('brief_job_id')
+        if live and job_id:
+            js=api(f'/api/briefing/job/{job_id}',timeout=10) or {}
+            status=js.get('status')
+            stage=js.get('stage') or status or 'UNKNOWN'
+            progress=int(js.get('progress') or 0)
+            if status in ('QUEUED','RUNNING'):
+                st.progress(max(0,min(100,progress)),text=f'브리핑 생성 중 · {stage} · {progress}%')
+                st.caption('브라우저 요청은 이미 종료되었습니다. 서버가 뉴스 검색/AI 분석/저장을 계속 수행합니다.')
+                # Poll with short GET requests; no multi-minute POST connection is held.
+                time.sleep(3)
+                st.rerun()
+            elif status=='COMPLETE':
+                st.success(f"브리핑 저장 완료 · {js.get('trade_date')} · Report #{js.get('report_id')}")
+                st.session_state.pop('brief_job_id',None)
+                st.session_state.pop('brief_job_started',None)
+                st.rerun()
+            elif status=='FAILED':
+                st.error('브리핑 생성 실패: '+str(js.get('error') or 'unknown error'))
+                st.session_state.pop('brief_job_id',None)
+                st.session_state.pop('brief_job_started',None)
     with c2:
         st.metric('자동 시각','09:00 ET')
     with c3:

@@ -54,13 +54,137 @@ def fmt_level(v):
     except Exception:
         return '-'
 
+
+def _safe_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+def render_market_summary(market_name, market_status, market_bias, universe_count, final_count, data_status, quality_counts=None):
+    st.subheader(f'{market_name} · Trading')
+    st.caption('시장 → 최종 추천 → 종목 상세 → 후보 → 시장 맥락')
+    a,b,c,d=st.columns(4)
+    a.metric('시장',market_status)
+    b.metric('시장 방향',market_bias)
+    c.metric('분석 후보군',str(universe_count))
+    d.metric('최종 추천',str(final_count))
+    qc=quality_counts or {}
+    st.caption(
+        f"데이터 {data_status} · 일반후보 {qc.get('A',0)} · 이벤트후보 {qc.get('B_EVENT',0)} · "
+        f"고위험 {qc.get('C_HIGH_RISK',0)} · 제외 {qc.get('REJECT',0)}"
+    )
+
+def render_final_table(rows):
+    st.markdown('### 🎯 최종 추천 1~5')
+    if not rows:
+        st.info('현재 매매 조건을 모두 만족한 종목이 없습니다. NO TRADE도 정상입니다.')
+        return
+    normalized=[]
+    for r in rows[:5]:
+        normalized.append({
+            '종목':r.get('symbol','-'),
+            '종목명':r.get('name') or '-',
+            '판단':r.get('action','-'),
+            '추천점수':r.get('final_score','-'),
+            '방향':r.get('bias','-'),
+            '현재가':r.get('price','-'),
+            '손절/무효화':r.get('invalidation','-'),
+            'T1':r.get('target1','-'),
+            'T2':r.get('target2','-'),
+            '핵심이유':r.get('reason','-'),
+        })
+    st.dataframe(pd.DataFrame(normalized),use_container_width=True,hide_index=True)
+
+def render_candidate_table(rows, quality_map=None):
+    with st.expander('👀 후보 TOP10 · 더 깊게 볼 종목',expanded=False):
+        st.caption('추천주가 아닙니다. 최종 추천 엔진이 추가 검토할 정밀분석 후보입니다.')
+        if not rows:
+            st.info('후보 데이터가 아직 없습니다.')
+            return
+        out=[]
+        qmap=quality_map or {}
+        for i,r in enumerate(rows[:10],1):
+            q=qmap.get(str(r.get('symbol') or '').upper(),{})
+            out.append({
+                '순위':i,
+                '품질':r.get('quality_grade') or q.get('quality_grade') or '-',
+                '종목':r.get('symbol','-'),
+                '종목명':r.get('name') or q.get('name') or '-',
+                '후보점수':r.get('score','-'),
+                '방향':r.get('bias','-'),
+                '현재가':r.get('price','-'),
+                '등락률%':r.get('change_pct','-'),
+                '거래량강도':r.get('rvol') if r.get('rvol') is not None else '-',
+                '위험':r.get('chase_risk') or q.get('chase_risk') or 'NORMAL',
+            })
+        st.dataframe(pd.DataFrame(out),use_container_width=True,hide_index=True)
+        st.caption('품질 A=일반 후보 · B_EVENT=이벤트/레버리지 등 추가 주의 후보 · 후보점수는 매수확률이 아닙니다.')
+
+def render_chart_placeholder(title, message):
+    st.caption(title)
+    st.markdown(
+        f'''<div style="height:300px;border:1px solid rgba(128,128,128,.25);border-radius:10px;
+        display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;">
+        <div><b>{message}</b><br><small>차트 위치와 화면 구조는 미장과 동일하게 유지합니다.</small></div></div>''',
+        unsafe_allow_html=True
+    )
+
+def render_intraday_chart(rows, title):
+    df=pd.DataFrame(rows)
+    if df.empty:
+        render_chart_placeholder(title,'분봉 데이터 준비 중')
+        return
+    st.caption(title)
+    df['time']=pd.to_datetime(df['time'],utc=True,errors='coerce')
+    for c in ['open','high','low','close','volume']:
+        df[c]=pd.to_numeric(df.get(c),errors='coerce')
+    df=df.dropna(subset=['time','close']).sort_values('time')
+    if df.empty:
+        render_chart_placeholder(title,'사용 가능한 분봉 데이터 없음')
+        return
+    df['ema9']=df['close'].ewm(span=9,adjust=False).mean()
+    df['ema20']=df['close'].ewm(span=20,adjust=False).mean()
+    typ=(df['high'].fillna(df['close'])+df['low'].fillna(df['close'])+df['close'])/3
+    vol=df['volume'].fillna(0).clip(lower=0)
+    denom=vol.cumsum().replace(0,pd.NA)
+    df['vwap']=(typ*vol).cumsum()/denom
+    long=df.melt(id_vars=['time'],value_vars=['close','ema9','ema20','vwap'],var_name='series',value_name='price').dropna()
+    chart=alt.Chart(long).mark_line().encode(
+        x=alt.X('time:T',title=None),
+        y=alt.Y('price:Q',title='Price',scale=alt.Scale(zero=False)),
+        color=alt.Color('series:N',title=None),
+        tooltip=[alt.Tooltip('time:T'),alt.Tooltip('series:N'),alt.Tooltip('price:Q',format='.4f')]
+    ).properties(height=300).interactive()
+    st.altair_chart(chart,use_container_width=True)
+
+def render_detail_shell(state, bias, signal_score, confirm_5m, volume_strength, price, chart1=None, chart5=None, pending_message=None):
+    m1,m2,m3,m4,m5,m6=st.columns(6)
+    m1.metric('상태',state)
+    m2.metric('방향',bias)
+    m3.metric('신호점수',signal_score)
+    m4.metric('5분 확인',confirm_5m)
+    m5.metric('거래량강도',volume_strength)
+    m6.metric('현재가',price)
+    l,r=st.columns(2)
+    if pending_message:
+        with l:
+            render_chart_placeholder('1분봉 · EMA9 / EMA20 / VWAP',pending_message)
+        with r:
+            render_chart_placeholder('5분봉 · EMA9 / EMA20 / VWAP',pending_message)
+    else:
+        with l:
+            render_intraday_chart(chart1 or [],'1분봉 · EMA9 / EMA20 / VWAP')
+        with r:
+            render_intraday_chart(chart5 or [],'5분봉 · EMA9 / EMA20 / VWAP')
+
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','3.1') if live else '3.1'
+version=(health or {}).get('version','3.2') if live else '3.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>시장 → 최종추천 → 종목상세 → 후보 → 검증</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V3.1 · UNIFIED UX · USA/KOREA 동일 구조 · NO AUTO ORDER')
+st.caption('V3.2 · ONE TRADING UI · USA/KOREA 공통 화면 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -68,9 +192,96 @@ tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
 ])
 
 with tab_trading:
-    market_view=st.radio('시장', ['🇺🇸 USA','🇰🇷 KOREA'], horizontal=True, key='trading_market_view')
+    market_view=st.radio('시장',['🇺🇸 USA','🇰🇷 KOREA'],horizontal=True,key='trading_market_view')
 
-    if market_view=='🇰🇷 KOREA':
+    if market_view=='🇺🇸 USA':
+        qqq=api('/api/quote/QQQ') if live else {}
+        smh=api('/api/quote/SMH') if live else {}
+        qqq_pct=_safe_float((qqq or {}).get('change_pct'))
+        smh_pct=_safe_float((smh or {}).get('change_pct'))
+        market_label='BULL' if qqq_pct>=.3 else ('BEAR' if qqq_pct<=-.3 else 'NEUTRAL')
+        sector_label='STRONG' if smh_pct>=.5 else ('WEAK' if smh_pct<=-.5 else 'NEUTRAL')
+
+        uni=(api('/api/universe') or {}) if live else {}
+        fr=(api('/api/recommendations/final?limit=5',timeout=20) or {}) if live else {}
+        payload=(api('/api/screener?top_n=10') or {'data':[]}) if live else {'data':[]}
+        rows=payload.get('data') or []
+        frows=fr.get('data') or []
+        qmap={str(r.get('symbol') or '').upper():r for r in (uni.get('rows') or [])}
+        symbols=[]
+        for r in frows+rows:
+            s=r.get('symbol')
+            if s and s not in symbols:
+                symbols.append(s)
+        for s in (uni.get('core') or []):
+            if s and s not in symbols:
+                symbols.append(s)
+
+        render_market_summary(
+            '🇺🇸 USA',
+            'LIVE' if live else 'DEMO',
+            f'{market_label} {qqq_pct:+.2f}%',
+            uni.get('count',0),
+            len(frows),
+            'LIVE' if live else 'DEMO',
+            uni.get('quality_counts') or {}
+        )
+        if st.button('↻ 화면 새로고침',key='us_simple_refresh'):
+            st.rerun()
+
+        render_final_table(frows)
+
+        st.markdown('### 📈 종목 상세보기')
+        if symbols:
+            selected=st.selectbox('종목 선택',symbols,key='us_detail_symbol')
+            q=(api(f'/api/quote/{selected}') or {}) if live else {}
+            sig=(api(f'/api/signal/{selected}') or {}) if live else {}
+            b1=(api(f'/api/bars/{selected}?minutes=1&limit=200') or {'data':[]}) if live else {'data':[]}
+            b5=(api(f'/api/bars/{selected}?minutes=5&limit=100') or {'data':[]}) if live else {'data':[]}
+            ind=sig.get('indicators') or {}
+            render_detail_shell(
+                sig.get('state','WAIT'),
+                sig.get('bias','NEUTRAL'),
+                f"{sig.get('score',0)}/100",
+                sig.get('confirm_5m',0),
+                f"{_safe_float(ind.get('rvol')):.2f}x" if ind else '-',
+                fmt_px(q.get('price')),
+                b1.get('data') or [],
+                b5.get('data') or []
+            )
+            st.caption(sig.get('reason') or '실시간 신호 데이터 준비 중')
+            if sig.get('risks'):
+                st.warning('리스크 · '+str(sig.get('risks')))
+            st.caption(
+                f"손절/무효화 {fmt_level(sig.get('invalidation'))} · "
+                f"T1 {fmt_level(sig.get('target1'))} · T2 {fmt_level(sig.get('target2'))}"
+            )
+        else:
+            st.info('상세보기 대상 종목이 없습니다.')
+
+        render_candidate_table(rows,qmap)
+
+        st.markdown('### 📍 시장 맥락')
+        x1,x2,x3,x4=st.columns(4)
+        x1.metric('시장 방향',f'{market_label} {qqq_pct:+.2f}%')
+        x2.metric('섹터',f'{sector_label} {smh_pct:+.2f}%')
+        x3.metric('장세','TREND' if abs(qqq_pct)>=.4 else 'MIXED')
+        x4.metric('데이터','LIVE' if live else 'DEMO')
+
+        with st.expander('⚙️ 진단/수동 복구',expanded=False):
+            st.caption('평소에는 사용하지 않습니다. 데이터 이상이 있을 때만 사용하세요.')
+            st.markdown('**시장 후보 다시 찾기** · 거래량/거래대금 랭킹을 다시 조회해 분석 후보군을 재구성합니다.')
+            if live and st.button('시장 후보 다시 찾기',key='us_market_rescan',use_container_width=True):
+                res=api_post('/api/scan/market') or {}
+                if res.get('ok'):
+                    st.success('분석 후보군 재구성 완료')
+                    st.rerun()
+                elif res.get('cooldown'):
+                    st.warning(f"재검색 대기 중 · 약 {res.get('retry_after')}초 후 가능")
+                else:
+                    st.error('시장 후보 재검색 실패')
+
+    else:
         ks=api('/api/korea/status') if live else {}
         ku=api('/api/korea/universe') if live else {}
         krf=api('/api/korea/recommendations/final?limit=5') if live else {}
@@ -78,121 +289,83 @@ with tab_trading:
         kpulse=api('/api/korea/pulse') if live else {}
         kl=api('/api/korea/preopen/latest') if live else {}
 
-        st.subheader('🇰🇷 KOREA · Trading')
-        st.caption('미장과 같은 순서: 시장상태 → 최종추천 → 종목상세 → 후보 → 시장맥락')
-
         kqc=(ks or {}).get('quality_counts') or {}
-        po=(kpulse or {}).get('market_open',False)
-        ps=(kpulse or {}).get('status','N/A')
+        po=bool((kpulse or {}).get('market_open'))
         klm=(kl or {}).get('meta') or {}
         kle=klm.get('extra') or {}
         krfd=(krf or {}).get('data') or []
         trows=(kt or {}).get('data') or []
+        long_power=_safe_float(klm.get('market_long_power'),50.0)
+        bias='BULL' if long_power>=60 else ('BEAR' if long_power<=40 else 'NEUTRAL')
 
-        c1,c2,c3,c4=st.columns(4)
-        c1.metric('시장','OPEN' if po else 'CLOSED')
-        c2.metric('분석 후보군',str((ks or {}).get('universe_count') or 0))
-        c3.metric('최종 추천',str(len(krfd)))
-        c4.metric('데이터','LIVE' if (ks or {}).get('adapter_ready') else 'WAIT')
-
-        st.caption(
-            f"후보군 상태 · 일반 {kqc.get('A',0)} · 이벤트 {kqc.get('B_EVENT',0)} · "
-            f"고위험 {kqc.get('C_HIGH_RISK',0)} · 제외 {kqc.get('REJECT',0)}"
+        render_market_summary(
+            '🇰🇷 KOREA',
+            'OPEN' if po else 'CLOSED',
+            f'{bias} {long_power:.0f}',
+            (ks or {}).get('universe_count') or 0,
+            len(krfd),
+            'LIVE' if (ks or {}).get('adapter_ready') else 'WAIT',
+            kqc
         )
-
-        if st.button('↻ 화면 새로고침',use_container_width=False,key='kr_simple_refresh'):
+        if st.button('↻ 화면 새로고침',key='kr_simple_refresh'):
             st.rerun()
 
-        # 1. FINAL PICKS
-        st.markdown('### 🎯 최종 추천 1~5')
-        if krfd:
-            rdf=pd.DataFrame(krfd)
-            keep=['symbol','name','action','final_score','quality_grade','bias','strength_composite','reason']
-            rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
-                'symbol':'종목','name':'종목명','action':'판단','final_score':'추천점수',
-                'quality_grade':'품질','bias':'방향','strength_composite':'체결강도','reason':'핵심이유'
-            })
-            st.dataframe(rdf,use_container_width=True,hide_index=True)
-        else:
-            st.info('현재 매매 조건을 모두 만족한 종목이 없습니다. NO TRADE도 정상입니다.')
+        render_final_table(krfd)
         if not (krf or {}).get('buy_now_enabled',False):
-            st.caption('국장은 1분/5분 차트 검증 전이므로 현재 BUY NOW는 차단하고 WATCH까지만 허용합니다.')
+            st.caption('국장은 검증된 1분/5분 분봉 연결 전이라 BUY NOW는 차단하고 WATCH까지만 허용합니다.')
 
-        # 2. DETAIL / CHART — same location as USA.
-        st.markdown('### 📈 종목 상세보기')
         detail_symbols=[]
-        for r in krfd:
-            if r.get('symbol') and r.get('symbol') not in detail_symbols:
-                detail_symbols.append(r.get('symbol'))
-        for r in trows:
-            if r.get('symbol') and r.get('symbol') not in detail_symbols:
-                detail_symbols.append(r.get('symbol'))
+        for r in krfd+trows:
+            s=r.get('symbol')
+            if s and s not in detail_symbols:
+                detail_symbols.append(s)
+
+        st.markdown('### 📈 종목 상세보기')
         if detail_symbols:
             ksel=st.selectbox('종목 선택',detail_symbols,key='kr_detail_symbol')
-            row=next((x for x in (kpulse.get('top10') or []) if x.get('symbol')==ksel),{})
-            b=next((x for x in trows if x.get('symbol')==ksel),{})
-            d1,d2,d3,d4,d5=st.columns(5)
-            d1.metric('방향',str(row.get('bias') or b.get('bias') or 'N/A'))
-            d2.metric('Candidate',str(b.get('score') or '-'))
-            d3.metric('LIVE Score',str(row.get('live_score') or '-'))
-            d4.metric('체결강도',str(row.get('strength_composite') or '-'))
-            d5.metric('VI','YES' if row.get('vi_triggered') else 'NO')
-            st.info('국장 1분/5분 차트는 아직 검증된 분봉 데이터 연결 전입니다. 같은 위치에 차트를 붙일 예정입니다.')
+            prow=next((x for x in ((kpulse or {}).get('top10') or []) if x.get('symbol')==ksel),{})
+            brow=next((x for x in trows if x.get('symbol')==ksel),{})
+            state='WATCH' if any(x.get('symbol')==ksel and x.get('action')=='WATCH' for x in krfd) else 'WAIT'
+            render_detail_shell(
+                state,
+                str(prow.get('bias') or brow.get('bias') or 'NEUTRAL'),
+                str(prow.get('live_score') or brow.get('score') or '-'),
+                '-',
+                str(prow.get('strength_composite') or '-'),
+                str(brow.get('price') or '-'),
+                pending_message='국장 분봉 데이터 연결 준비 중'
+            )
+            st.caption('차트가 연결되면 이 위치에서 미장과 동일하게 VWAP·EMA9·EMA20·1분/5분 확인을 표시합니다.')
         else:
-            st.info('상세보기 대상 종목이 아직 없습니다.')
+            st.info('상세보기 대상 종목이 없습니다.')
 
-        # 3. CANDIDATE — secondary and collapsed.
-        with st.expander('👀 후보 TOP10 · 더 깊게 볼 종목',expanded=False):
-            st.caption('여기는 추천주 목록이 아닙니다. 최종추천 엔진이 추가 검토할 후보입니다.')
-            if trows:
-                tdf=pd.DataFrame(trows); tdf.insert(0,'순위',range(1,len(tdf)+1))
-                keep=['순위','quality_grade','symbol','name','market','score','bias','price','change_pct','chase_risk','source_count']
-                tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={
-                    'quality_grade':'품질','symbol':'종목','name':'종목명','market':'시장',
-                    'score':'후보점수','bias':'방향','price':'현재가','change_pct':'등락률%',
-                    'chase_risk':'추격위험','source_count':'선정근거 수'
-                })
-                st.dataframe(tdf,use_container_width=True,hide_index=True)
-            else:
-                st.info('후보 데이터가 아직 없습니다.')
-            st.caption('품질 A=일반 후보 · B_EVENT=이벤트 후보 · 후보점수는 매수확률이 아니라 정밀분석 우선순위입니다.')
+        render_candidate_table(trows,{str(r.get('symbol') or '').upper():r for r in (ku.get('rows') or [])})
 
-        # 4. MARKET CONTEXT
         st.markdown('### 📍 시장 맥락')
-        p1,p2,p3,p4=st.columns(4)
-        p1.metric('장전 상태',str(kle.get('data_mode') or 'N/A'))
-        p2.metric('시장 LONG',str(klm.get('market_long_power') or 'N/A'))
-        p3.metric('예상체결 반영',f"{kle.get('expected_coverage_pct',0)}%")
-        p4.metric('장중 Pulse','LIVE' if po else 'OFF-HOURS')
+        x1,x2,x3,x4=st.columns(4)
+        x1.metric('시장 방향',f'{bias} {long_power:.0f}')
+        x2.metric('장전 상태',str(kle.get('data_mode') or 'N/A'))
+        x3.metric('예상체결 반영',f"{kle.get('expected_coverage_pct',0)}%")
+        x4.metric('장중 Pulse','LIVE' if po else 'OFF-HOURS')
 
-        with st.expander('시장 맥락 상세 · PREOPEN / Pulse',expanded=False):
-            st.caption('PREOPEN = 장 시작 전 예상체결 정보 · Pulse = 장중 체결강도/VI 정보')
-            prows=(kpulse or {}).get('top10') or []
-            if prows:
-                pdf=pd.DataFrame(prows)
-                keep=['symbol','name','live_score','score','bias','strength_composite','strength_bias','vi_triggered','chase_risk']
-                pdf=pdf[[c for c in keep if c in pdf.columns]].rename(columns={
-                    'symbol':'종목','name':'종목명','live_score':'장중점수','score':'기본점수','bias':'방향',
-                    'strength_composite':'체결강도','strength_bias':'체결힘','vi_triggered':'VI','chase_risk':'추격위험'
-                })
-                st.dataframe(pdf,use_container_width=True,hide_index=True)
-
-        # Diagnostics only. Every button explains its effect.
         with st.expander('⚙️ 진단/수동 복구',expanded=False):
             st.caption('평소에는 사용하지 않습니다. 데이터 이상이 있을 때만 사용하세요.')
-            st.markdown('**API 연결 점검** · 키움 국내 REST 연결만 확인합니다.')
+            st.markdown('**API 연결 확인** · 키움 국내 REST 연결 상태만 확인합니다.')
             if live and st.button('API 연결 확인',key='kr_quote_probe',use_container_width=True):
                 q=api('/api/korea/quote/005930',timeout=25) or {}
-                if q.get('ok'): st.success('국내 REST 연결 정상')
-                else: st.error('국내 REST 연결 실패')
+                if q.get('ok'):
+                    st.success('국내 REST 연결 정상')
+                else:
+                    st.error('국내 REST 연결 실패')
 
             st.markdown('**시장 후보 다시 찾기** · 거래대금/거래량/등락률을 다시 조회해 분석 후보군을 재구성합니다.')
-            if live and st.button('시장 후보 다시 찾기',key='kr_market_scan_diag',use_container_width=True):
+            if live and st.button('시장 후보 다시 찾기',key='kr_market_rescan',use_container_width=True):
                 rr=api_post('/api/korea/scan?limit=50') or {}
                 if rr.get('ok'):
                     st.success('분석 후보군 재구성 완료')
                     st.rerun()
-                else: st.error('후보군 재검색 실패')
+                else:
+                    st.error('후보군 재검색 실패')
 
             st.markdown('**장중 신호 다시 계산** · 체결강도와 VI를 다시 불러와 장중 점수를 갱신합니다.')
             if live and st.button('장중 신호 다시 계산',key='kr_pulse_refresh',use_container_width=True):
@@ -200,209 +373,20 @@ with tab_trading:
                 if rr.get('updated_at'):
                     st.success('장중 신호 갱신 완료')
                     st.rerun()
-                else: st.error('장중 신호 갱신 실패')
+                else:
+                    st.error('장중 신호 갱신 실패')
 
-        st.stop()
-
-    qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
-    qqq_pct=float((qqq or {}).get('change_pct') or 0); smh_pct=float((smh or {}).get('change_pct') or 0)
-    market_label='BULL' if qqq_pct>=.3 else ('BEAR' if qqq_pct<=-.3 else 'NEUTRAL')
-    semi_label='STRONG' if smh_pct>=.5 else ('WEAK' if smh_pct<=-.5 else 'NEUTRAL')
-    c1,c2,c3,c4=st.columns(4)
-    c1.metric('시장 방향',f'{market_label} {qqq_pct:+.2f}%')
-    c2.metric('섹터',f'{semi_label} {smh_pct:+.2f}%')
-    c3.metric('장세','TREND' if abs(qqq_pct)>=.4 else 'MIXED')
-    c4.metric('데이터','LIVE' if live else 'DEMO')
-
-    if live:
-        uni=api('/api/universe') or {}
-        uqc=uni.get('quality_counts') or {}
-        st.caption(
-            f"분석 후보군 {uni.get('count',0)}개 · 일반 {uqc.get('A',0)} · 이벤트 {uqc.get('B_EVENT',0)} · "
-            f"고위험 {uqc.get('C_HIGH_RISK',0)} · 제외 {uqc.get('REJECT',0)}"
-        )
-        if st.button('↻ 화면 새로고침',use_container_width=False,key='us_simple_refresh'):
-            st.rerun()
-    else:
-        uni={}
-
-    st.subheader('🎯 최종 추천 1~5')
-    if live:
-        fr=api('/api/recommendations/final?limit=5',timeout=20) or {}
-        frows=(fr or {}).get('data') or []
-        if frows:
-            fdf=pd.DataFrame(frows)
-            keep=['symbol','action','final_score','quality_grade','state','price','rvol','confirm_5m','invalidation','target1','target2','reason']
-            fdf=fdf[[c for c in keep if c in fdf.columns]].rename(columns={
-                'symbol':'종목','action':'판단','final_score':'추천점수','quality_grade':'품질',
-                'state':'Signal','price':'현재가','rvol':'RVOL','confirm_5m':'5분 확인',
-                'invalidation':'손절/무효화','target1':'T1','target2':'T2','reason':'핵심이유'
-            })
-            st.dataframe(fdf,use_container_width=True,hide_index=True)
-        else:
-            st.info('현재 BUY NOW / WATCH 조건을 모두 만족한 종목이 없습니다. NO TRADE도 정상적인 결과입니다.')
-        with st.expander('Final Engine 판정 근거 보기',expanded=False):
-            erows=(fr or {}).get('evaluated') or []
-            if erows:
-                edf=pd.DataFrame(erows)
-                keep=['symbol','action','final_score','quality_grade','candidate_score','signal_score','confirm_5m','bias','state','blocks']
-                edf=edf[[c for c in keep if c in edf.columns]]
-                st.dataframe(edf,use_container_width=True,hide_index=True)
-
-    if live:
-        payload=api('/api/screener?top_n=10') or {'data':[]}
-        rows=payload.get('data',[])
-        symbols=[r['symbol'] for r in rows]
-        for sym in (uni.get('core') or []):
-            if sym not in symbols:
-                symbols.append(sym)
-    else:
-        ranked=rank_candidates(demo_candidates(),cfg).copy()
-        rows=ranked.to_dict('records')
-        symbols=ranked['symbol'].tolist()
-
-    with st.expander('👀 후보 TOP10 · 더 깊게 볼 종목',expanded=False):
-        st.caption('추천주 목록이 아닙니다. 최종추천 엔진이 추가 검토할 후보입니다.')
-        if rows:
-            show=pd.DataFrame(rows); show.insert(0,'순위',range(1,len(show)+1))
-            cols=['순위','symbol','score','bias','price','change_pct','ma5_slope_pct','rvol','atr_pct','dollar_volume','exchange']
-            show=show[[c for c in cols if c in show.columns]].rename(columns={
-                'symbol':'종목','score':'후보점수','bias':'방향','price':'현재가',
-                'change_pct':'당일%','ma5_slope_pct':'MA5기울기%','rvol':'RVOL',
-                'atr_pct':'ATR%','dollar_volume':'거래대금','exchange':'거래소'
-            })
-            st.dataframe(show,use_container_width=True,hide_index=True)
-        else:
-            st.info('Candidate 데이터 준비 중')
-
-    with st.expander('🔬 연구용 비교 · CURRENT vs SHADOW',expanded=False):
-        if live:
-            cmp=api('/api/screener/compare?top_n=10') or {}
-            m1,m2,m3=st.columns(3)
-            m1.metric('TOP10 겹침',f"{int(cmp.get('overlap_count') or 0)}/10")
-            m2.metric('CURRENT 전용',len(cmp.get('current_only') or []))
-            m3.metric('SHADOW 전용',len(cmp.get('shadow_only') or []))
-            crows=cmp.get('rows') or []
-            if crows:
-                cdf=pd.DataFrame(crows)
-                keep=['symbol','current_rank','shadow_rank','current_score','shadow_score','change_pct','bias']
-                cdf=cdf[[c for c in keep if c in cdf.columns]]
-                st.dataframe(cdf,use_container_width=True,hide_index=True)
-
-
-    with st.expander('⚙️ 진단/수동 복구',expanded=False):
-        st.caption('평소에는 사용하지 않습니다. 데이터 이상이 있을 때만 사용하세요.')
-        st.markdown('**시장 후보 다시 찾기** · 거래량/거래대금 랭킹을 다시 조회하고 분석 후보군을 재구성합니다.')
-        if live and st.button('시장 후보 다시 찾기',use_container_width=True,key='market_rescan'):
-            with st.spinner('미국장 후보군 재검색 중...'):
-                res=api_post('/api/scan/market') or {}
-            if res.get('ok'):
-                st.success('분석 후보군 재구성 완료')
-                st.rerun()
-            elif res.get('cooldown'):
-                st.warning(f"재검색 대기 중 · 약 {res.get('retry_after')}초 후 가능")
-            else:
-                st.error('시장 후보 재검색 실패')
-
-        st.markdown('**점수 다시 표시** · 새 시장검색 없이 현재 저장된 데이터로 화면만 다시 계산합니다.')
-        if st.button('현재 점수 다시 표시',use_container_width=True,key='score_refresh'):
-            st.rerun()
-
-    with st.expander('❓ 화면 용어/버튼 설명',expanded=False):
+    with st.expander('❓ 용어 설명',expanded=False):
         st.markdown(
             '''
-**최종 추천**: 실제 매매 여부를 판단하는 마지막 단계입니다. 조건을 못 넘으면 0개일 수 있습니다.  
-**후보 TOP10**: 추천주가 아니라 정밀분석 우선순위입니다.  
-**후보점수**: 매수확률이 아니라 거래량·가격움직임 등으로 만든 탐색 점수입니다.  
-**품질 A**: 일반적으로 분석 가능한 후보. **B_EVENT**: 이벤트성/레버리지 등 추가 주의가 필요한 후보.  
-**RVOL**: 평소 대비 현재 거래량이 얼마나 강한지 보여줍니다.  
-**ATR%**: 최근 가격 변동폭의 크기입니다. 클수록 위험도도 커질 수 있습니다.  
-**5분 확인**: 1분 신호가 5분 흐름에서도 확인되는 정도입니다.  
-
-Trading 화면의 **화면 새로고침**은 데이터 재검색이 아니라 현재 결과만 다시 표시합니다.  
-시장 전체를 다시 검색하거나 API를 점검하는 기능은 진단 메뉴에서만 사용합니다.
+**분석 후보군**: 전체 시장에서 기본 품질·유동성 기준을 통과한 종목입니다.  
+**후보점수**: 매수 확률이 아니라 더 깊게 분석할 우선순위입니다.  
+**추천점수**: 최종 엔진이 차트·시장·위험조건을 반영해 계산하는 실제 매매 적합도입니다.  
+**품질 A**: 일반 분석 후보. **B_EVENT**: 이벤트/레버리지 등 추가 주의 후보.  
+**거래량강도**: 미장은 RVOL 기준입니다. 국장은 분봉 연결 전이라 체결강도/후보 데이터로 보완합니다.  
+**BUY NOW / WATCH / WAIT / AVOID**: 실제 행동 단계입니다. 조건을 못 넘으면 추천 0개도 정상입니다.
 '''
         )
-
-    if live:
-        hist=(api('/api/ranking-history') or {'data':[]}).get('data',[])
-        if hist:
-            st.caption('추천 유지도: 미국장 T-10분 → T-1분 → 개장 +7분')
-            h=pd.DataFrame(hist); pivot=h.pivot_table(index='symbol',columns='label',values='score',aggfunc='first').reset_index()
-            st.dataframe(pivot,use_container_width=True,hide_index=True)
-
-
-    st.subheader('📈 종목 상세보기')
-    selected=st.selectbox('종목 선택',symbols,index=0 if symbols else None)
-    if selected:
-        st.divider(); st.subheader(f'📈 {selected} 종목 상세')
-        if live:
-            q=api(f'/api/quote/{selected}') or {}; sig=api(f'/api/signal/{selected}') or {}
-            b1=api(f'/api/bars/{selected}?minutes=1&limit=200') or {'data':[]}
-            b5=api(f'/api/bars/{selected}?minutes=5&limit=100') or {'data':[]}
-            m1,m2,m3,m4,m5,m6=st.columns(6)
-            m1.metric('상태',sig.get('state','DATA WARMUP')); m2.metric('방향',sig.get('bias','NEUTRAL'))
-            m3.metric('Signal',f"{sig.get('score',0)}/100")
-            m4.metric('LONG / SHORT',f"{sig.get('long_score',0)} / {sig.get('short_score',0)}")
-            m5.metric('5M Confirm',sig.get('confirm_5m',0)); m6.metric('현재가',fmt_px(q.get('price')))
-
-            state=sig.get('state','DATA WARMUP'); bias=sig.get('bias','NEUTRAL')
-            st.markdown(f'''<div class="signal"><b>{selected} · {bias} · {state}</b><br>{sig.get('reason','데이터 수집 중')}<br><small>가격무효화 {fmt_level(sig.get('invalidation'))} · T1 {fmt_level(sig.get('target1'))} · T2 {fmt_level(sig.get('target2'))}</small></div>''',unsafe_allow_html=True)
-            if sig.get('risks'):
-                st.markdown(f'''<div class="risk"><b>리스크</b> · {sig.get('risks')}</div>''',unsafe_allow_html=True)
-
-            ind=sig.get('indicators') or {}; ctx=sig.get('context') or {}
-            if ind:
-                i1,i2,i3,i4,i5,i6=st.columns(6)
-                i1.metric('VWAP',fmt_level(ind.get('vwap'))); i2.metric('EMA9',fmt_level(ind.get('ema9')))
-                i3.metric('EMA20',fmt_level(ind.get('ema20'))); i4.metric('RSI',f"{float(ind.get('rsi14') or 0):.1f}")
-                i5.metric('Bar RVOL',f"{float(ind.get('rvol') or 0):.2f}x")
-                i6.metric('QQQ / SMH',f"{float(ctx.get('qqq_pct') or 0):+.2f}% / {float(ctx.get('smh_pct') or 0):+.2f}%")
-
-            def intraday_chart(rows, title):
-                df=pd.DataFrame(rows); st.caption(title)
-                if df.empty:
-                    st.info('분봉 데이터 준비 중'); return
-                df['time']=pd.to_datetime(df['time'],utc=True,errors='coerce')
-                for c in ['open','high','low','close','volume']:
-                    df[c]=pd.to_numeric(df.get(c),errors='coerce')
-                df=df.dropna(subset=['time','close']).sort_values('time')
-                if df.empty: return
-                df['ema9']=df['close'].ewm(span=9,adjust=False).mean()
-                df['ema20']=df['close'].ewm(span=20,adjust=False).mean()
-                typ=(df['high'].fillna(df['close'])+df['low'].fillna(df['close'])+df['close'])/3
-                vol=df['volume'].fillna(0).clip(lower=0)
-                denom=vol.cumsum().replace(0,pd.NA)
-                df['vwap']=(typ*vol).cumsum()/denom
-                long=df.melt(id_vars=['time'],value_vars=['close','ema9','ema20','vwap'],var_name='series',value_name='price').dropna()
-                chart=alt.Chart(long).mark_line().encode(
-                    x=alt.X('time:T',title=None),
-                    y=alt.Y('price:Q',title='Price',scale=alt.Scale(zero=False)),
-                    color=alt.Color('series:N',title=None),
-                    tooltip=[alt.Tooltip('time:T'),alt.Tooltip('series:N'),alt.Tooltip('price:Q',format='.4f')]
-                ).properties(height=300).interactive()
-                st.altair_chart(chart,use_container_width=True)
-
-            l,r=st.columns(2)
-            with l: intraday_chart(b1['data'],'1분봉 LIVE · Close / EMA9 / EMA20 / VWAP')
-            with r: intraday_chart(b5['data'],'5분봉 LIVE · Close / EMA9 / EMA20 / VWAP')
-
-            st.subheader('포지션 관리')
-            pc1,pc2=st.columns([1,2])
-            with pc1: side=st.selectbox('진입 방향',['LONG','SHORT'],index=0 if bias!='SHORT' else 1)
-            with pc2: entry=st.number_input('실제 진입가격 (카카오페이 체결가)',min_value=0.0,value=0.0,step=0.01,format='%.4f')
-            if entry>0:
-                pos=api(f'/api/position/{selected}?entry={entry}&side={side}') or {}
-                p1,p2,p3,p4=st.columns(4)
-                p1.metric('Position',pos.get('state','-')); p2.metric('방향',pos.get('side',side))
-                p3.metric('수익률',f"{float(pos.get('pnl_pct') or 0):+.2f}%"); p4.metric('현재가',fmt_px(pos.get('price')))
-                st.info(pos.get('reason',''))
-                if pos.get('critical'): st.error('중요 신호: EXIT 또는 강한 익절/리스크 이벤트')
-        else:
-            bars=demo_bars(selected); sig=intraday_signal(selected,bars,market_bias=.7,sector_bias=.6,cfg=cfg)
-            st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
-
-
 
 
 with tab_brief:
@@ -585,6 +569,31 @@ with tab_brief:
             st.dataframe(pd.DataFrame(hist),use_container_width=True,hide_index=True)
 
 with tab_research:
+    st.subheader('🔬 엔진 내부 확인')
+    st.caption('Trading에서 숨긴 후보군·Final Engine 판정 근거·모델 비교·검증 자료를 확인합니다.')
+
+    if live:
+        if market_view=='🇺🇸 USA':
+            rfr=api('/api/recommendations/final?limit=5',timeout=20) or {}
+            with st.expander('Final Engine 판정 근거',expanded=False):
+                erows=(rfr or {}).get('evaluated') or []
+                if erows:
+                    edf=pd.DataFrame(erows)
+                    keep=['symbol','action','final_score','quality_grade','candidate_score','signal_score',
+                          'confirm_5m','bias','state','blocks']
+                    edf=edf[[c for c in keep if c in edf.columns]].rename(columns={
+                        'symbol':'종목','action':'판단','final_score':'추천점수','quality_grade':'품질',
+                        'candidate_score':'후보점수','signal_score':'신호점수','confirm_5m':'5분확인',
+                        'bias':'방향','state':'상태','blocks':'차단이유'
+                    })
+                    st.dataframe(edf,use_container_width=True,hide_index=True)
+        else:
+            rfr=api('/api/korea/recommendations/final?limit=5') or {}
+            with st.expander('Final Engine 판정 근거',expanded=False):
+                erows=(rfr or {}).get('evaluated') or []
+                if erows:
+                    st.dataframe(pd.DataFrame(erows),use_container_width=True,hide_index=True)
+
     st.subheader('🔬 Research · 엔진 내부 확인')
     st.caption('Trading에서 숨긴 분석 후보군, 품질 필터, 모델 비교와 검증 자료를 여기서 확인합니다.')
 

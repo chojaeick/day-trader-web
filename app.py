@@ -43,11 +43,13 @@ with t[0]:
     s=api(f'/api/v4/{m}/status'); tr=s.get('tracker') or {}; fi=s.get('finder') or {}; rows=tr.get('rows') or []; fr=fi.get('rows') or []; pos=s.get('positions') or []; ev=s.get('events') or []
     a,b,c,d=st.columns(4); a.metric('현재 시장',sko(s.get('session'))); b.metric('Finder 후보',len(fr)); c.metric('실시간 추적',tr.get('tracked_count',len(rows))); d.metric('보유 종목',len(pos)); a.caption('시장 시간'); b.caption('전체 시장 저빈도 선별'); c.caption('Heavy Tracker 최대 5개'); d.caption('추적 슬롯 최우선')
     if m=='KOREA':st.info('국장은 현재 체결강도 기반 Power까지만 사용합니다. 검증된 1분/5분봉 Gate 연결 전에는 ENTRY 신호를 내지 않습니다.')
-    st.markdown('### 🔥 실시간 추적 5종목')
+    live_now=bool(tr.get('is_live'))
+    st.markdown('### 🔥 실시간 Power 순위' if live_now else '### 🕘 장 마감 기준 Power 순위')
+    if not live_now: st.caption('현재 장중 실시간 값이 아니라 마지막 사용 가능한 시장 데이터 기준 참고값입니다.')
     if rows:
-        st.dataframe(pd.DataFrame([{'Finder순위':r.get('finder_rank') or '-','종목':r.get('symbol'),'종목명':r.get('name'),'상태':stko(r.get('state')),'방향':r.get('direction'),'Power':r.get('power'),'ΔPower':r.get('power_delta'),'위험':rko(r.get('risk')),'현재가':r.get('price'),'보유':'YES' if r.get('position_open') else '','핵심 이유':r.get('reason')} for r in rows]),use_container_width=True,hide_index=True)
-        pri={'STOP':0,'EXIT':1,'REDUCE':2,'TAKE_PROFIT':3,'ENTRY':4,'READY':5,'SETUP':6,'HOLD':7,'WATCH':8}; lead=sorted(rows,key=lambda r:(pri.get(r.get('state'),99),-abs(f(r.get('power')))))[0]; st.markdown('### 🚨 지금 가장 중요한 행동'); st.info(f"{lead.get('name')} ({lead.get('symbol')}) · **{stko(lead.get('state'))}** · Power {f(lead.get('power')):+.0f} ({f(lead.get('power_delta')):+.0f}) · {lead.get('reason')}")
-        sel=st.selectbox('종목 상세',[r['symbol'] for r in rows],format_func=lambda x:next((f"{r.get('name')} ({x})" for r in rows if r['symbol']==x),x)); r=next(x for x in rows if x['symbol']==sel); q1,q2,q3,q4,q5=st.columns(5); q1.metric('상태',stko(r.get('state'))); q2.metric('Power',f"{f(r.get('power')):+.0f}",delta=f"{f(r.get('power_delta')):+.0f}"); q3.metric('현재가',px(r.get('price'),m)); q4.metric('Floor 모드',r.get('floor_mode') or '-'); q5.metric('위험',rko(r.get('risk')))
+        st.dataframe(pd.DataFrame([{'실시간순위':r.get('tracker_rank') or '-','Finder순위':r.get('finder_rank') or '-','종목':r.get('symbol'),'종목명':r.get('name'),'상태':stko(r.get('state')),'방향':r.get('direction'),'힘':r.get('power_label') or '-','Power':r.get('power'),'ΔPower':r.get('power_delta'),'위험':rko(r.get('risk')),'현재가':r.get('price'),'보유':'YES' if r.get('position_open') else '','핵심 이유':r.get('reason')} for r in rows]),use_container_width=True,hide_index=True)
+        pri={'STOP':0,'EXIT':1,'REDUCE':2,'TAKE_PROFIT':3,'ENTRY':4,'READY':5,'SETUP':6,'HOLD':7,'WATCH':8}; lead=sorted(rows,key=lambda r:(pri.get(r.get('state'),99),-abs(f(r.get('power')))))[0]; st.markdown('### 🚨 지금 가장 중요한 행동' if live_now else '### 📌 마지막 상태 요약'); st.info(f"{'장 마감 참고 · ' if not live_now else ''}{lead.get('name')} ({lead.get('symbol')}) · **{stko(lead.get('state'))}** · {lead.get('power_label') or ''} Power {f(lead.get('power')):+.0f} ({f(lead.get('power_delta')):+.0f}) · {lead.get('reason')}")
+        sel=st.selectbox('종목 상세',[r['symbol'] for r in rows],format_func=lambda x:next((f"{r.get('name')} ({x})" for r in rows if r['symbol']==x),x)); r=next(x for x in rows if x['symbol']==sel); q1,q2,q3,q4,q5=st.columns(5); q1.metric('상태',stko(r.get('state'))); q2.metric(r.get('power_label') or 'Power',f"{f(r.get('power')):+.0f}",delta=f"{f(r.get('power_delta')):+.0f}"); q3.metric('현재가',px(r.get('price'),m)); q4.metric('Floor 모드',r.get('floor_mode') or '-'); q5.metric('위험',rko(r.get('risk')))
         if m=='USA':
             a,b,c,d=st.columns(4); a.metric('경고 Floor',px(r.get('warning_floor'),m)); b.metric('Hard Floor',px(r.get('hard_floor'),m)); c.metric('T1',px(r.get('target1'),m)); d.metric('T2',px(r.get('target2'),m)); comp=r.get('components') or {}; st.caption(f"Power 구성 · 가격구조 {f(comp.get('structure')):+.0f} / 거래량 {f(comp.get('volume')):+.0f} / 모멘텀 {f(comp.get('momentum')):+.0f} / 시장·섹터 {f(comp.get('market_sector')):+.0f} / 위험감점 {f(comp.get('risk_penalty')):.0f}")
             b1=api(f'/api/bars/{sel}?minutes=1&limit=120').get('data') or []; b5=api(f'/api/bars/{sel}?minutes=5&limit=120').get('data') or []; c1,c2=st.columns(2)
@@ -61,7 +63,7 @@ with t[0]:
                 else:st.info('5분봉 데이터 준비 중')
         controls(m,r)
     else:st.warning('Tracker 데이터가 아직 없습니다. 서버 시작 직후라면 수 초 후 자동 생성됩니다.')
-    st.markdown('### 🎯 Finder TOP5'); st.caption('TOP5 진입 = 즉시 매수가 아닙니다.')
+    st.markdown('### 🎯 Finder TOP5 · 오늘 볼 종목'); st.caption('Finder는 종목 선정용입니다. 위 Power 순위는 진입 준비도를 실시간으로 다시 정렬합니다. TOP5 진입 = 즉시 매수가 아닙니다.')
     if fr:st.dataframe(pd.DataFrame([{'순위':r.get('rank'),'종목':r.get('symbol'),'종목명':r.get('name'),'Finder점수':r.get('finder_score'),'방향':r.get('direction'),'등락률%':r.get('change_pct'),'RVOL':r.get('rvol'),'ATR%':r.get('atr_pct'),'위험':rko(r.get('risk'))} for r in fr]),use_container_width=True,hide_index=True)
     with st.expander('🔔 최근 의미있는 변화'):
         if ev:

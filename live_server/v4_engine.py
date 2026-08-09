@@ -7,6 +7,11 @@ from .analytics import ticks_to_bars, multi_timeframe_signal
 
 SEMI={'SOXL','SOXS','SMH','NVDA','AMD','AVGO','MU','ARM','TSM','ASML','INTC','QCOM'}
 TRACK_LIMIT=5
+POWER_ALERT_DELTA=12
+RANK_ALERT_DELTA=2
+STATE_PRIORITY={'STOP':0,'EXIT':1,'REDUCE':2,'TAKE_PROFIT':3,'ENTRY':4,'READY':5,'SETUP':6,'HOLD':7,'WATCH':8}
+def _tracker_sort_key(r):
+    return (0 if r.get('position_open') else 1,STATE_PRIORITY.get(str(r.get('state')),99),-abs(_f(r.get('power'))),-abs(_f(r.get('power_delta'))),r.get('finder_rank') or 99)
 
 def _f(v,default=0.0):
     try:
@@ -97,7 +102,7 @@ class V4Store:
 
 class CleanEngine:
     def __init__(self,db_path):
-        self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._lock=threading.RLock()
+        self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._lock=threading.RLock()
     def build_usa_finder(self,candidates,discovery,limit=5):
         qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}; rows=[]
         for c in candidates or []:
@@ -137,33 +142,42 @@ class CleanEngine:
     def refresh_usa_tracker(self,db):
         syms=self.tracked_symbols('USA'); fmap={r['symbol']:r for r in self.finder['USA']['rows']}; pmap={p['symbol']:p for p in self.store.positions('USA')}; qmap={q.get('symbol'):q for q in db.quotes()}; rows=[]
         for sym in syms:rows.append(self._usa_row(sym,db.ticks(sym,40000),multi_timeframe_signal(sym,db.ticks(sym,40000),db.quotes()),qmap,fmap.get(sym),pmap.get(sym)))
-        self._finalize('USA',rows); return self.tracker['USA']
+        rows.sort(key=_tracker_sort_key); self._finalize('USA',rows); return self.tracker['USA']
     def _usa_row(self,sym,ticks,sig,qmap,finder,pos):
         b1=ticks_to_bars(ticks,1); b5=ticks_to_bars(ticks,5); price=_f((qmap.get(sym) or {}).get('price') or (finder or {}).get('price')); ind=sig.get('indicators') or {}; vwap=_f(ind.get('vwap')); ema9=_f(ind.get('ema9')); ema20=_f(ind.get('ema20')); rvol=_f(ind.get('rvol')); rsi=_f(ind.get('rsi14'),50)
-        structure=(10 if price and vwap and price>vwap else -10 if price and vwap else 0)+(10 if ema9 and ema20 and ema9>ema20 else -10 if ema9 and ema20 else 0)
-        if len(b5)>=2:structure+=10 if _f(b5.iloc[-1]['close'])>_f(b5.iloc[-2]['close']) else -10
+        # Power V1: 5분 추세를 중심으로 하고 1분은 Trigger/순간 힘으로 사용.
+        structure=(8 if price and vwap and price>vwap else -8 if price and vwap else 0)+(8 if ema9 and ema20 and ema9>ema20 else -8 if ema9 and ema20 else 0)
+        if len(b5)>=3:
+            c0=_f(b5.iloc[-1]['close']); c1=_f(b5.iloc[-2]['close']); c2=_f(b5.iloc[-3]['close'])
+            structure+=8 if c0>c1>c2 else -8 if c0<c1<c2 else 3 if c0>c1 else -3
+            l0=_f(b5.iloc[-1]['low']); l1=_f(b5.iloc[-2]['low']); h0=_f(b5.iloc[-1]['high']); h1=_f(b5.iloc[-2]['high'])
+            if l0>l1 and c0>=c1:structure+=6
+            elif h0<h1 and c0<=c1:structure-=6
         vol_ratio=1; micro=0
         if len(b1)>=4:
-            vols=pd.to_numeric(b1['volume'],errors='coerce').fillna(0); base=max(_f(vols.iloc[-11:-1].mean() if len(vols)>=11 else vols.iloc[:-1].mean()),1); vol_ratio=_clip(_f(vols.iloc[-1])/base,0,8); micro=1 if _f(b1.iloc[-1]['close'])>=_f(b1.iloc[-1]['open']) else -1
-        volume=micro*_clip(max(rvol,vol_ratio)-1,0,3)/3*25
+            vols=pd.to_numeric(b1['volume'],errors='coerce').fillna(0); recent=vols.iloc[-11:-1] if len(vols)>=11 else vols.iloc[:-1]; base=max(_f(recent.median() if len(recent) else 1),1); vol_ratio=_clip(_f(vols.iloc[-1])/base,0,8)
+            lo=_f(b1.iloc[-1]['open']); lc=_f(b1.iloc[-1]['close']); micro=1 if lc>lo else -1 if lc<lo else 0
+        participation=max(rvol,vol_ratio); volume=micro*_clip(participation-.9,0,3.1)/3.1*25
         momentum=0; rets=[]
         if len(b1)>=6:
             closes=pd.to_numeric(b1['close'],errors='coerce'); now=_f(closes.iloc[-1])
-            for n,w in ((1,.45),(3,.35),(5,.20)):
-                prev=_f(closes.iloc[-1-n]); ret=(now/prev-1)*100 if prev else 0; rets.append(ret); momentum+=_clip(ret,-1,1)*(20*w)
+            for n,w in ((1,.35),(3,.40),(5,.25)):
+                prev=_f(closes.iloc[-1-n]); ret=(now/prev-1)*100 if prev else 0; rets.append(ret); momentum+=_clip(ret/.8,-1,1)*(20*w)
         qqq=_f((qmap.get('QQQ') or {}).get('change_pct')); spy=_f((qmap.get('SPY') or {}).get('change_pct')); smh=_f((qmap.get('SMH') or {}).get('change_pct')); ref=(.6*qqq+.4*smh) if sym in SEMI else (.6*qqq+.4*spy); market=_clip(ref/1.5,-1,1)*15
         over=((price/vwap-1)*100) if price and vwap else 0; penalty=0; risk='NORMAL'
-        if abs(over)>=3:penalty+=5; risk='CHASE'
-        if rsi>=78 or rsi<=22:penalty+=3; risk='CHASE'
-        if abs(sum(rets))>=4:penalty+=2; risk='HIGH'
+        if abs(over)>=3.5:penalty+=6; risk='CHASE'
+        elif abs(over)>=2.5:penalty+=3; risk='CHASE'
+        if rsi>=80 or rsi<=20:penalty+=4; risk='CHASE'
+        elif rsi>=74 or rsi<=26:penalty+=2; risk='CHASE'
+        if rets and abs(sum(rets))>=3.2:penalty+=4; risk='HIGH'
         raw=structure+volume+momentum+market; power=_clip(raw,-100,100); power=power-penalty if power>0 else power+penalty if power<0 else 0; power=round(power,1)
         prev=self._last.get(('POWER','USA',sym)); delta=round(power-_f(prev.get('power')),1) if prev else 0
         five=bool(len(b5)>=2 and ((power>0 and _f(b5.iloc[-1]['close'])>=_f(b5.iloc[-2]['close'])) or (power<0 and _f(b5.iloc[-1]['close'])<=_f(b5.iloc[-2]['close'])))); regular=_session('USA')=='REGULAR'
         if pos:state=self._position_state(power,delta,price,pos)
         elif not regular:state='WATCH'
-        elif abs(power)>=78 and five and risk=='NORMAL' and abs(delta)>=4:state='ENTRY'
-        elif abs(power)>=65 and five and risk!='HIGH':state='READY'
-        elif abs(power)>=48:state='SETUP'
+        elif abs(power)>=78 and five and risk=='NORMAL' and abs(delta)>=6:state='ENTRY'
+        elif abs(power)>=64 and five and risk!='HIGH':state='READY'
+        elif abs(power)>=46:state='SETUP'
         else:state='WATCH'
         hard,warn,t1,t2,mode=self._levels(price,pos,power,delta,vwap,ema20,b1,b5)
         reason=[]
@@ -171,13 +185,13 @@ class CleanEngine:
         elif structure<=-15:reason.append('가격구조 하락')
         if abs(volume)>=8:reason.append('거래량 유입' if volume>0 else '매도 거래량')
         if abs(momentum)>=7:reason.append('모멘텀 상승' if momentum>0 else '모멘텀 하락')
-        return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'state':state,'risk':risk,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':' · '.join(reason[:3]) or '관찰 중','session':_session('USA'),'updated_at':_now()}
+        return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':' · '.join(reason[:3]) or '뚜렷한 실시간 힘 없음','session':_session('USA'),'updated_at':_now()}
     def refresh_korea_tracker(self,korea):
         syms=self.tracked_symbols('KOREA'); fmap={r['symbol']:r for r in self.finder['KOREA']['rows']}; pmap={p['symbol']:p for p in self.store.positions('KOREA')}; pulse={str(r.get('symbol') or ''):r for r in (korea.intraday_pulse.get('rows') or [])}; rows=[]
         for sym in syms:
             f=fmap.get(sym) or {}; p=pulse.get(sym) or {}; strength=p.get('strength_composite'); score=_f(p.get('live_score',f.get('finder_score'))); bias=str(p.get('bias') or f.get('direction') or 'NEUTRAL').upper(); sc=_clip((_f(strength)-100)/35,-1,1)*45 if strength is not None else 0; ss=_clip((score-50)/50,-1,1)*40; sign=1 if bias in ('LONG','UP') else -1 if bias in ('SHORT','DOWN') else 0; power=round(_clip(sign*abs(ss)+sc,-100,100),1); prev=self._last.get(('POWER','KOREA',sym)); delta=round(power-_f(prev.get('power')),1) if prev else 0; vi=bool(p.get('vi_triggered')); risk='HIGH' if vi else str(f.get('risk') or 'NORMAL'); state='HOLD' if pmap.get(sym) else ('SETUP' if abs(power)>=55 and _session('KOREA')=='REGULAR' else 'WATCH')
-            rows.append({'market':'KOREA','symbol':sym,'name':f.get('name') or sym,'finder_rank':f.get('rank'),'finder_score':f.get('finder_score'),'position_open':bool(pmap.get(sym)),'qty':_f((pmap.get(sym) or {}).get('qty')),'avg_entry':_f((pmap.get(sym) or {}).get('avg_entry')),'price':_f(p.get('price',f.get('price'))),'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'state':state,'risk':risk,'components':{'execution_strength':strength,'live_score':score,'minute_chart_gate':False},'warning_floor':None,'hard_floor':None,'target1':None,'target2':None,'floor_mode':'PENDING','reason':'체결강도/후보점수 기반 · 국내 1/5분봉 Gate 연결 전','session':_session('KOREA'),'updated_at':_now()})
-        self._finalize('KOREA',rows); return self.tracker['KOREA']
+            rows.append({'market':'KOREA','symbol':sym,'name':f.get('name') or sym,'finder_rank':f.get('rank'),'finder_score':f.get('finder_score'),'position_open':bool(pmap.get(sym)),'qty':_f((pmap.get(sym) or {}).get('qty')),'avg_entry':_f((pmap.get(sym) or {}).get('avg_entry')),'price':_f(p.get('price',f.get('price'))),'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'components':{'execution_strength':strength,'live_score':score,'minute_chart_gate':False},'warning_floor':None,'hard_floor':None,'target1':None,'target2':None,'floor_mode':'PENDING','reason':'체결강도/후보점수 기반 · 국내 1/5분봉 Gate 연결 전','session':_session('KOREA'),'updated_at':_now()})
+        rows.sort(key=_tracker_sort_key); self._finalize('KOREA',rows); return self.tracker['KOREA']
     def _position_state(self,power,delta,price,pos):
         entry=_f(pos.get('avg_entry')); pnl=(price/entry-1)*100 if entry and price else 0
         if pnl<=-4:return 'STOP'
@@ -207,12 +221,15 @@ class CleanEngine:
         return round(hard,4),round(warn,4),round(t1,4),round(t2,4),mode
     def _finalize(self,market,rows):
         rows=rows[:TRACK_LIMIT]
-        for r in rows:
-            sym=r['symbol']; state=r['state']; power=_f(r['power']); prev=self._last.get((market,sym),{}); ps=prev.get('state'); pp=_f(prev.get('power'))
-            if ps and ps!=state:self.store.event(market,sym,'STATE_CHANGE',ps,state,power=power,message=f'{sym} {ps}→{state}',payload=r)
-            elif prev and abs(power-pp)>=15:self.store.event(market,sym,'POWER_JUMP',ps,state,power=power,message=f'{sym} Power {pp:.0f}→{power:.0f}',payload=r)
-            self._last[(market,sym)]={'state':state,'power':power}; self._last[('POWER',market,sym)]={'power':power}; minute=r['updated_at'][:16]
+        for trank,r in enumerate(rows,1):
+            r['tracker_rank']=trank
+            sym=r['symbol']; state=r['state']; power=_f(r['power']); prev=self._last.get((market,sym),{}); ps=prev.get('state'); pp=_f(prev.get('power')); pr=self._rank.get((market,sym))
+            if ps and ps!=state:self.store.event(market,sym,'STATE_CHANGE',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} {ps}→{state}',payload=r)
+            elif prev and abs(power-pp)>=POWER_ALERT_DELTA:self.store.event(market,sym,'POWER_JUMP',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} Power {pp:.0f}→{power:.0f}',payload=r)
+            elif pr is not None and abs(pr-trank)>=RANK_ALERT_DELTA:self.store.event(market,sym,'TRACKER_RANK_MOVE',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} 실시간 순위 {pr}→{trank}',payload=r)
+            self._last[(market,sym)]={'state':state,'power':power}; self._last[('POWER',market,sym)]={'power':power}; self._rank[(market,sym)]=trank; minute=r['updated_at'][:16]
             if self._snap.get((market,sym))!=minute:self.store.snapshot(r); self._snap[(market,sym)]=minute
-        self.tracker[market]={'rows':rows,'updated_at':_now(),'session':_session(market),'tracked_count':len(rows),'max_tracked':TRACK_LIMIT,'policy':'OPEN POSITIONS first, then Finder rank; maximum 5 heavy-tracked symbols.'}
+        sess=_session(market)
+        self.tracker[market]={'rows':rows,'updated_at':_now(),'session':sess,'tracked_count':len(rows),'max_tracked':TRACK_LIMIT,'is_live':sess=='REGULAR','power_basis':'LIVE_REGULAR' if sess=='REGULAR' else 'LAST_AVAILABLE_REFERENCE','policy':'OPEN POSITIONS first; remaining slots use live readiness/power, then Finder rank. Maximum 5 heavy-tracked symbols.'}
     def status(self,market):
         market=market.upper(); return {'market':market,'session':_session(market),'finder':self.finder.get(market),'tracker':self.tracker.get(market),'positions':self.store.positions(market),'events':self.store.events(market,20),'version':'V4_CLEAN_ENGINE_ALPHA'}

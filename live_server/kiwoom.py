@@ -186,6 +186,10 @@ class KiwoomClient:
         log.info('universe discovery: %s symbols',len(result.symbols))
         return self.discovery
 
+    def active_symbols(self) -> list[str]:
+        """Return the currently active dynamic universe."""
+        return list(self.s.symbols)
+
     def active_exchange(self, symbol:str) -> str:
         return (self.discovery.get('exchanges') or {}).get(symbol.upper()) or self.s.exchange_for(symbol)
 

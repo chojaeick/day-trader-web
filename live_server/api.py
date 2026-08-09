@@ -13,6 +13,7 @@ from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_tick
 from .validation import HistoricalValidator, LiveTop10Validator
 from .archive import RankingArchive
 from .preopen import PreOpenReportStore, build_usa_preopen_report
+from .news_ai import analyze_news_with_openai
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); tasks=[]
@@ -75,10 +76,23 @@ async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_3
             logging.warning('premarket freshness probe %s failed: %s',sym,e)
             probes[sym]={'symbol':sym,'data_mode':'UNAVAILABLE','is_fresh_premarket':False,'error':str(e)}
 
+    news_symbols=[]
+    for r in current+shadow:
+        sym=str(r.get('symbol') or '').upper()
+        if sym and sym not in news_symbols:
+            news_symbols.append(sym)
+    news_context={
+        'qqq_premarket':(probes.get('QQQ') or {}).get('premarket_change_pct'),
+        'smh_premarket':(probes.get('SMH') or {}).get('premarket_change_pct'),
+        'qqq_data_mode':(probes.get('QQQ') or {}).get('data_mode'),
+        'smh_data_mode':(probes.get('SMH') or {}).get('data_mode'),
+    }
+    news_result=await asyncio.to_thread(analyze_news_with_openai,news_symbols[:10],news_context)
+
     report=build_usa_preopen_report(
         current,shadow,db.quotes(),db.daily_metrics(),probes,
         len(getattr(s,'symbols',[]) or []),
-        scheduled=scheduled,label=label
+        scheduled=scheduled,label=label,news_result=news_result
     )
     report['extra']['scan']=scan
     rid=preopen_store.save(report)
@@ -132,13 +146,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.0.1',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.1',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.0.1','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'2.1','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()

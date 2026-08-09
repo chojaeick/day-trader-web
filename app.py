@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.0.1') if live else '2.0.1'
+version=(health or {}).get('version','2.1') if live else '2.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.0.1 · PREMARKET_LIVE / LAST_SESSION_REFERENCE를 실제 1분봉 시각으로 구분 · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.1 · PREMARKET freshness + News Catalyst + AI LONG/SHORT 판단 · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -320,23 +320,37 @@ with tab_brief:
             st.warning(f'{data_mode} · 프리마켓 가중치 제외 · latest market bar {data_as_of}')
         if meta.get('report_text'):
             st.code(meta.get('report_text'),language=None)
+        sources=(extra.get('news_sources') or [])
+        if extra.get('news_ai_enabled'):
+            if extra.get('news_ai_error'):
+                st.warning('News AI 오류: '+str(extra.get('news_ai_error')))
+            elif sources:
+                with st.expander('📰 News AI 참고 소스',expanded=False):
+                    for s0 in sources[:20]:
+                        st.markdown(f"- [{s0.get('title') or 'source'}]({s0.get('url')})")
+            else:
+                st.caption('News AI 활성화됨 · 이번 응답에서 별도 URL citation 없음')
+        else:
+            st.info('News AI 비활성 · AWS .env에 OPENAI_API_KEY를 설정하면 V2.1 뉴스 Catalyst가 활성화됩니다.')
         r=latest.get('rows') or []
         if r:
             rdf=pd.DataFrame(r)
             keep=['symbol','current_rank','shadow_rank','current_score','shadow_score',
-                  'data_mode','premarket_price','premarket_change_pct',
-                  'premarket_volume_pct_avg_daily','latest_age_minutes',
-                  'ma5_slope_pct','long_power','short_power','recommendation','rationale']
+                  'data_mode','premarket_change_pct','premarket_volume_pct_avg_daily',
+                  'long_power','short_power','catalyst_strength','news_bias','ai_confidence',
+                  'price_reaction','final_long_power','final_short_power','final_signal',
+                  'news_summary_ko','news_risk_ko','rationale']
             rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
                 'symbol':'종목','current_rank':'CURRENT','shadow_rank':'SHADOW',
                 'current_score':'Current Score','shadow_score':'Shadow Score',
-                'data_mode':'Data Mode','premarket_price':'PM 가격',
-                'premarket_change_pct':'PM %',
+                'data_mode':'Data Mode','premarket_change_pct':'PM %',
                 'premarket_volume_pct_avg_daily':'PM거래량/5일평균일거래량%',
-                'latest_age_minutes':'데이터Age(분)',
-                'ma5_slope_pct':'MA5기울기%',
-                'long_power':'LONG 힘','short_power':'SHORT 힘',
-                'recommendation':'판단','rationale':'근거'
+                'long_power':'Tech LONG','short_power':'Tech SHORT',
+                'catalyst_strength':'Catalyst','news_bias':'News Bias',
+                'ai_confidence':'AI Confidence','price_reaction':'Price Reaction',
+                'final_long_power':'FINAL LONG','final_short_power':'FINAL SHORT',
+                'final_signal':'최종판단','news_summary_ko':'AI 뉴스판단',
+                'news_risk_ko':'뉴스 리스크','rationale':'기술근거'
             })
             st.dataframe(rdf,use_container_width=True,hide_index=True)
     else:
@@ -718,4 +732,4 @@ with tab_live:
             st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
 
-st.caption('V2.0.1: 실제 1분봉 timestamp로 PREMARKET_LIVE 여부를 검증하고, stale 데이터에는 장전 모멘텀 가중치를 적용하지 않습니다. NO AUTO ORDER.')
+st.caption('V2.1: 뉴스는 OpenAI Responses API web search가 설정된 경우에만 반영하며, News weight와 판단을 스냅샷에 저장합니다. NO AUTO ORDER.')

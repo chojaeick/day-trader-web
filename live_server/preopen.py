@@ -220,7 +220,7 @@ def _rec(long_power:float, pm_change, data_mode:str):
 
 def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[dict],
                              metrics:list[dict], probes:dict, universe_count:int,
-                             scheduled:bool, label:str='PREOPEN_30'):
+                             scheduled:bool, label:str='PREOPEN_30', news_result:dict|None=None):
     now_utc=datetime.now(timezone.utc)
     et=now_utc.astimezone(ZoneInfo('America/New_York'))
     qmap={str(q.get('symbol') or '').upper():q for q in quotes}
@@ -291,9 +291,33 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
         if cr.get(sym) and sr.get(sym) and sr[sym]<cr[sym]:
             reasons.append(f'SHADOW {cr[sym]}→{sr[sym]}위 상향')
         row['rationale']=' · '.join(reasons[:4])
+        news=((news_result or {}).get('items') or {}).get(sym)
+        if news:
+            row['catalyst_strength']=news.get('catalyst_strength')
+            row['news_bias']=news.get('news_bias')
+            row['news_long_power']=news.get('news_long_power')
+            row['news_short_power']=news.get('news_short_power')
+            row['ai_confidence']=news.get('ai_confidence')
+            row['price_reaction']=news.get('price_reaction')
+            row['news_summary_ko']=news.get('summary_ko')
+            row['news_risk_ko']=news.get('risk_ko')
         rows.append(row)
 
-    rows.sort(key=lambda x:(x['long_power'], -(x['current_rank'] or 999)), reverse=True)
+    # Final AI combination is done after the transparent technical/pre-market score is frozen.
+    try:
+        from .news_ai import combine_technical_and_news
+        for row in rows:
+            n=((news_result or {}).get('items') or {}).get(row['symbol'])
+            fin=combine_technical_and_news(row,n,row.get('data_mode')=='PREMARKET_LIVE')
+            row.update(fin)
+    except Exception:
+        for row in rows:
+            row['final_long_power']=row.get('long_power')
+            row['final_short_power']=row.get('short_power')
+            row['final_signal']=row.get('recommendation')
+            row['news_weight']=0.0
+
+    rows.sort(key=lambda x:(x.get('final_long_power',x['long_power']), -(x['current_rank'] or 999)), reverse=True)
     market_raw=50 + qqq_context*8 + smh_context*4
     market_long=max(1,min(99,round(market_raw,1)))
     market_short=round(100-market_long,1)
@@ -320,23 +344,29 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
     for i,r in enumerate(top,1):
         pm = r.get('premarket_change_pct')
         pm_txt=f"{pm:+.2f}%" if pm is not None else "N/A"
+        final_sig=r.get('final_signal') or r['recommendation']
+        final_long=float(r.get('final_long_power') or r['long_power'])
+        final_short=float(r.get('final_short_power') or r['short_power'])
+        catalyst=r.get('catalyst_strength') or 'N/A'
+        news_txt=r.get('news_summary_ko') or '뉴스 AI 미사용'
         text_lines.append(
-            f"{i}. {r['symbol']} · {r['recommendation']} · LONG {r['long_power']:.0f} / SHORT {r['short_power']:.0f} "
-            f"· PM {pm_txt} · {r['rationale']}"
+            f"{i}. {r['symbol']} · {final_sig} · FINAL LONG {final_long:.0f} / SHORT {final_short:.0f} "
+            f"· PM {pm_txt} · Catalyst {catalyst} · {r['rationale']} · {news_txt}"
         )
     text_lines += [
         "",
         "※ PREMARKET_LIVE는 실제 1분봉의 ET 날짜/시각이 당일 프리마켓이고 최근 15분 이내일 때만 표시합니다.",
         "※ 그렇지 않으면 LAST_SESSION_REFERENCE로 표시하고 프리마켓 모멘텀/거래량 가중치를 0으로 둡니다.",
         "※ '프리마켓 거래량/5일평균 일거래량%'은 full-day 평균 대비 비율이며 RVOL이라고 부르지 않습니다.",
-        "※ 뉴스 Catalyst/외부 AI 뉴스판단은 다음 단계에서 연결합니다.",
+        "※ News Catalyst는 OPENAI_API_KEY가 설정된 경우 OpenAI Responses API web search로 생성됩니다.",
+        "※ AI/news 결과와 source metadata는 해당 PREOPEN 스냅샷에 함께 저장됩니다.",
         "※ CURRENT Trading Score 및 자동주문 로직은 변경하지 않습니다."
     ]
 
     return {
         'market':'USA','trade_date':et.strftime('%Y-%m-%d'),'label':label,
         'generated_at':now_utc.isoformat(),'scheduled':scheduled,
-        'model_version':'V2.0.1_PREMARKET_FRESHNESS',
+        'model_version':'V2.1_NEWS_AI_CATALYST',
         'qqq_pct':qqq_context if market_mode=='PREMARKET_LIVE' else None,
         'smh_pct':smh_context if market_mode=='PREMARKET_LIVE' else None,
         'market_long_power':market_long,'market_short_power':market_short,
@@ -349,7 +379,10 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
             'fresh_premarket_probe_count':fresh_count,
             'qqq_last_session_pct':qqq_last,
             'smh_last_session_pct':smh_last,
-            'news_catalyst':'PENDING_NEXT',
+            'news_catalyst_provider':(news_result or {}).get('provider'),
+            'news_ai_enabled':bool((news_result or {}).get('enabled')),
+            'news_ai_error':(news_result or {}).get('error'),
+            'news_sources':(news_result or {}).get('sources') or [],
             'korea_engine':'PENDING_KOREA_MARKET_ADAPTER'
         }
     }

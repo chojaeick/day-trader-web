@@ -181,7 +181,15 @@ class KiwoomClient:
             'auto_count':len([x for x in result.symbols if x not in self.s.core_symbols]),
             'sources':['volume','dollar','gainer','loser','surge'],
             'extreme_count':len(result.extreme_rows),'extreme_rows':result.extreme_rows,
-            'quality_gate':'AUTO: $5M dollar volume OR >=1M shares with rank/event source; |change|>=30% separated'
+            'quality_risk_rows':result.quality_risk_rows,
+            'quality_reject_rows':result.quality_reject_rows,
+            'quality_counts':{
+                'A':len([r for r in result.rows if r.get('quality_grade')=='A']),
+                'B_EVENT':len([r for r in result.rows if r.get('quality_grade')=='B_EVENT']),
+                'C_HIGH_RISK':len(result.quality_risk_rows),
+                'REJECT':len(result.quality_reject_rows)
+            },
+            'quality_gate':'QUALITY_GATE_USA_V1'
         }
         log.info('universe discovery: %s symbols',len(result.symbols))
         return self.discovery

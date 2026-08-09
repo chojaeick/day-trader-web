@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from .quality_gate import grade_usa_row
 
 def num(v, default=0.0):
     if v is None: return default
@@ -25,6 +26,8 @@ class DiscoveryResult:
     rows: list[dict]
     updated_at: str
     extreme_rows: list[dict]
+    quality_risk_rows: list[dict]
+    quality_reject_rows: list[dict]
 
 def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str],
                    limit:int=40, min_price:float=5.0, min_dollar:float=5_000_000,
@@ -123,6 +126,17 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
         if liquid or top_dollar or (top_volume and volume_fallback) or (event_source and volume_fallback):
             eligible.append(r)
 
+    q_eligible=[]; quality_risk_rows=[]; quality_reject_rows=[]
+    for r in eligible:
+        q=grade_usa_row(r,is_core=False)
+        if q.get('quality_grade') in ('A','B_EVENT'):
+            q_eligible.append(q)
+        elif q.get('quality_grade')=='C_HIGH_RISK':
+            quality_risk_rows.append(q)
+        else:
+            quality_reject_rows.append(q)
+
+    eligible=q_eligible
     eligible.sort(key=lambda r:(r['discovery_score'],r['dollar_volume'],r['volume']), reverse=True)
     picked=eligible[:limit]
 
@@ -132,7 +146,12 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
                 'symbol':sym,'exchange':'','name':'CORE','price':0,'change_pct':0,
                 'volume':0,'dollar_volume':0,'volume_rank':9999,'dollar_rank':9999,
                 'gainer_rank':9999,'loser_rank':9999,'surge_rank':9999,'surge_pct':0.0,
-                'sources':{'core'},'chase_risk':'NORMAL','discovery_score':999,'asset_type':'CORE'
+                'sources':{'core'},'chase_risk':'NORMAL','discovery_score':999,
+                'asset_type':'LEVERAGED_ETF' if sym in ('SOXL','SOXS','TQQQ','SQQQ') else 'ETF',
+                'quality_grade':'B_EVENT' if sym in ('SOXL','SOXS','TQQQ','SQQQ') else 'A',
+                'quality_reasons':'LEVERAGED_ETF' if sym in ('SOXL','SOXS','TQQQ','SQQQ') else 'CORE_LIQUID_ETF',
+                'quality_gate':'QUALITY_GATE_USA_V1',
+                'quality_market_cap_check':'PENDING_VERIFIED_SOURCE'
             })
 
     seen=set(); symbols=[]
@@ -143,12 +162,19 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
         r['origin']='CORE' if r['symbol'] in core else 'AUTO'
 
     extreme_rows.sort(key=lambda r:(abs(r['change_pct']),r['volume']),reverse=True)
+    q_extreme=[]
     for r in extreme_rows:
         r['sources']=','.join(sorted(r['sources']))
         r['origin']='EXTREME'
+        q=grade_usa_row(r,is_core=False)
+        q['quality_grade']='C_HIGH_RISK'
+        q_extreme.append(q)
+    quality_risk_rows.extend(q_extreme)
     return DiscoveryResult(
         symbols=symbols,
         rows=picked,
         updated_at=datetime.now(timezone.utc).isoformat(),
-        extreme_rows=extreme_rows[:20]
+        extreme_rows=q_extreme[:20],
+        quality_risk_rows=quality_risk_rows[:50],
+        quality_reject_rows=quality_reject_rows[:50]
     )

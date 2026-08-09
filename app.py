@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.7') if live else '2.7'
+version=(health or {}).get('version','2.8') if live else '2.8'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.7 · KOREA INTRADAY PULSE · 체결강도 + VI + KOREA_CURRENT_V2_LIVE · NO AUTO ORDER')
+st.caption('V2.8 · QUALITY GATE V1 · USA + KOREA 보수적 후보 필터 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,13 +73,19 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · Day Trader')
-        st.caption('V2.7 · 장전 PREOPEN + 장중 체결강도/VI Pulse를 분리 운용합니다.')
+        st.caption('V2.8 · Quality Gate 통과 종목만 GAMMA/PREOPEN/Pulse 정밀분석 대상으로 사용합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
         k2.metric('Universe',str((ks or {}).get('universe_count') or 0))
         k3.metric('Trading Score','GAMMA' if (ks or {}).get('score_live') else 'WAIT')
         k4.metric('자동주문','OFF')
+        kqc=(ks or {}).get('quality_counts') or {}
+        st.caption(
+            f"Quality Gate · A {kqc.get('A',0)} · B_EVENT {kqc.get('B_EVENT',0)} · "
+            f"C_HIGH_RISK {kqc.get('C_HIGH_RISK',0)} · REJECT {kqc.get('REJECT',0)} · "
+            f"시총랭크 {'ON' if (ks or {}).get('market_cap_rank_enabled') else 'PENDING'}"
+        )
 
         with st.expander('⚙️ Diagnostics · 연결/수동 점검',expanded=False):
             st.caption('평소에는 열 필요 없습니다. API 연결 이상이나 수동 복구가 필요할 때만 사용합니다.')
@@ -113,7 +119,7 @@ with tab_trading:
         if urows:
             with st.expander(f'Universe 전체 {len(urows)}개 보기',expanded=False):
                 udf=pd.DataFrame(urows)
-                keep=['symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
+                keep=['quality_grade','quality_reasons','market_cap_rank','symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
                 udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','raw_symbol':'원본코드','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
                 st.dataframe(udf,use_container_width=True,hide_index=True)
     
@@ -123,7 +129,7 @@ with tab_trading:
         trows=(kt or {}).get('data') or []
         if trows:
             tdf=pd.DataFrame(trows); tdf.insert(0,'순위',range(1,len(tdf)+1))
-            keep=['순위','symbol','name','market','score','raw_score','risk_penalty','chase_risk','surge_risk','bias','price','change_pct','source_count','source_text','value_rank','volume_rank','surge_rank','trading_value']
+            keep=['순위','quality_grade','quality_reasons','market_cap_rank','symbol','name','market','score','raw_score','risk_penalty','chase_risk','surge_risk','bias','price','change_pct','source_count','source_text','value_rank','volume_rank','surge_rank','trading_value']
             tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={'symbol':'종목','name':'종목명','market':'시장','score':'Trading Score','raw_score':'Raw Score','risk_penalty':'위험감점','chase_risk':'추격위험','surge_risk':'급증위험','bias':'방향','price':'현재가','change_pct':'등락률%','value_rank':'거래대금순위','trading_value':'거래대금'})
             st.dataframe(tdf,use_container_width=True,hide_index=True)
         else:
@@ -221,7 +227,7 @@ with tab_trading:
         if nexts:
             with st.expander('데이터 소스 상태',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.7에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.8에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -241,6 +247,11 @@ with tab_trading:
                 f"자동 Universe {uni.get('count')}개 · AUTO {uni.get('auto_count', max(0, uni.get('count',0)-len(uni.get('core') or [])))}개 "
                 f"· Core {len(uni.get('core') or [])}개 · EXTREME 제외 {uni.get('extreme_count',0)}개 · 약 10분마다 재검색"
             )
+            uqc=uni.get('quality_counts') or {}
+            st.caption(
+                f"Quality Gate · A {uqc.get('A',0)} · B_EVENT {uqc.get('B_EVENT',0)} · "
+                f"C_HIGH_RISK {uqc.get('C_HIGH_RISK',0)} · REJECT {uqc.get('REJECT',0)}"
+            )
             with st.expander('오늘 자동 발굴 Universe 보기', expanded=False):
                 drows=uni.get('rows') or []
                 if drows:
@@ -257,7 +268,7 @@ with tab_trading:
                                     udf.at[idx,'change_pct']=qv.get('change_pct',row.get('change_pct'))
                     except Exception:
                         pass
-                    keep=['origin','symbol','name','asset_type','exchange','price','change_pct',
+                    keep=['quality_grade','quality_reasons','origin','symbol','name','asset_type','exchange','price','change_pct',
                           'volume_rank','dollar_rank','gainer_rank','loser_rank','surge_rank',
                           'surge_pct','discovery_score','chase_risk','sources']
                     udf=udf[[c for c in keep if c in udf.columns]].rename(columns={

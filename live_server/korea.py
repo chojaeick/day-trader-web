@@ -2,6 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 import requests, re
+from .quality_gate import build_korea_metadata, grade_korea_row
 
 def _num(v):
     try:
@@ -43,6 +44,9 @@ class KoreaMarketAdapter:
             'updated_at':None,'market_open':False,'status':'NOT_REFRESHED',
             'rows':[],'top10':[],'vi_count':0,'score_model':'KOREA_CURRENT_V2_LIVE'
         }
+        self.stock_meta={}
+        self.stock_meta_updated_at=None
+        self.cap_rank_enabled=False
 
     def quote(self, stk_cd='005930'):
         code=_clean_code(stk_cd)
@@ -265,18 +269,70 @@ class KoreaMarketAdapter:
             r['source_text']=','.join(r['sources'])
             rows.append(r)
 
-        rows=sorted(rows,key=lambda x:(x['score'],x['source_count'],x['trading_value']),reverse=True)[:max(20,int(limit))]
-        top10=rows[:10]
+        meta={}; cap_rank_enabled=False; meta_error=None
+        try:
+            meta,cap_rank_enabled=self._load_stock_metadata(False)
+        except Exception as e:
+            meta_error=str(e)
+
+        passed=[]; risk_rows=[]; reject_rows=[]
+        for r in rows:
+            q=grade_korea_row(r,meta.get(r.get('symbol')) if meta else None,cap_rank_enabled)
+            if q.get('quality_grade') in ('A','B_EVENT'):
+                passed.append(q)
+            elif q.get('quality_grade')=='C_HIGH_RISK':
+                risk_rows.append(q)
+            else:
+                reject_rows.append(q)
+
+        passed=sorted(passed,key=lambda x:(x['score'],x['source_count'],x['trading_value']),reverse=True)[:max(10,int(limit))]
+        top10=passed[:10]
 
         self.discovery={
             'updated_at':datetime.now(timezone.utc).isoformat(),
-            'rows':rows,'count':len(rows),'top10':top10,
+            'rows':passed,'count':len(passed),'top10':top10,
             'source_counts':source_counts,'market_breakdown':market_breakdown,
             'score_model':'KOREA_CURRENT_V1_GAMMA',
-            'sources':['ka10032','ka10030','ka10023','ka10027']
+            'sources':['ka10032','ka10030','ka10023','ka10027'],
+            'quality_gate':'QUALITY_GATE_KOREA_V1',
+            'quality_counts':{
+                'A':len([r for r in passed if r.get('quality_grade')=='A']),
+                'B_EVENT':len([r for r in passed if r.get('quality_grade')=='B_EVENT']),
+                'C_HIGH_RISK':len(risk_rows),
+                'REJECT':len(reject_rows)
+            },
+            'quality_risk_rows':risk_rows[:50],
+            'quality_reject_rows':reject_rows[:50],
+            'metadata_count':len(meta),
+            'market_cap_rank_enabled':bool(cap_rank_enabled),
+            'metadata_error':meta_error
         }
         return self.discovery
 
+
+
+    def _load_stock_metadata(self, force=False):
+        now=datetime.now(timezone.utc)
+        if self.stock_meta and self.stock_meta_updated_at and not force:
+            if (now-self.stock_meta_updated_at).total_seconds()<21600:
+                return self.stock_meta,self.cap_rank_enabled
+        rows=[]
+        for mrkt_tp in ('0','10'):
+            r=requests.post(
+                self.k.s.rest_base+'/api/dostk/stkinfo',
+                headers=self.k.headers('ka10099'),
+                json={'mrkt_tp':mrkt_tp},
+                timeout=30
+            )
+            d=r.json()
+            if d.get('return_code') not in (None,0):
+                raise RuntimeError(f"ka10099/{mrkt_tp}: {d.get('return_code')} {d.get('return_msg')}")
+            part=d.get('list') or []
+            if isinstance(part,list):
+                rows.extend([x for x in part if isinstance(x,dict)])
+        self.stock_meta,self.cap_rank_enabled=build_korea_metadata(rows)
+        self.stock_meta_updated_at=now
+        return self.stock_meta,self.cap_rank_enabled
 
     def _trade_strength(self, stk_cd):
         """Official ka10046 체결강도추이시간별."""
@@ -474,6 +530,10 @@ class KoreaMarketAdapter:
             'intraday_status':self.intraday_pulse.get('status'),
             'universe_count':self.discovery.get('count',0),
             'updated_at':self.discovery.get('updated_at'),
+            'quality_gate':self.discovery.get('quality_gate','QUALITY_GATE_KOREA_V1'),
+            'quality_counts':self.discovery.get('quality_counts') or {},
+            'market_cap_rank_enabled':bool(self.discovery.get('market_cap_rank_enabled')),
+            'metadata_count':self.discovery.get('metadata_count',0),
             'sources':['ka10032 거래대금','ka10030 당일거래량','ka10023 거래량급증','ka10027 등락률(상승/하락)'],
             'next_sources':[
                 {'api_id':'ka10029','name':'예상체결등락률상위','status':'LIVE_PREOPEN'},

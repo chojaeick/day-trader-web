@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.9') if live else '2.9'
-st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
+version=(health or {}).get('version','3.0') if live else '3.0'
+st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>Final Picks → Candidate → Detail → Validation</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.9 · FINAL RECOMMENDATION V1 · 보수적 실행후보 1~5 · NO AUTO ORDER')
+st.caption('V3.0 · UNIFIED TRADING UI · 추천 중심 화면 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -72,179 +72,131 @@ with tab_trading:
 
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
-        st.subheader('🇰🇷 KOREA · Day Trader')
-        st.caption('V2.9 · Quality Gate 통과 종목만 GAMMA/PREOPEN/Pulse 정밀분석 대상으로 사용합니다.')
+        ku=api('/api/korea/universe') if live else {}
+        krf=api('/api/korea/recommendations/final?limit=5') if live else {}
+        kt=api('/api/korea/top10') if live else {}
+        kpulse=api('/api/korea/pulse') if live else {}
+        kl=api('/api/korea/preopen/latest') if live else {}
 
-        k1,k2,k3,k4=st.columns(4)
-        k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
-        k2.metric('Universe',str((ks or {}).get('universe_count') or 0))
-        k3.metric('Trading Score','GAMMA' if (ks or {}).get('score_live') else 'WAIT')
-        k4.metric('자동주문','OFF')
+        st.subheader('🇰🇷 KOREA · Trading')
+        st.caption('추천 → 후보 → 상세데이터의 순서로 봅니다. 엔진용 세부정보는 접어서 숨깁니다.')
+
         kqc=(ks or {}).get('quality_counts') or {}
+        po=(kpulse or {}).get('market_open',False)
+        ps=(kpulse or {}).get('status','N/A')
+        klm=(kl or {}).get('meta') or {}
+        kle=klm.get('extra') or {}
+        krfd=(krf or {}).get('data') or []
+
+        # Same 4-card structure as USA.
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric('Market','OPEN' if po else 'CLOSED')
+        c2.metric('Quality Universe',str((ks or {}).get('universe_count') or 0))
+        c3.metric('Final Picks',str(len(krfd)))
+        c4.metric('Auto Order','OFF')
+
         st.caption(
-            f"Quality Gate · A {kqc.get('A',0)} · B_EVENT {kqc.get('B_EVENT',0)} · "
-            f"C_HIGH_RISK {kqc.get('C_HIGH_RISK',0)} · REJECT {kqc.get('REJECT',0)} · "
-            f"시총랭크 {'ON' if (ks or {}).get('market_cap_rank_enabled') else 'PENDING'}"
+            f"Quality Gate A {kqc.get('A',0)} · B_EVENT {kqc.get('B_EVENT',0)} · "
+            f"High Risk {kqc.get('C_HIGH_RISK',0)} · Reject {kqc.get('REJECT',0)} · "
+            f"Pulse {ps}"
         )
 
-        with st.expander('⚙️ Diagnostics · 연결/수동 점검',expanded=False):
-            st.caption('평소에는 열 필요 없습니다. API 연결 이상이나 수동 복구가 필요할 때만 사용합니다.')
-            d1,d2=st.columns(2)
-            with d1:
-                if live and st.button('국내 REST 연결 점검',use_container_width=True,key='kr_quote_probe'):
-                    q=api('/api/korea/quote/005930',timeout=25) or {}
-                    if q.get('ok'):
-                        st.session_state['kr_quote_probe_result']=q
-                        st.success('ka10004 연결 정상')
-                    else:
-                        st.error('국내주식 연결 실패')
-            with d2:
-                if live and st.button('Universe 강제 재검색',use_container_width=True,key='kr_market_scan_diag'):
-                    with st.spinner('KOSPI/KOSDAQ Universe 재검색 중...'):
-                        rr=api_post('/api/korea/scan?limit=50') or {}
-                    if rr.get('ok'):
-                        st.success(f"Universe {rr.get('count',0)}개 갱신")
-                        st.rerun()
-                    else:
-                        st.error('재검색 실패: '+str(rr.get('detail') or rr))
-            qtest=st.session_state.get('kr_quote_probe_result')
-            if qtest:
-                with st.expander('RAW 응답',expanded=False):
-                    st.json(qtest)
-
-        st.markdown('### 🇰🇷 한국장 Universe')
-        st.caption('전체 후보는 접어서 확인합니다. 수동 강제 재검색은 Diagnostics에서만 제공합니다.')
-        ku=api('/api/korea/universe') if live else {}
-        urows=(ku or {}).get('rows') or []
-        if urows:
-            with st.expander(f'Universe 전체 {len(urows)}개 보기',expanded=False):
-                udf=pd.DataFrame(urows)
-                keep=['quality_grade','quality_reasons','instrument_type','market_cap_rank','symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
-                udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','raw_symbol':'원본코드','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
-                st.dataframe(udf,use_container_width=True,hide_index=True)
-    
         st.markdown('### 🎯 Final Recommendation · 실행후보 1~5')
-        krf=api('/api/korea/recommendations/final?limit=5') if live else {}
-        krfd=(krf or {}).get('data') or []
         if krfd:
             rdf=pd.DataFrame(krfd)
             keep=['symbol','name','action','final_score','quality_grade','bias','strength_composite','reason']
             rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
-                'symbol':'종목','name':'종목명','action':'Action','final_score':'Final Score',
+                'symbol':'종목','name':'종목명','action':'Action','final_score':'Score',
                 'quality_grade':'Quality','bias':'방향','strength_composite':'체결강도','reason':'핵심근거'
             })
             st.dataframe(rdf,use_container_width=True,hide_index=True)
         else:
-            st.info('현재 실행조건을 모두 만족한 종목이 없습니다. NO TRADE도 정상적인 결과입니다.')
+            st.info('현재 실행조건을 만족한 종목이 없습니다. NO TRADE도 정상적인 결과입니다.')
         if not (krf or {}).get('buy_now_enabled',False):
-            st.caption('국장은 검증된 1분/5분 차트 Gate가 아직 연결되지 않아 BUY NOW를 차단합니다. 장중 Pulse는 WATCH 후보만 만들 수 있습니다.')
+            st.caption('현재 국장은 분봉 차트 Gate 검증 전이라 BUY NOW를 차단하고 WATCH까지만 허용합니다.')
 
-        st.markdown('### 🇰🇷 Candidate TOP10 · KOREA_CURRENT_V1_GAMMA')
-        st.caption('Quality Gate를 통과한 정밀분석 후보입니다. LONG/SHORT는 방향성 참고이며 아직 최종 추천이 아닙니다.')
-        st.caption('Candidate Score는 정밀분석 우선순위입니다. 매수 추천점수가 아닙니다. SHORT/WAIT 후보도 포함될 수 있습니다.')
-        kt=api('/api/korea/top10') if live else {}
-        trows=(kt or {}).get('data') or []
-        if trows:
-            tdf=pd.DataFrame(trows); tdf.insert(0,'순위',range(1,len(tdf)+1))
-            keep=['순위','quality_grade','quality_reasons','market_cap_rank','symbol','name','market','score','raw_score','risk_penalty','chase_risk','surge_risk','bias','price','change_pct','source_count','source_text','value_rank','volume_rank','surge_rank','trading_value']
-            tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={'symbol':'종목','name':'종목명','market':'시장','score':'Trading Score','raw_score':'Raw Score','risk_penalty':'위험감점','chase_risk':'추격위험','surge_risk':'급증위험','bias':'방향','price':'현재가','change_pct':'등락률%','value_rank':'거래대금순위','trading_value':'거래대금'})
-            st.dataframe(tdf,use_container_width=True,hide_index=True)
-        else:
-            st.info('아직 한국장 Universe가 없습니다. Diagnostics에서 Universe 강제 재검색을 실행해주세요.')
-
-        st.markdown('### ⚡ 장중 Pulse · 체결강도 + VI')
-        kpulse=api('/api/korea/pulse') if live else {}
-        ps=(kpulse or {}).get('status','N/A')
-        po=(kpulse or {}).get('market_open',False)
-        ptime=(kpulse or {}).get('updated_at')
-        if po:
-            st.success(f'장중 Pulse LIVE · 60초 자동 갱신 · VI 감지 {(kpulse or {}).get("vi_count",0)}종목 · {ptime}')
-        else:
-            st.info(f'현재 정규장 시간이 아닙니다 · {ps} · GAMMA 기준값을 유지합니다.')
-
-        prows=(kpulse or {}).get('top10') or []
-        if prows:
-            pdf=pd.DataFrame(prows)
-            keep=['symbol','name','market','live_score','score','bias','strength_composite',
-                  'trade_strength','trade_strength_5m','trade_strength_20m','trade_strength_60m',
-                  'strength_bias','strength_adjustment','vi_triggered','vi_count','vi_penalty','chase_risk']
-            pdf=pdf[[c for c in keep if c in pdf.columns]].rename(columns={
-                'symbol':'종목','name':'종목명','market':'시장',
-                'live_score':'LIVE Score','score':'GAMMA','bias':'기본방향',
-                'strength_composite':'체결강도종합','trade_strength':'현재강도',
-                'trade_strength_5m':'5분강도','trade_strength_20m':'20분강도',
-                'trade_strength_60m':'60분강도','strength_bias':'체결힘',
-                'strength_adjustment':'강도보정','vi_triggered':'VI','vi_count':'VI횟수',
-                'vi_penalty':'VI감점','chase_risk':'추격위험'
-            })
-            st.dataframe(pdf,use_container_width=True,hide_index=True)
-
-        with st.expander('장중 Pulse 진단/수동갱신',expanded=False):
-            st.caption('정규장에는 서버가 60초마다 자동 갱신합니다. 장외 강제조회는 진단용이며 점수 신뢰용이 아닙니다.')
-            pc1,pc2=st.columns(2)
-            with pc1:
-                if live and st.button('Pulse 수동 갱신',use_container_width=True,key='kr_pulse_refresh'):
-                    rr=api_post('/api/korea/pulse/refresh?force=false') or {}
-                    if rr.get('updated_at'):
-                        st.success('Pulse 갱신 완료')
-                        st.rerun()
-                    else:
-                        st.error('Pulse 갱신 실패: '+str(rr))
-            with pc2:
-                if live and st.button('장외 강제조회(진단)',use_container_width=True,key='kr_pulse_force'):
-                    rr=api_post('/api/korea/pulse/refresh?force=true') or {}
-                    if rr.get('updated_at'):
-                        st.warning('강제 진단 조회 완료 · 운영 점수로 사용하지 마세요.')
-                        st.rerun()
-                    else:
-                        st.error('강제조회 실패: '+str(rr))
-
-        st.markdown('### 🌅 한국장 08:30 PREOPEN')
-        st.caption('평일 08:30 KST 자동 저장. ka10029는 실제 장전 유효시간(08:20~08:59 KST)에만 점수에 반영하며, TOP10 매칭 Coverage가 낮으면 PARTIAL/FALLBACK으로 표시합니다.')
-        if live and st.button('PREOPEN 수동 재생성',use_container_width=True,key='kr_preopen_now'):
-            with st.spinner('한국장 PREOPEN 재생성 중...'):
-                kp=api_post('/api/korea/preopen/generate') or {}
-            if kp.get('id'):
-                st.success(f"한국장 PREOPEN 저장 완료 · {kp.get('trade_date')} · Report #{kp.get('id')}")
-                st.rerun()
+        # Candidate list is secondary, collapsed by default.
+        with st.expander('👀 Candidate TOP10 · 정밀분석 후보',expanded=False):
+            trows=(kt or {}).get('data') or []
+            if trows:
+                tdf=pd.DataFrame(trows); tdf.insert(0,'순위',range(1,len(tdf)+1))
+                keep=['순위','quality_grade','symbol','name','market','score','bias','price','change_pct','chase_risk','source_count']
+                tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={
+                    'quality_grade':'Quality','symbol':'종목','name':'종목명','market':'시장',
+                    'score':'Candidate Score','bias':'방향','price':'현재가','change_pct':'등락률%',
+                    'chase_risk':'추격위험','source_count':'소스수'
+                })
+                st.dataframe(tdf,use_container_width=True,hide_index=True)
             else:
-                st.error('한국장 PREOPEN 생성 실패: '+str(kp.get('detail') or kp))
+                st.info('Candidate 데이터가 아직 없습니다.')
 
-        kl=api('/api/korea/preopen/latest') if live else {}
-        if kl and (kl.get('meta') or {}).get('id'):
-            km=kl.get('meta') or {}
-            ke=km.get('extra') or {}
-            st.info(
-                f"최근 PREOPEN · {km.get('trade_date')} · {ke.get('data_mode','N/A')} · "
-                f"TOP10 예상체결 매칭 {ke.get('expected_matched_top10',0)}/10 "
-                f"({ke.get('expected_coverage_pct',0)}%) · "
-                f"원천 {ke.get('expected_count_raw',0)}개 · "
-                f"장전시간 유효 {ke.get('expected_window_live',False)} · "
-                f"Market LONG {km.get('market_long_power','N/A')}"
-            )
-            krows=kl.get('rows') or []
+        # PREOPEN and Pulse are summarized first; detail is available only when needed.
+        st.markdown('### 📍 Market Context')
+        p1,p2,p3,p4=st.columns(4)
+        p1.metric('PREOPEN Mode',str(kle.get('data_mode') or 'N/A'))
+        p2.metric('Market LONG',str(klm.get('market_long_power') or 'N/A'))
+        p3.metric('Expected Coverage',f"{kle.get('expected_coverage_pct',0)}%")
+        p4.metric('Pulse','LIVE' if po else 'OFF-HOURS')
+
+        with st.expander('⚡ 장중 Pulse 상세',expanded=False):
+            prows=(kpulse or {}).get('top10') or []
+            if prows:
+                pdf=pd.DataFrame(prows)
+                keep=['symbol','name','live_score','score','bias','strength_composite','strength_bias',
+                      'vi_triggered','vi_count','chase_risk']
+                pdf=pdf[[c for c in keep if c in pdf.columns]].rename(columns={
+                    'symbol':'종목','name':'종목명','live_score':'LIVE Score','score':'GAMMA',
+                    'bias':'방향','strength_composite':'체결강도','strength_bias':'체결힘',
+                    'vi_triggered':'VI','vi_count':'VI횟수','chase_risk':'추격위험'
+                })
+                st.dataframe(pdf,use_container_width=True,hide_index=True)
+            else:
+                st.caption('Pulse 데이터 없음')
+
+        with st.expander('🌅 08:30 PREOPEN 상세',expanded=False):
+            krows=(kl or {}).get('rows') or []
             if krows:
                 kpdf=pd.DataFrame(krows[:10])
-                keep=['current_rank','symbol','name','market','current_score','gamma_score','recommendation',
-                      'expected_change_pct','expected_rank','expected_price','expected_qty',
-                      'chase_risk','preopen_risk','preopen_data_mode','source_count']
+                keep=['current_rank','symbol','name','current_score','gamma_score','recommendation',
+                      'expected_change_pct','chase_risk','preopen_data_mode']
                 kpdf=kpdf[[c for c in keep if c in kpdf.columns]].rename(columns={
-                    'current_rank':'순위','symbol':'종목','name':'종목명','market':'시장',
-                    'current_score':'PREOPEN Score','gamma_score':'GAMMA',
-                    'recommendation':'방향','expected_change_pct':'예상체결등락률%',
-                    'expected_rank':'예상순위','expected_price':'예상체결가',
-                    'expected_qty':'예상체결량','chase_risk':'추격위험',
-                    'preopen_risk':'PREOPEN위험','preopen_data_mode':'Data Mode','source_count':'소스수'
+                    'current_rank':'순위','symbol':'종목','name':'종목명','current_score':'PREOPEN',
+                    'gamma_score':'GAMMA','recommendation':'방향','expected_change_pct':'예상등락%',
+                    'chase_risk':'추격위험','preopen_data_mode':'Mode'
                 })
                 st.dataframe(kpdf,use_container_width=True,hide_index=True)
-            with st.expander('저장된 한국장 PREOPEN Report',expanded=False):
-                st.code(km.get('report_text') or '',language=None)
+            st.caption(klm.get('report_text') or '저장된 PREOPEN report 없음')
 
-        nexts=(ks or {}).get('next_sources') or []
-        if nexts:
-            with st.expander('데이터 소스 상태',expanded=False):
-                st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('Candidate Score는 Quality Gate 통과 종목의 정밀분석 우선순위입니다. 최종 매매 판단은 Final Recommendation Engine에서 별도로 결정합니다.')
+        with st.expander('🔬 Research · Quality Universe / Engine Data',expanded=False):
+            urows=(ku or {}).get('rows') or []
+            if urows:
+                udf=pd.DataFrame(urows)
+                keep=['quality_grade','quality_reasons','instrument_type','market_cap_rank',
+                      'symbol','name','market','price','change_pct','volume','trading_value',
+                      'source_count','score','bias']
+                udf=udf[[c for c in keep if c in udf.columns]].rename(columns={
+                    'quality_grade':'Quality','quality_reasons':'Gate Reason','instrument_type':'유형',
+                    'market_cap_rank':'시총순위','symbol':'종목','name':'종목명','market':'시장',
+                    'price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금',
+                    'source_count':'소스수','score':'Candidate Score','bias':'방향'
+                })
+                st.dataframe(udf,use_container_width=True,hide_index=True)
+
+        with st.expander('⚙️ Diagnostics · 수동 복구/연결점검',expanded=False):
+            d1,d2,d3=st.columns(3)
+            with d1:
+                if live and st.button('국내 REST 점검',use_container_width=True,key='kr_quote_probe'):
+                    q=api('/api/korea/quote/005930',timeout=25) or {}
+                    st.success('REST 정상') if q.get('ok') else st.error('REST 연결 실패')
+            with d2:
+                if live and st.button('Universe 재검색',use_container_width=True,key='kr_market_scan_diag'):
+                    rr=api_post('/api/korea/scan?limit=50') or {}
+                    st.success('Universe 갱신 완료') if rr.get('ok') else st.error('재검색 실패')
+            with d3:
+                if live and st.button('Pulse 수동 갱신',use_container_width=True,key='kr_pulse_refresh'):
+                    rr=api_post('/api/korea/pulse/refresh?force=false') or {}
+                    st.success('Pulse 갱신 완료') if rr.get('updated_at') else st.error('Pulse 갱신 실패')
+
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -252,9 +204,9 @@ with tab_trading:
     market_label='BULL' if qqq_pct>=.3 else ('BEAR' if qqq_pct<=-.3 else 'NEUTRAL')
     semi_label='STRONG' if smh_pct>=.5 else ('WEAK' if smh_pct<=-.5 else 'NEUTRAL')
     c1,c2,c3,c4=st.columns(4)
-    c1.metric('NASDAQ Bias',f'{market_label} {qqq_pct:+.2f}%')
-    c2.metric('Semiconductor',f'{semi_label} {smh_pct:+.2f}%')
-    c3.metric('Market Mode','TREND' if abs(qqq_pct)>=.4 else 'MIXED')
+    c1.metric('Market Bias',f'{market_label} {qqq_pct:+.2f}%')
+    c2.metric('Sector',f'{semi_label} {smh_pct:+.2f}%')
+    c3.metric('Regime','TREND' if abs(qqq_pct)>=.4 else 'MIXED')
     c4.metric('Data','LIVE' if live else 'DEMO')
 
     if live:
@@ -269,7 +221,7 @@ with tab_trading:
                 f"Quality Gate · A {uqc.get('A',0)} · B_EVENT {uqc.get('B_EVENT',0)} · "
                 f"C_HIGH_RISK {uqc.get('C_HIGH_RISK',0)} · REJECT {uqc.get('REJECT',0)}"
             )
-            with st.expander('오늘 자동 발굴 Universe 보기', expanded=False):
+            with st.expander('🔬 Quality Universe 보기', expanded=False):
                 drows=uni.get('rows') or []
                 if drows:
                     udf=pd.DataFrame(drows)
@@ -363,52 +315,46 @@ with tab_trading:
                 edf=edf[[c for c in keep if c in edf.columns]]
                 st.dataframe(edf,use_container_width=True,hide_index=True)
 
-    st.subheader('Candidate TOP10 · 정밀분석 대상')
-    st.caption('이 목록은 추천주가 아니라 정밀분석 우선순위입니다. 최종 추천 1~5는 별도 엔진에서 결정합니다.')
     if live:
-        payload=api('/api/screener?top_n=10') or {'data':[]}; rows=payload.get('data',[])
+        payload=api('/api/screener?top_n=10') or {'data':[]}
+        rows=payload.get('data',[])
+        symbols=[r['symbol'] for r in rows]
+        for sym in (uni.get('core') or []):
+            if sym not in symbols:
+                symbols.append(sym)
+    else:
+        ranked=rank_candidates(demo_candidates(),cfg).copy()
+        rows=ranked.to_dict('records')
+        symbols=ranked['symbol'].tolist()
+
+    with st.expander('👀 Candidate TOP10 · 정밀분석 후보',expanded=False):
+        st.caption('추천주가 아니라 엔진이 더 깊게 볼 후보입니다.')
         if rows:
             show=pd.DataFrame(rows); show.insert(0,'순위',range(1,len(show)+1))
-            cols=['순위','symbol','score','bias','price','change_pct','ma5','ma5_slope_pct','rvol','atr_pct','dollar_volume','exchange']
-            show=show[[c for c in cols if c in show.columns]].rename(columns={'symbol':'종목','score':'Trading Score','bias':'방향','price':'현재가','change_pct':'당일%','ma5':'MA5','ma5_slope_pct':'MA5기울기%','rvol':'RVOL','atr_pct':'ATR%','dollar_volume':'거래대금','exchange':'거래소'})
-            for c in ['현재가','MA5','MA5기울기%','RVOL','ATR%','당일%']:
-                if c in show.columns: show[c]=pd.to_numeric(show[c],errors='coerce').round(2)
-            if '거래대금' in show.columns: show['거래대금']=pd.to_numeric(show['거래대금'],errors='coerce').round(0)
+            cols=['순위','symbol','score','bias','price','change_pct','ma5_slope_pct','rvol','atr_pct','dollar_volume','exchange']
+            show=show[[c for c in cols if c in show.columns]].rename(columns={
+                'symbol':'종목','score':'Candidate Score','bias':'방향','price':'현재가',
+                'change_pct':'당일%','ma5_slope_pct':'MA5기울기%','rvol':'RVOL',
+                'atr_pct':'ATR%','dollar_volume':'거래대금','exchange':'거래소'
+            })
             st.dataframe(show,use_container_width=True,hide_index=True)
-
-            cmp=api('/api/screener/compare?top_n=10') or {}
-            with st.expander('🌓 CURRENT vs SHADOW TOP10 비교', expanded=False):
-                st.caption('SHADOW는 연구용 LIVE_CANDIDATE_V1입니다. 실제 Trading Score나 주문에는 사용하지 않습니다.')
-                m1,m2,m3=st.columns(3)
-                m1.metric('TOP10 겹침',f"{int(cmp.get('overlap_count') or 0)}/10")
-                m2.metric('CURRENT 전용',len(cmp.get('current_only') or []))
-                m3.metric('SHADOW 전용',len(cmp.get('shadow_only') or []))
-                crows=cmp.get('rows') or []
-                if crows:
-                    cdf=pd.DataFrame(crows)
-                    keep=['symbol','current_rank','shadow_rank','rank_delta','current_score','shadow_score','change_pct','bias']
-                    cdf=cdf[[c for c in keep if c in cdf.columns]].rename(columns={
-                        'symbol':'종목','current_rank':'Current 순위','shadow_rank':'Shadow 순위',
-                        'rank_delta':'Shadow 상승칸','current_score':'Current Score',
-                        'shadow_score':'Shadow Score','change_pct':'당일%','bias':'방향'
-                    })
-                    for c in ['Current Score','Shadow Score','당일%']:
-                        if c in cdf.columns: cdf[c]=pd.to_numeric(cdf[c],errors='coerce').round(2)
-                    st.dataframe(cdf,use_container_width=True,hide_index=True)
-                if cmp.get('shadow_only'):
-                    st.caption('SHADOW 신규 후보: '+', '.join(cmp.get('shadow_only')))
-            symbols=[r['symbol'] for r in rows]
-            for sym in (uni.get('core') or []):
-                if sym not in symbols:
-                    symbols.append(sym)
-            if rows[0]['score'] < cfg.watch_score:
-                st.info('현재 WATCH 기준(70점)을 넘는 후보가 없습니다. NO TRADE도 유효한 판단입니다.')
         else:
-            st.info('5일 일봉 지표 초기 수집 중입니다. 잠시 후 자동으로 TOP10이 계산됩니다.')
-            symbols=[q['symbol'] for q in (api('/api/quotes') or [])]
-    else:
-        ranked=rank_candidates(demo_candidates(),cfg).copy(); ranked.insert(0,'rank',range(1,len(ranked)+1))
-        st.dataframe(ranked,use_container_width=True,hide_index=True); symbols=ranked['symbol'].tolist()
+            st.info('Candidate 데이터 준비 중')
+
+    with st.expander('🔬 Research · CURRENT vs SHADOW / Universe',expanded=False):
+        if live:
+            cmp=api('/api/screener/compare?top_n=10') or {}
+            m1,m2,m3=st.columns(3)
+            m1.metric('TOP10 겹침',f"{int(cmp.get('overlap_count') or 0)}/10")
+            m2.metric('CURRENT 전용',len(cmp.get('current_only') or []))
+            m3.metric('SHADOW 전용',len(cmp.get('shadow_only') or []))
+            crows=cmp.get('rows') or []
+            if crows:
+                cdf=pd.DataFrame(crows)
+                keep=['symbol','current_rank','shadow_rank','current_score','shadow_score','change_pct','bias']
+                cdf=cdf[[c for c in keep if c in cdf.columns]]
+                st.dataframe(cdf,use_container_width=True,hide_index=True)
+
 
     if live:
         hist=(api('/api/ranking-history') or {'data':[]}).get('data',[])
@@ -418,7 +364,7 @@ with tab_trading:
             st.dataframe(pivot,use_container_width=True,hide_index=True)
 
 
-    selected=st.selectbox('오늘 집중 감시 종목',symbols,index=0 if symbols else None)
+    selected=st.selectbox('종목 상세보기',symbols,index=0 if symbols else None)
     if selected:
         st.divider(); st.subheader(f'{selected} 집중 감시')
         if live:

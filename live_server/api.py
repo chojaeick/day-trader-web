@@ -12,9 +12,10 @@ from .kiwoom import KiwoomClient
 from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, shadow_screener_rows, compare_current_shadow, context_for
 from .validation import HistoricalValidator, LiveTop10Validator
 from .archive import RankingArchive
+from .preopen import PreOpenReportStore, build_usa_preopen_report
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
-s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); tasks=[]
+s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); tasks=[]
 manual_scan_state={'last_started_monotonic':0.0,'last_result':None}
 
 async def checkpoint_forever():
@@ -42,6 +43,61 @@ async def checkpoint_forever():
                     done.add(key)
         await asyncio.sleep(20)
 
+
+async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_30'):
+    # Force a fresh market-wide discovery at the official snapshot time.
+    scan=None
+    try:
+        scan=await k.manual_discover_now()
+    except Exception as e:
+        logging.warning('preopen discovery refresh failed; using current universe: %s', e)
+
+    current=screener_rows(db.quotes(),db.daily_metrics(),10)
+    shadow=shadow_screener_rows(db.quotes(),db.daily_metrics(),10)
+    if not current:
+        raise RuntimeError('preopen screener rows not ready')
+
+    report=build_usa_preopen_report(
+        current,shadow,db.quotes(),
+        len(getattr(s,'symbols',[]) or []),
+        scheduled=scheduled,label=label
+    )
+    report['extra']['scan']=scan
+    rid=preopen_store.save(report)
+
+    # Also freeze the exact CURRENT/SHADOW ranking in the regular Archive.
+    qmap={q.get('symbol'):q for q in db.quotes()}
+    captured=report['generated_at']
+    archive.save(report['trade_date'],label,'CURRENT',current,captured,
+                 float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+                 float((qmap.get('SMH') or {}).get('change_pct') or 0))
+    if shadow:
+        archive.save(report['trade_date'],label,'SHADOW',shadow,captured,
+                     float((qmap.get('QQQ') or {}).get('change_pct') or 0),
+                     float((qmap.get('SMH') or {}).get('change_pct') or 0))
+    return {'ok':True,'id':rid,**report}
+
+async def preopen_scheduler_forever():
+    done=set()
+    while True:
+        try:
+            et=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+            day=et.strftime('%Y-%m-%d')
+            key=('USA',day,'PREOPEN_30')
+            target=int(getattr(s,'preopen_usa_hour_et',9))*60+int(getattr(s,'preopen_usa_minute_et',0))
+            minute=et.hour*60+et.minute
+            enabled=bool(getattr(s,'preopen_usa_enabled',True))
+            if enabled and et.weekday()<5 and key not in done and target<=minute<=target+2:
+                try:
+                    await generate_usa_preopen_report(scheduled=True,label='PREOPEN_30')
+                    done.add(key)
+                    logging.info('scheduled USA PREOPEN_30 report saved for %s',day)
+                except Exception as e:
+                    logging.exception('scheduled USA PREOPEN_30 failed: %s',e)
+        except Exception:
+            logging.exception('preopen scheduler loop failed')
+        await asyncio.sleep(20)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not s.app_key or not s.app_secret:
@@ -53,17 +109,18 @@ async def lifespan(app: FastAPI):
             logging.warning('startup universe discovery failed; using fallback universe: %s', e)
         tasks.extend([asyncio.create_task(k.websocket_forever()),asyncio.create_task(k.snapshot_poll_forever()),
                       asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(k.backfill_forever_once()),
-                      asyncio.create_task(k.discovery_forever()),asyncio.create_task(checkpoint_forever())])
+                      asyncio.create_task(k.discovery_forever()),asyncio.create_task(checkpoint_forever()),
+                      asyncio.create_task(preopen_scheduler_forever())])
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='1.9',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.0',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.9','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'2.0','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()
@@ -224,6 +281,35 @@ def scan_status():
         'last_result':manual_scan_state.get('last_result'),
         'last_manual_scan_at':getattr(k,'last_manual_scan_at',None)
     }
+
+
+@app.post('/api/briefing/generate')
+async def briefing_generate(market:str='USA'):
+    market=market.upper()
+    if market!='USA':
+        raise HTTPException(501,'KOREA briefing requires the Korean-market data adapter; scheduled schema is already prepared')
+    try:
+        return await generate_usa_preopen_report(scheduled=False,label='MANUAL_PREOPEN')
+    except Exception as e:
+        logging.exception('manual briefing generation failed')
+        raise HTTPException(500,str(e))
+
+@app.get('/api/briefing/latest')
+def briefing_latest(market:str='USA'):
+    x=preopen_store.latest(market)
+    if not x: raise HTTPException(404,'briefing not available yet')
+    return x
+
+@app.get('/api/briefing/history')
+def briefing_history(market:str='USA',limit:int=Query(60,ge=1,le=500)):
+    return {'data':preopen_store.history(market,limit)}
+
+@app.get('/api/briefing/{report_id}')
+def briefing_get(report_id:int):
+    x=preopen_store.get(report_id)
+    if not x: raise HTTPException(404,'briefing not found')
+    return x
+
 
 @app.get('/api/validation/runs')
 def validation_runs(limit:int=Query(20,ge=1,le=100)):

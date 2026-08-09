@@ -31,6 +31,9 @@ class Settings:
     discovery_limit: int = int(os.getenv('DAYTRADER_DISCOVERY_LIMIT', '40'))
     discovery_min_price: float = float(os.getenv('DAYTRADER_DISCOVERY_MIN_PRICE', '5'))
     discovery_min_dollar: float = float(os.getenv('DAYTRADER_DISCOVERY_MIN_DOLLAR', '5000000'))
+    preopen_usa_enabled: bool = os.getenv('DAYTRADER_PREOPEN_USA_ENABLED','1').lower() not in ('0','false','no')
+    preopen_usa_hour_et: int = int(os.getenv('DAYTRADER_PREOPEN_USA_HOUR_ET','9'))
+    preopen_usa_minute_et: int = int(os.getenv('DAYTRADER_PREOPEN_USA_MINUTE_ET','0'))
 
     def exchange_for(self, symbol: str) -> str:
         overrides = {

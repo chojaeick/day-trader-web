@@ -57,14 +57,14 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','1.9') if live else '1.9'
+version=(health or {}).get('version','2.0') if live else '2.0'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V1.9 · Current 운영모델 + Shadow 실험모델 병행 관찰 · 운영 점수/자동주문 로직은 변경하지 않음')
+st.caption('V2.0 · 미국장 개장 -30분 자동 Snapshot/Intelligence Report 저장 시작 · CURRENT 운영 로직은 변경하지 않음')
 
 
-tab_trading, tab_research, tab_archive, tab_live = st.tabs([
-    '📈 Trading', '🧪 Research', '📚 Archive', '✅ Live Validation'
+tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
+    '📈 Trading', '🗞️ Briefing', '🧪 Research', '📚 Archive', '✅ Live Validation'
 ])
 
 with tab_trading:
@@ -280,6 +280,58 @@ with tab_trading:
             st.metric('상태',sig.state); st.line_chart(bars.set_index('time')['close'],height=300)
 
 
+
+
+with tab_brief:
+    st.subheader('🗞️ Pre-Open Intelligence Briefing')
+    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → Intelligence Report → Archive 저장을 수행합니다.')
+    c1,c2,c3=st.columns([1.2,1.2,3.6])
+    with c1:
+        if live and st.button('지금 미국장 브리핑 생성',use_container_width=True,key='brief_generate_now'):
+            with st.spinner('시장 재검색과 PREOPEN Intelligence Report 생성 중...'):
+                res=api_post('/api/briefing/generate?market=USA') or {}
+            if res.get('ok'):
+                st.success(f"브리핑 저장 완료 · {res.get('trade_date')} · Report #{res.get('id')}")
+                st.rerun()
+            else:
+                st.error('브리핑 생성 실패: '+str(res.get('error') or res))
+    with c2:
+        st.metric('자동 시각','09:00 ET')
+    with c3:
+        st.caption('한국장은 시장 데이터 어댑터를 만든 뒤 같은 PREOPEN_30 스케줄 구조로 연결합니다.')
+
+    latest=api('/api/briefing/latest?market=USA') if live else None
+    if latest:
+        meta=latest.get('meta') or {}
+        st.markdown(f"### 🇺🇸 {meta.get('trade_date','')} PRE-OPEN")
+        m1,m2,m3,m4=st.columns(4)
+        m1.metric('Market LONG',f"{float(meta.get('market_long_power') or 0):.0f}")
+        m2.metric('Market SHORT',f"{float(meta.get('market_short_power') or 0):.0f}")
+        m3.metric('QQQ',f"{float(meta.get('qqq_pct') or 0):+.2f}%")
+        m4.metric('SMH',f"{float(meta.get('smh_pct') or 0):+.2f}%")
+        if meta.get('report_text'):
+            st.code(meta.get('report_text'),language=None)
+        r=latest.get('rows') or []
+        if r:
+            rdf=pd.DataFrame(r)
+            keep=['symbol','current_rank','shadow_rank','current_score','shadow_score',
+                  'change_pct','rvol','ma5_slope_pct','long_power','short_power',
+                  'recommendation','rationale']
+            rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
+                'symbol':'종목','current_rank':'CURRENT','shadow_rank':'SHADOW',
+                'current_score':'Current Score','shadow_score':'Shadow Score',
+                'change_pct':'장전/현재%','rvol':'RVOL','ma5_slope_pct':'MA5기울기%',
+                'long_power':'LONG 힘','short_power':'SHORT 힘',
+                'recommendation':'판단','rationale':'근거'
+            })
+            st.dataframe(rdf,use_container_width=True,hide_index=True)
+    else:
+        st.info('아직 저장된 PREOPEN 리포트가 없습니다. 수동 생성으로 먼저 테스트할 수 있습니다.')
+
+    hist=(api('/api/briefing/history?market=USA&limit=30') or {}).get('data',[]) if live else []
+    if hist:
+        with st.expander('저장된 장전 브리핑 History',expanded=False):
+            st.dataframe(pd.DataFrame(hist),use_container_width=True,hide_index=True)
 
 with tab_research:
     st.caption('과거 시뮬레이션 · Weight Study · Walk-forward · Regime · Relative Strength 연구')
@@ -652,4 +704,4 @@ with tab_live:
             st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
 
-st.caption('V1.9: CURRENT 운영모델은 그대로 유지하고 SHADOW 실험모델을 병행 저장/비교합니다. NO AUTO ORDER.')
+st.caption('V2.0: PREOPEN_30 자동 Snapshot/Report 저장 엔진 추가. CURRENT/SHADOW 운영·연구 분리 및 NO AUTO ORDER 유지.')

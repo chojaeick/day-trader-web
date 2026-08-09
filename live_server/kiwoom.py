@@ -196,7 +196,7 @@ class KiwoomClient:
             before=list(self.active_symbols())
             before_set=set(before)
             started=datetime.now(timezone.utc)
-            result=await self.discover_universe()
+            result=await asyncio.to_thread(self.discover_universe)
             after=list(self.active_symbols())
             after_set=set(after)
 
@@ -206,17 +206,13 @@ class KiwoomClient:
             # Prime only genuinely new symbols. Keep this bounded so a manual click stays responsive.
             for sym in added[:12]:
                 try:
-                    await asyncio.to_thread(self.snapshot_symbol, sym)
-                except Exception:
-                    pass
-                try:
-                    await asyncio.to_thread(self.refresh_daily_symbol, sym)
-                except Exception:
-                    pass
-                try:
-                    await asyncio.to_thread(self.minute_backfill_symbol, sym, 80)
-                except Exception:
-                    pass
+                    ex=self.active_exchange(sym)
+                    await asyncio.to_thread(self.quote, sym, ex)
+                    await asyncio.to_thread(self.daily_metrics, sym, ex)
+                    await asyncio.to_thread(self.backfill_symbol, sym, ex, 80)
+                except Exception as e:
+                    log.warning('manual prime discovered %s: %s', sym, e)
+                await asyncio.sleep(0.15)
 
             self.last_manual_scan_at=datetime.now(timezone.utc)
             return {

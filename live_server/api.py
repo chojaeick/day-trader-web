@@ -53,12 +53,12 @@ async def lifespan(app: FastAPI):
     for t in tasks: t.cancel()
 
 app=FastAPI(title='DAY TRADER LIVE API',version='1.7.1',lifespan=lifespan)
-app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET'],allow_headers=['*'])
+app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'1.7.1','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'1.7.1','hotfix':'scan-2','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()

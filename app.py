@@ -60,7 +60,7 @@ mode='LIVE DATA' if live else 'DEMO DATA'
 version=(health or {}).get('version','1.7.1') if live else '1.7.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V1.7.1 · Daily Ranking Archive + 즉시 시장 재검색 + 점수 새로고침')
+st.caption('V1.7 · Trading / Research / Archive / Live Validation 분리를 위한 UI 개편 시작 · 이번 버전은 Daily Ranking Archive를 우선 적용')
 
 qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
 qqq_pct=float((qqq or {}).get('change_pct') or 0); smh_pct=float((smh or {}).get('change_pct') or 0)

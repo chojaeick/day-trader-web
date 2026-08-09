@@ -18,6 +18,7 @@ from .archive import RankingArchive
 from .preopen import PreOpenReportStore, build_usa_preopen_report, build_korea_preopen_report
 from .news_ai import analyze_news_with_openai, analyze_news_resilient
 from .korea import KoreaMarketAdapter
+from .recommendation import build_usa_final_recommendations, build_korea_final_recommendations
 import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -314,7 +315,7 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.8.1',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.9',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 
@@ -342,6 +343,18 @@ async def korea_preopen_generate():
     except Exception as e:
         logging.exception('manual KOREA preopen generation failed')
         raise HTTPException(500,str(e))
+
+
+@app.get('/api/recommendations/final')
+def final_recommendations_usa(limit:int=Query(5,ge=1,le=5)):
+    candidates=screener_rows(db.quotes(),db.daily_metrics(),10)
+    def _sig(sym):
+        return multi_timeframe_signal(sym,db.ticks(sym,40000),db.quotes())
+    return build_usa_final_recommendations(candidates,k.discovery,_sig,limit)
+
+@app.get('/api/korea/recommendations/final')
+def final_recommendations_korea(limit:int=Query(5,ge=1,le=5)):
+    return build_korea_final_recommendations(korea.discovery,korea.intraday_pulse,limit)
 
 @app.get('/api/korea/preopen/latest')
 def korea_preopen_latest():
@@ -394,7 +407,7 @@ def korea_quote(stk_cd:str):
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.8.1','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.9','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

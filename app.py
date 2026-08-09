@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.8.1') if live else '2.8.1'
+version=(health or {}).get('version','2.9') if live else '2.9'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.8.1.1 · QUALITY GATE V1 · USA + KOREA 보수적 후보 필터 · NO AUTO ORDER')
+st.caption('V2.9 · FINAL RECOMMENDATION V1 · 보수적 실행후보 1~5 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,7 +73,7 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · Day Trader')
-        st.caption('V2.8.1.1 · Quality Gate 통과 종목만 GAMMA/PREOPEN/Pulse 정밀분석 대상으로 사용합니다.')
+        st.caption('V2.9 · Quality Gate 통과 종목만 GAMMA/PREOPEN/Pulse 정밀분석 대상으로 사용합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
@@ -123,6 +123,22 @@ with tab_trading:
                 udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','raw_symbol':'원본코드','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
                 st.dataframe(udf,use_container_width=True,hide_index=True)
     
+        st.markdown('### 🎯 Final Recommendation · 실행후보 1~5')
+        krf=api('/api/korea/recommendations/final?limit=5') if live else {}
+        krfd=(krf or {}).get('data') or []
+        if krfd:
+            rdf=pd.DataFrame(krfd)
+            keep=['symbol','name','action','final_score','quality_grade','bias','strength_composite','reason']
+            rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
+                'symbol':'종목','name':'종목명','action':'Action','final_score':'Final Score',
+                'quality_grade':'Quality','bias':'방향','strength_composite':'체결강도','reason':'핵심근거'
+            })
+            st.dataframe(rdf,use_container_width=True,hide_index=True)
+        else:
+            st.info('현재 실행조건을 모두 만족한 종목이 없습니다. NO TRADE도 정상적인 결과입니다.')
+        if not (krf or {}).get('buy_now_enabled',False):
+            st.caption('국장은 검증된 1분/5분 차트 Gate가 아직 연결되지 않아 BUY NOW를 차단합니다. 장중 Pulse는 WATCH 후보만 만들 수 있습니다.')
+
         st.markdown('### 🇰🇷 Candidate TOP10 · KOREA_CURRENT_V1_GAMMA')
         st.caption('Quality Gate를 통과한 정밀분석 후보입니다. LONG/SHORT는 방향성 참고이며 아직 최종 추천이 아닙니다.')
         st.caption('Candidate Score는 정밀분석 우선순위입니다. 매수 추천점수가 아닙니다. SHORT/WAIT 후보도 포함될 수 있습니다.')
@@ -228,7 +244,7 @@ with tab_trading:
         if nexts:
             with st.expander('데이터 소스 상태',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.8.1.1에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('Candidate Score는 Quality Gate 통과 종목의 정밀분석 우선순위입니다. 최종 매매 판단은 Final Recommendation Engine에서 별도로 결정합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -324,6 +340,29 @@ with tab_trading:
                     f"Universe {lr.get('before_count','-')}→{lr.get('after_count','-')} · "
                     f"Archive {lr.get('archive_label','-')}"
                 )
+    st.subheader('🎯 Final Recommendation · 실행후보 1~5')
+    if live:
+        fr=api('/api/recommendations/final?limit=5',timeout=20) or {}
+        frows=(fr or {}).get('data') or []
+        if frows:
+            fdf=pd.DataFrame(frows)
+            keep=['symbol','action','final_score','quality_grade','state','price','rvol','confirm_5m','invalidation','target1','target2','reason']
+            fdf=fdf[[c for c in keep if c in fdf.columns]].rename(columns={
+                'symbol':'종목','action':'Action','final_score':'Final Score','quality_grade':'Quality',
+                'state':'Signal','price':'현재가','rvol':'RVOL','confirm_5m':'5M Confirm',
+                'invalidation':'손절/무효화','target1':'T1','target2':'T2','reason':'핵심근거'
+            })
+            st.dataframe(fdf,use_container_width=True,hide_index=True)
+        else:
+            st.info('현재 BUY NOW / WATCH 조건을 모두 만족한 종목이 없습니다. NO TRADE도 정상적인 결과입니다.')
+        with st.expander('Final Engine 판정 근거 보기',expanded=False):
+            erows=(fr or {}).get('evaluated') or []
+            if erows:
+                edf=pd.DataFrame(erows)
+                keep=['symbol','action','final_score','quality_grade','candidate_score','signal_score','confirm_5m','bias','state','blocks']
+                edf=edf[[c for c in keep if c in edf.columns]]
+                st.dataframe(edf,use_container_width=True,hide_index=True)
+
     st.subheader('Candidate TOP10 · 정밀분석 대상')
     st.caption('이 목록은 추천주가 아니라 정밀분석 우선순위입니다. 최종 추천 1~5는 별도 엔진에서 결정합니다.')
     if live:

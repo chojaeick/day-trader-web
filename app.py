@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.6') if live else '2.6'
+version=(health or {}).get('version','2.6.1') if live else '2.6.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.6 · KOREA PREOPEN · 08:30 KST + ka10029 예상체결 + GAMMA fallback · NO AUTO ORDER')
+st.caption('V2.6.1.1 · KOREA PREOPEN VALIDATION · 시간유효성 + Coverage + PARTIAL/FALLBACK · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,7 +73,7 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
-        st.caption('V2.6은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
+        st.caption('V2.6.1.1은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
@@ -129,7 +129,7 @@ with tab_trading:
             st.info('아직 한국장 Universe가 없습니다. 위의 한국장 시장 재검색을 한 번 눌러주세요.')
 
         st.markdown('### 🌅 한국장 08:30 PREOPEN')
-        st.caption('평일 08:30 KST에 서버가 자동으로 Universe 재검색 → ka10029 예상체결 → PREOPEN TOP10 → Archive 저장합니다. 예상체결 데이터가 없더라도 GAMMA fallback으로 스냅샷을 저장합니다.')
+        st.caption('평일 08:30 KST 자동 저장. ka10029는 실제 장전 유효시간(08:20~08:59 KST)에만 점수에 반영하며, TOP10 매칭 Coverage가 낮으면 PARTIAL/FALLBACK으로 표시합니다.')
         if live and st.button('지금 한국장 PREOPEN 생성/테스트',use_container_width=True,key='kr_preopen_now'):
             with st.spinner('한국장 Universe + 예상체결 데이터 + PREOPEN TOP10 생성 중...'):
                 kp=api_post('/api/korea/preopen/generate') or {}
@@ -145,7 +145,11 @@ with tab_trading:
             ke=km.get('extra') or {}
             st.info(
                 f"최근 PREOPEN · {km.get('trade_date')} · {ke.get('data_mode','N/A')} · "
-                f"예상체결 {ke.get('expected_count',0)}개 · Market LONG {km.get('market_long_power','N/A')}"
+                f"TOP10 예상체결 매칭 {ke.get('expected_matched_top10',0)}/10 "
+                f"({ke.get('expected_coverage_pct',0)}%) · "
+                f"원천 {ke.get('expected_count_raw',0)}개 · "
+                f"장전시간 유효 {ke.get('expected_window_live',False)} · "
+                f"Market LONG {km.get('market_long_power','N/A')}"
             )
             krows=kl.get('rows') or []
             if krows:
@@ -167,9 +171,9 @@ with tab_trading:
 
         nexts=(ks or {}).get('next_sources') or []
         if nexts:
-            with st.expander('V2.6 확장 예정 데이터 소스',expanded=False):
+            with st.expander('V2.6.1.1 확장 예정 데이터 소스',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.6에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.6.1.1에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}

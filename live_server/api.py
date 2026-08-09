@@ -211,6 +211,13 @@ async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_3
     return {'ok':True,'id':rid,**report}
 
 
+def _korea_expected_window_live():
+    kst=datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Seoul'))
+    # Accept only the actual pre-open auction window for scoring.
+    # 08:20~08:59 KST keeps manual tests near the target while preventing stale/off-hours data.
+    mins=kst.hour*60+kst.minute
+    return kst.weekday()<5 and (8*60+20) <= mins <= (8*60+59)
+
 async def generate_korea_preopen_report(scheduled:bool=False,label:str='PREOPEN_30'):
     # Always refresh the domestic multi-source universe first.
     discovery=await asyncio.to_thread(korea.discover,50)
@@ -222,7 +229,13 @@ async def generate_korea_preopen_report(scheduled:bool=False,label:str='PREOPEN_
         expected_error=str(e)
         logging.warning('KOREA ka10029 expected-execution unavailable; GAMMA fallback: %s',e)
 
-    report=build_korea_preopen_report(discovery,expected,scheduled=scheduled,label=label)
+    report=build_korea_preopen_report(
+        discovery,
+        expected,
+        scheduled=scheduled,
+        label=label,
+        expected_window_live=_korea_expected_window_live()
+    )
     if expected_error:
         report.setdefault('extra',{})['expected_error']=expected_error
     rid=preopen_store.save(report)
@@ -291,7 +304,7 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.6',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.6.1',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 
@@ -356,7 +369,7 @@ def korea_quote(stk_cd:str):
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.6','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.6.1','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

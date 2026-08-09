@@ -422,7 +422,8 @@ def build_korea_preopen_report(
     discovery:dict,
     expected_snapshot:dict|None,
     scheduled:bool=False,
-    label:str='PREOPEN_30'
+    label:str='PREOPEN_30',
+    expected_window_live:bool=False
 ):
     """Build a Korean-market 08:30 KST snapshot.
 
@@ -444,7 +445,11 @@ def build_korea_preopen_report(
         exp_rank=int(e.get('expected_rank') or 9999)
         exp_qty=_f(e.get('expected_qty'),0.0)
 
-        if e:
+        usable_expected = bool(e) and bool(expected_window_live) and (
+            abs(exp_pct) > 0 or exp_qty > 0 or _f(e.get('expected_price'),0.0) > 0
+        )
+
+        if usable_expected:
             rank_bonus=max(0.0,18.0*(1-(exp_rank-1)/50.0)) if exp_rank<9999 else 0.0
             momentum=min(14.0,abs(exp_pct)*1.4)
             align = ((exp_pct>0 and r.get('bias')=='LONG') or (exp_pct<0 and r.get('bias')=='SHORT'))
@@ -468,12 +473,12 @@ def build_korea_preopen_report(
         else:
             preopen_risk='NORMAL'
 
-        final_bias='LONG' if exp_pct>0 else ('SHORT' if exp_pct<0 else r.get('bias') or 'WATCH')
+        final_bias=('LONG' if exp_pct>0 else ('SHORT' if exp_pct<0 else r.get('bias') or 'WATCH')) if usable_expected else (r.get('bias') or 'WATCH')
         r.update({
             'current_rank':idx,
             'current_score':round(preopen_score,1),
-            'price':e.get('expected_price') or r.get('price'),
-            'change_pct':exp_pct if e else r.get('change_pct'),
+            'price':(e.get('expected_price') or r.get('price')) if usable_expected else r.get('price'),
+            'change_pct':exp_pct if usable_expected else r.get('change_pct'),
             'long_power':round(preopen_score,1) if final_bias=='LONG' else round(100-preopen_score,1),
             'short_power':round(100-preopen_score,1) if final_bias=='LONG' else round(preopen_score,1),
             'recommendation':final_bias,
@@ -484,13 +489,13 @@ def build_korea_preopen_report(
             'gamma_score':gamma,
             'preopen_score':round(preopen_score,1),
             'preopen_data_mode':data_mode,
-            'expected_rank':exp_rank if e else None,
-            'expected_price':e.get('expected_price') if e else None,
-            'base_price':e.get('base_price') if e else None,
-            'expected_change_pct':exp_pct if e else None,
-            'expected_qty':exp_qty if e else None,
-            'sell_qty':e.get('sell_qty') if e else None,
-            'buy_qty':e.get('buy_qty') if e else None,
+            'expected_rank':exp_rank if usable_expected else None,
+            'expected_price':e.get('expected_price') if usable_expected else None,
+            'base_price':e.get('base_price') if usable_expected else None,
+            'expected_change_pct':exp_pct if usable_expected else None,
+            'expected_qty':exp_qty if usable_expected else None,
+            'sell_qty':e.get('sell_qty') if usable_expected else None,
+            'buy_qty':e.get('buy_qty') if usable_expected else None,
             'preopen_risk':preopen_risk,
         })
         out.append(r)
@@ -507,11 +512,17 @@ def build_korea_preopen_report(
         market_long=50.0
 
     live_count=sum(1 for r in top if r.get('preopen_data_mode')=='PREOPEN_EXPECTED_LIVE')
-    overall_mode='PREOPEN_EXPECTED_LIVE' if live_count else 'GAMMA_FALLBACK'
+    coverage_pct=round((live_count/max(1,len(top)))*100,1) if top else 0.0
+    if live_count == len(top) and len(top) > 0:
+        overall_mode='PREOPEN_EXPECTED_LIVE'
+    elif live_count >= max(3, int(len(top)*0.5)) and len(top) > 0:
+        overall_mode='PREOPEN_EXPECTED_PARTIAL'
+    else:
+        overall_mode='GAMMA_FALLBACK'
 
     lines=[
         f"KR KOREA PRE-OPEN INTELLIGENCE · generated {kst.strftime('%Y-%m-%d %H:%M KST')}",
-        f"DATA MODE: {overall_mode} · Expected-execution covered {live_count}/{len(top)}",
+        f"DATA MODE: {overall_mode} · Expected-execution covered {live_count}/{len(top)} ({coverage_pct:.0f}%)",
         f"Market LONG {market_long:.0f} · SHORT {100-market_long:.0f}",
         "",
         "TOP 10"
@@ -541,8 +552,11 @@ def build_korea_preopen_report(
         'extra':{
             'data_mode':overall_mode,
             'expected_api':'ka10029',
-            'expected_count':expected_snapshot.get('count',0),
+            'expected_count_raw':expected_snapshot.get('count',0),
+            'expected_matched_top10':live_count,
+            'expected_coverage_pct':coverage_pct,
             'expected_source_counts':expected_snapshot.get('source_counts') or {},
+            'expected_window_live':bool(expected_window_live),
             'scheduled_time_kst':'08:30'
         }
     }

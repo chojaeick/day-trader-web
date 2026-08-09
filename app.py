@@ -1,4 +1,6 @@
 import os, time, requests, pandas as pd
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import altair as alt
 import streamlit as st
 from dotenv import load_dotenv
@@ -62,22 +64,41 @@ def _safe_float(v, default=0.0):
         return default
 
 
+def _usa_session_now():
+    """Return user-facing US equity session from New York local clock.
+
+    This deliberately does NOT equate backend connectivity/LIVE DATA with an open market.
+    Weekend is always closed. Holiday-calendar refinement can be added later.
+    """
+    et=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+    if et.weekday() >= 5:
+        return '장 마감'
+    mins=et.hour*60+et.minute
+    if 4*60 <= mins < 9*60+30:
+        return '프리마켓'
+    if 9*60+30 <= mins < 16*60:
+        return '정규장 거래중'
+    if 16*60 <= mins < 20*60:
+        return '애프터마켓'
+    return '장 마감'
+
 def _market_session_label(raw_status, market='USA'):
-    s=str(raw_status or '').upper()
     if market=='USA':
-        if 'PRE' in s:
-            return '프리마켓'
-        if 'AFTER' in s or 'POST' in s:
-            return '애프터마켓'
-        if 'OPEN' in s or 'REGULAR' in s or 'LIVE' in s:
-            return '정규장 거래중'
-        return '장 마감'
-    else:
-        if 'OPEN' in s:
-            return '정규장 거래중'
-        if 'PRE' in s:
-            return '장 시작 전'
-        return '장 마감'
+        return _usa_session_now()
+    s=str(raw_status or '').upper()
+    if 'OPEN' in s:
+        return '정규장 거래중'
+    if 'PRE' in s:
+        return '장 시작 전'
+    return '장 마감'
+
+def _market_move_label(pct):
+    p=_safe_float(pct)
+    if p >= 0.30:
+        return '상승'
+    if p <= -0.30:
+        return '하락'
+    return '보합'
 
 def _bias_label(raw):
     s=str(raw or '').upper()
@@ -268,7 +289,7 @@ mode='LIVE DATA' if live else 'DEMO DATA'
 version=(health or {}).get('version','3.4.1') if live else '3.4.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>시장 → 최종추천 → 종목상세 → 후보 → 검증</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V3.4.1 · ALL TABS MARKET AWARE · 전 탭 시장선택 연동 · NO AUTO ORDER')
+st.caption('V3.5 · ALL TABS MARKET AWARE · 전 탭 시장선택 연동 · NO AUTO ORDER')
 
 
 st.markdown('### 시장 선택')
@@ -288,18 +309,33 @@ tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
 with tab_trading:
     if market_view=='🇺🇸 USA':
         qqq=api('/api/quote/QQQ') if live else {}
+        spy=api('/api/quote/SPY') if live else {}
         smh=api('/api/quote/SMH') if live else {}
         qqq_pct=_safe_float((qqq or {}).get('change_pct'))
+        spy_pct=_safe_float((spy or {}).get('change_pct'))
         smh_pct=_safe_float((smh or {}).get('change_pct'))
+        us_session=_usa_session_now()
         market_label='BULL' if qqq_pct>=.3 else ('BEAR' if qqq_pct<=-.3 else 'NEUTRAL')
         sector_label='STRONG' if smh_pct>=.5 else ('WEAK' if smh_pct<=-.5 else 'NEUTRAL')
 
         uni=(api('/api/universe') or {}) if live else {}
         fr=(api('/api/recommendations/final?limit=5',timeout=20) or {}) if live else {}
         payload=(api('/api/screener?top_n=10') or {'data':[]}) if live else {'data':[]}
-        rows=payload.get('data') or []
+        raw_rows=payload.get('data') or []
         frows=fr.get('data') or []
         qmap={str(r.get('symbol') or '').upper():r for r in (uni.get('rows') or [])}
+        rows=[]
+        for rr in raw_rows:
+            sym=str(rr.get('symbol') or '').upper()
+            qm=qmap.get(sym)
+            if not qm or qm.get('quality_grade') not in ('A','B_EVENT'):
+                continue
+            merged=dict(rr)
+            if not merged.get('name') or str(merged.get('name')).upper()=='CORE':
+                merged['name']=qm.get('name') or sym
+            merged['quality_grade']=qm.get('quality_grade')
+            merged['chase_risk']=merged.get('chase_risk') or qm.get('chase_risk')
+            rows.append(merged)
         symbols=[]
         for r in frows+rows:
             s=r.get('symbol')
@@ -309,10 +345,15 @@ with tab_trading:
             if s and s not in symbols:
                 symbols.append(s)
 
+        usa_direction=(
+            f"현재 {_market_move_label(qqq_pct)} · 나스닥 {qqq_pct:+.2f}%"
+            if us_session=='정규장 거래중'
+            else f"최근 정규장 · 나스닥 {qqq_pct:+.2f}%"
+        )
         render_market_summary(
             '🇺🇸 USA',
-            _market_session_label((qqq or {}).get('session') or (qqq or {}).get('market_status') or ('OPEN' if live else 'CLOSED'),'USA'),
-            f"{_bias_label(market_label)} · 나스닥 {qqq_pct:+.2f}%",
+            us_session,
+            usa_direction,
             uni.get('count',0),
             len(frows),
             'LIVE' if live else 'DEMO',
@@ -366,12 +407,15 @@ with tab_trading:
         render_candidate_table(rows,qmap,'us_candidate')
 
         st.markdown('### 📍 시장 상황')
-        st.caption('시장 전체의 흐름과 현재 거래 가능 시간대를 간단히 보여줍니다.')
+        if us_session=='정규장 거래중':
+            st.caption('현재 정규장 가격 기준입니다. 주요 ETF를 시장 대표지표로 사용합니다.')
+        else:
+            st.caption('현재 장이 닫혀 있어 아래 등락률은 최근 정규장 종가 기준 참고값입니다.')
         x1,x2,x3,x4=st.columns(4)
-        x1.metric('현재 거래시간',_market_session_label((qqq or {}).get('session') or (qqq or {}).get('market_status') or ('OPEN' if live else 'CLOSED'),'USA'))
-        x2.metric('지수 흐름',f"{_bias_label(market_label)} · 나스닥 {qqq_pct:+.2f}%")
-        x3.metric('반도체 흐름',f"{'강세' if smh_pct>=.5 else ('약세' if smh_pct<=-.5 else '보합')} · {smh_pct:+.2f}%")
-        x4.metric('장세','추세장' if abs(qqq_pct)>=.4 else '혼조장')
+        x1.metric('현재 거래시간',us_session)
+        x2.metric('S&P 500',f"{_market_move_label(spy_pct)} {spy_pct:+.2f}%")
+        x3.metric('나스닥',f"{_market_move_label(qqq_pct)} {qqq_pct:+.2f}%")
+        x4.metric('반도체',f"{_market_move_label(smh_pct)} {smh_pct:+.2f}%")
 
         with st.expander('⚙️ 진단/수동 복구',expanded=False):
             st.caption('평소에는 사용하지 않습니다. 데이터 이상이 있을 때만 사용하세요.')
@@ -731,6 +775,20 @@ with tab_brief:
         b3.metric('상승 후보 비율',str(meta.get('market_long_power') or '-'))
         b4.metric('TOP10 매칭',f"{extra.get('expected_matched_top10',0)}/10")
         rows=(latest or {}).get('rows') or []
+
+        st.markdown('### 장전 요약')
+        long_power=_safe_float(meta.get('market_long_power'),50.0)
+        coverage=_safe_float(extra.get('expected_coverage_pct'),0.0)
+        if coverage > 0:
+            data_sentence=f"장전 예상체결 데이터가 TOP10의 {coverage:.0f}%에 반영되었습니다."
+        else:
+            data_sentence="현재는 장전 예상체결 유효시간이 아니거나 매칭 데이터가 없어 기본 후보점수를 사용합니다."
+        mood='상승 후보가 더 많습니다.' if long_power>=60 else ('하락 후보가 더 많습니다.' if long_power<=40 else '상승·하락 후보가 비슷합니다.')
+        top_names=[str(r.get('name') or r.get('symbol') or '') for r in rows[:3] if (r.get('name') or r.get('symbol'))]
+        names_sentence=('상위 관찰 후보는 '+', '.join(top_names)+'입니다.') if top_names else '상위 관찰 후보는 아직 없습니다.'
+        st.info(f"{data_sentence} {mood} {names_sentence}")
+        st.caption('※ 현재 한국장 브리핑은 기술/장전 데이터 요약입니다. 뉴스 AI 결합은 아직 적용하지 않았습니다.')
+
         if rows:
             df=pd.DataFrame(rows[:10])
             keep=['current_rank','symbol','name','current_score','gamma_score','recommendation','expected_change_pct','chase_risk']

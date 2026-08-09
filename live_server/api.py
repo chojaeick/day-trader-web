@@ -283,6 +283,25 @@ async def preopen_scheduler_forever():
         await asyncio.sleep(20)
 
 
+async def korea_discovery_forever():
+    """Keep Korea discovery ready without requiring a browser button click.
+
+    Refresh once during startup and then every ~10 minutes in the useful
+    pre-open/regular-session daytime window. Overnight it sleeps without
+    repeatedly hitting ranking APIs.
+    """
+    while True:
+        try:
+            kst=datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Seoul'))
+            mins=kst.hour*60+kst.minute
+            useful=kst.weekday()<5 and (8*60) <= mins <= (15*60+40)
+            if useful:
+                await asyncio.to_thread(korea.discover,50)
+        except Exception:
+            logging.exception('KOREA periodic discovery refresh failed')
+        await asyncio.sleep(600)
+
+
 async def korea_intraday_pulse_forever():
     while True:
         try:
@@ -300,11 +319,16 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.to_thread(k.discover_universe)
         except Exception as e:
-            logging.warning('startup universe discovery failed; using fallback universe: %s', e)
+            logging.warning('startup USA universe discovery failed; using fallback universe: %s', e)
+        try:
+            await asyncio.to_thread(korea.discover,50)
+        except Exception as e:
+            logging.warning('startup KOREA universe discovery failed; manual/periodic retry will remain available: %s', e)
         tasks.extend([asyncio.create_task(k.websocket_forever()),asyncio.create_task(k.snapshot_poll_forever()),
                       asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(k.backfill_forever_once()),
                       asyncio.create_task(k.discovery_forever()),asyncio.create_task(checkpoint_forever()),
-                      asyncio.create_task(preopen_scheduler_forever()),asyncio.create_task(korea_intraday_pulse_forever())])
+                      asyncio.create_task(preopen_scheduler_forever()),asyncio.create_task(korea_discovery_forever()),
+                      asyncio.create_task(korea_intraday_pulse_forever())])
     yield
     for t in tasks: t.cancel()
 
@@ -315,7 +339,7 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='3.4',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='3.5',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 
@@ -407,7 +431,7 @@ def korea_quote(stk_cd:str):
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'3.4','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'3.5','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

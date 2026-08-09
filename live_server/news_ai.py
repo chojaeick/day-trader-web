@@ -5,6 +5,35 @@ from datetime import datetime, timezone
 
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
+NEWS_AI_TIMEOUT_SECONDS = int(os.getenv("DAYTRADER_NEWS_AI_TIMEOUT_SECONDS", "90"))
+NEWS_AI_RETRY_TIMEOUT_SECONDS = int(os.getenv("DAYTRADER_NEWS_AI_RETRY_TIMEOUT_SECONDS", "150"))
+NEWS_AI_MAX_ATTEMPTS = int(os.getenv("DAYTRADER_NEWS_AI_MAX_ATTEMPTS", "2"))
+
+
+def _openai_request_with_retry(req):
+    """Call OpenAI with a longer read timeout and retry once on timeout."""
+    import socket
+    last_err = None
+    attempts = max(1, NEWS_AI_MAX_ATTEMPTS)
+    for attempt in range(attempts):
+        timeout_seconds = NEWS_AI_TIMEOUT_SECONDS if attempt == 0 else NEWS_AI_RETRY_TIMEOUT_SECONDS
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", None)
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                last_err = e
+            else:
+                raise
+        except (TimeoutError, socket.timeout) as e:
+            last_err = e
+        if attempt + 1 >= attempts:
+            raise last_err
+    raise last_err
+
 def _extract_sources(payload:dict) -> list[dict]:
     seen=set(); out=[]
     for item in payload.get("output") or []:
@@ -43,7 +72,7 @@ def analyze_news_with_openai(symbols:list[str], market_context:dict) -> dict:
         }
 
     model=os.getenv("DAYTRADER_NEWS_AI_MODEL","gpt-5").strip() or "gpt-5"
-    symbols=[str(x).upper() for x in symbols if x][:10]
+    symbols=[str(x).upper() for x in symbols if x][:5]
     if not symbols:
         return {"enabled":True,"provider":"OPENAI_WEB_SEARCH","items":{}}
 
@@ -123,8 +152,7 @@ Rules:
         method="POST"
     )
     try:
-        with urllib.request.urlopen(req,timeout=120) as resp:
-            payload=json.loads(resp.read().decode("utf-8"))
+        payload=_openai_request_with_retry(req)
     except urllib.error.HTTPError as e:
         detail=e.read().decode("utf-8","replace")
         return {"enabled":True,"provider":"OPENAI_WEB_SEARCH","error":f"HTTP {e.code}: {detail[:1000]}","items":{}}

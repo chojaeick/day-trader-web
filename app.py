@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.6.2') if live else '2.6.2'
+version=(health or {}).get('version','2.7') if live else '2.7'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.6.2 · KOREA OPERATIONS UI · 운영화면 정리 + 진단기능 분리 · NO AUTO ORDER')
+st.caption('V2.7 · KOREA INTRADAY PULSE · 체결강도 + VI + KOREA_CURRENT_V2_LIVE · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -72,8 +72,8 @@ with tab_trading:
 
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
-        st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
-        st.caption('V2.6.2 운영화면입니다. 한국장 GAMMA/PREOPEN 핵심 정보만 노출하고 진단 기능은 접어서 분리합니다.')
+        st.subheader('🇰🇷 KOREA · Day Trader')
+        st.caption('V2.7 · 장전 PREOPEN + 장중 체결강도/VI Pulse를 분리 운용합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
@@ -129,6 +129,53 @@ with tab_trading:
         else:
             st.info('아직 한국장 Universe가 없습니다. Diagnostics에서 Universe 강제 재검색을 실행해주세요.')
 
+        st.markdown('### ⚡ 장중 Pulse · 체결강도 + VI')
+        kpulse=api('/api/korea/pulse') if live else {}
+        ps=(kpulse or {}).get('status','N/A')
+        po=(kpulse or {}).get('market_open',False)
+        ptime=(kpulse or {}).get('updated_at')
+        if po:
+            st.success(f'장중 Pulse LIVE · 60초 자동 갱신 · VI 감지 {(kpulse or {}).get("vi_count",0)}종목 · {ptime}')
+        else:
+            st.info(f'현재 정규장 시간이 아닙니다 · {ps} · GAMMA 기준값을 유지합니다.')
+
+        prows=(kpulse or {}).get('top10') or []
+        if prows:
+            pdf=pd.DataFrame(prows)
+            keep=['symbol','name','market','live_score','score','bias','strength_composite',
+                  'trade_strength','trade_strength_5m','trade_strength_20m','trade_strength_60m',
+                  'strength_bias','strength_adjustment','vi_triggered','vi_count','vi_penalty','chase_risk']
+            pdf=pdf[[c for c in keep if c in pdf.columns]].rename(columns={
+                'symbol':'종목','name':'종목명','market':'시장',
+                'live_score':'LIVE Score','score':'GAMMA','bias':'기본방향',
+                'strength_composite':'체결강도종합','trade_strength':'현재강도',
+                'trade_strength_5m':'5분강도','trade_strength_20m':'20분강도',
+                'trade_strength_60m':'60분강도','strength_bias':'체결힘',
+                'strength_adjustment':'강도보정','vi_triggered':'VI','vi_count':'VI횟수',
+                'vi_penalty':'VI감점','chase_risk':'추격위험'
+            })
+            st.dataframe(pdf,use_container_width=True,hide_index=True)
+
+        with st.expander('장중 Pulse 진단/수동갱신',expanded=False):
+            st.caption('정규장에는 서버가 60초마다 자동 갱신합니다. 장외 강제조회는 진단용이며 점수 신뢰용이 아닙니다.')
+            pc1,pc2=st.columns(2)
+            with pc1:
+                if live and st.button('Pulse 수동 갱신',use_container_width=True,key='kr_pulse_refresh'):
+                    rr=api_post('/api/korea/pulse/refresh?force=false') or {}
+                    if rr.get('updated_at'):
+                        st.success('Pulse 갱신 완료')
+                        st.rerun()
+                    else:
+                        st.error('Pulse 갱신 실패: '+str(rr))
+            with pc2:
+                if live and st.button('장외 강제조회(진단)',use_container_width=True,key='kr_pulse_force'):
+                    rr=api_post('/api/korea/pulse/refresh?force=true') or {}
+                    if rr.get('updated_at'):
+                        st.warning('강제 진단 조회 완료 · 운영 점수로 사용하지 마세요.')
+                        st.rerun()
+                    else:
+                        st.error('강제조회 실패: '+str(rr))
+
         st.markdown('### 🌅 한국장 08:30 PREOPEN')
         st.caption('평일 08:30 KST 자동 저장. ka10029는 실제 장전 유효시간(08:20~08:59 KST)에만 점수에 반영하며, TOP10 매칭 Coverage가 낮으면 PARTIAL/FALLBACK으로 표시합니다.')
         if live and st.button('PREOPEN 수동 재생성',use_container_width=True,key='kr_preopen_now'):
@@ -172,9 +219,9 @@ with tab_trading:
 
         nexts=(ks or {}).get('next_sources') or []
         if nexts:
-            with st.expander('V2.6.2 확장 예정 데이터 소스',expanded=False):
+            with st.expander('데이터 소스 상태',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.6.2에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.7에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}

@@ -39,6 +39,10 @@ class KoreaMarketAdapter:
             'source_counts':{},'market_breakdown':{'KOSPI':0,'KOSDAQ':0},
             'score_model':'KOREA_CURRENT_V1_GAMMA'
         }
+        self.intraday_pulse={
+            'updated_at':None,'market_open':False,'status':'NOT_REFRESHED',
+            'rows':[],'top10':[],'vi_count':0,'score_model':'KOREA_CURRENT_V2_LIVE'
+        }
 
     def quote(self, stk_cd='005930'):
         code=_clean_code(stk_cd)
@@ -273,17 +277,207 @@ class KoreaMarketAdapter:
         }
         return self.discovery
 
+
+    def _trade_strength(self, stk_cd):
+        """Official ka10046 체결강도추이시간별."""
+        r=requests.post(
+            self.k.s.rest_base+'/api/dostk/mrkcond',
+            headers=self.k.headers('ka10046'),
+            json={'stk_cd':stk_cd},
+            timeout=20
+        )
+        d=r.json()
+        if d.get('return_code') not in (None,0):
+            raise RuntimeError(f"ka10046 {stk_cd}: {d.get('return_code')} {d.get('return_msg')}")
+        rows=d.get('cntr_str_tm') or []
+        latest=rows[0] if rows and isinstance(rows[0],dict) else {}
+        return {
+            'trade_strength':_num(latest.get('cntr_str')),
+            'trade_strength_5m':_num(latest.get('cntr_str_5min')),
+            'trade_strength_20m':_num(latest.get('cntr_str_20min')),
+            'trade_strength_60m':_num(latest.get('cntr_str_60min')),
+            'trade_strength_time':latest.get('cntr_tm'),
+            'trade_strength_price':abs(_num(latest.get('cur_prc'))),
+            'trade_strength_change_pct':_num(latest.get('flu_rt')),
+        }
+
+    def _vi_triggered(self):
+        """Official ka10054 변동성완화장치발동종목."""
+        body={
+            'mrkt_tp':'000',
+            'bf_mkrt_tp':'1',
+            'motn_tp':'0',
+            'skip_stk':'000000000',
+            'trde_qty_tp':'0',
+            'min_trde_qty':'0',
+            'max_trde_qty':'0',
+            'trde_prica_tp':'0',
+            'min_trde_prica':'0',
+            'max_trde_prica':'0',
+            'motn_drc':'0',
+            'stex_tp':'3',
+            'stk_cd':''
+        }
+        r=requests.post(
+            self.k.s.rest_base+'/api/dostk/stkinfo',
+            headers=self.k.headers('ka10054'),
+            json=body,
+            timeout=25
+        )
+        d=r.json()
+        if d.get('return_code') not in (None,0):
+            raise RuntimeError(f"ka10054: {d.get('return_code')} {d.get('return_msg')}")
+        rows=d.get('motn_stk') or []
+        out={}
+        for x in rows:
+            if not isinstance(x,dict):
+                continue
+            sym=_clean_code(x.get('stk_cd'))
+            if not sym:
+                continue
+            out[sym]={
+                'vi_triggered':True,
+                'vi_type':x.get('viaplc_tp'),
+                'vi_trigger_price':abs(_num(x.get('motn_pric'))),
+                'vi_release_time':x.get('virelis_time'),
+                'vi_count':int(_num(x.get('vimotn_cnt')) or 0),
+                'vi_open_change_pct':_num(x.get('open_pric_pre_flu_rt')),
+                'vi_direction_gap_dynamic':_num(x.get('dynm_dispty_rt')),
+                'vi_direction_gap_static':_num(x.get('static_dispty_rt')),
+            }
+        return out
+
+    @staticmethod
+    def _kst_market_open():
+        from zoneinfo import ZoneInfo
+        kst=datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Seoul'))
+        mins=kst.hour*60+kst.minute
+        return kst.weekday()<5 and (9*60) <= mins <= (15*60+30)
+
+    def refresh_intraday_pulse(self, top_n=10, force_probe=False):
+        if not self.discovery.get('rows'):
+            self.discover(50)
+
+        market_open=self._kst_market_open()
+        base=list(self.discovery.get('top10') or [])[:max(1,int(top_n))]
+
+        if not market_open and not force_probe:
+            rows=[]
+            for r in base:
+                x=dict(r)
+                x.update({
+                    'live_score':x.get('score'),
+                    'live_score_model':'KOREA_CURRENT_V2_LIVE',
+                    'pulse_status':'MARKET_CLOSED_REFERENCE',
+                    'trade_strength':None,'trade_strength_5m':None,
+                    'trade_strength_20m':None,'trade_strength_60m':None,
+                    'strength_composite':None,'strength_adjustment':0.0,
+                    'strength_bias':'N/A','vi_triggered':False,'vi_count':0,
+                    'vi_penalty':0.0
+                })
+                rows.append(x)
+            self.intraday_pulse={
+                'updated_at':datetime.now(timezone.utc).isoformat(),
+                'market_open':False,'status':'MARKET_CLOSED_REFERENCE',
+                'rows':rows,'top10':rows[:10],'vi_count':0,
+                'score_model':'KOREA_CURRENT_V2_LIVE'
+            }
+            return self.intraday_pulse
+
+        vi_map={}
+        vi_error=None
+        try:
+            vi_map=self._vi_triggered()
+        except Exception as e:
+            vi_error=str(e)
+
+        rows=[]
+        for r in base:
+            x=dict(r)
+            raw=x.get('raw_symbol') or x.get('symbol')
+            strength={}
+            strength_error=None
+            try:
+                strength=self._trade_strength(raw)
+            except Exception as e:
+                strength_error=str(e)
+
+            vals=[]
+            weights=[]
+            for key,w in [
+                ('trade_strength',0.40),
+                ('trade_strength_5m',0.30),
+                ('trade_strength_20m',0.20),
+                ('trade_strength_60m',0.10),
+            ]:
+                v=_num(strength.get(key))
+                if v>0:
+                    vals.append(v*w); weights.append(w)
+            composite=(sum(vals)/sum(weights)) if weights else None
+
+            raw_adj=0.0
+            strength_bias='N/A'
+            if composite is not None:
+                raw_adj=max(-10.0,min(10.0,(composite-100.0)/5.0))
+                if composite >= 110:
+                    strength_bias='BUY'
+                elif composite <= 90:
+                    strength_bias='SELL'
+                else:
+                    strength_bias='NEUTRAL'
+
+            directional_adj=raw_adj if x.get('bias')=='LONG' else (-raw_adj if x.get('bias')=='SHORT' else 0.0)
+
+            vi=vi_map.get(x.get('symbol')) or {}
+            vi_penalty=0.0
+            if vi:
+                vi_penalty=8.0 + min(4.0,max(0,(vi.get('vi_count') or 0)-1)*1.0)
+
+            gamma=float(x.get('score') or 0)
+            live_score=round(max(0.0,min(100.0,gamma+directional_adj-vi_penalty)),1)
+
+            x.update(strength)
+            x.update(vi)
+            x.update({
+                'live_score':live_score,
+                'live_score_model':'KOREA_CURRENT_V2_LIVE',
+                'pulse_status':'LIVE' if market_open else 'FORCED_DIAGNOSTIC',
+                'strength_composite':round(composite,1) if composite is not None else None,
+                'strength_adjustment':round(directional_adj,1),
+                'strength_bias':strength_bias,
+                'strength_error':strength_error,
+                'vi_triggered':bool(vi),
+                'vi_count':vi.get('vi_count',0) if vi else 0,
+                'vi_penalty':vi_penalty,
+            })
+            rows.append(x)
+
+        rows=sorted(rows,key=lambda r:(r.get('live_score',0),r.get('score',0)),reverse=True)
+        self.intraday_pulse={
+            'updated_at':datetime.now(timezone.utc).isoformat(),
+            'market_open':market_open,
+            'status':'LIVE' if market_open else 'FORCED_DIAGNOSTIC',
+            'rows':rows,'top10':rows[:10],
+            'vi_count':len(vi_map),
+            'vi_error':vi_error,
+            'score_model':'KOREA_CURRENT_V2_LIVE'
+        }
+        return self.intraday_pulse
+
     def status(self):
         return {
             'ok':True,'phase':'KOREA_RISK_NORMALIZATION','market':'KOREA',
             'adapter_ready':True,'ranking_live':True,'score_live':True,
             'preopen_live':True,'score_model':'KOREA_CURRENT_V1_GAMMA',
+            'intraday_pulse_live':True,
+            'intraday_score_model':'KOREA_CURRENT_V2_LIVE',
+            'intraday_status':self.intraday_pulse.get('status'),
             'universe_count':self.discovery.get('count',0),
             'updated_at':self.discovery.get('updated_at'),
             'sources':['ka10032 거래대금','ka10030 당일거래량','ka10023 거래량급증','ka10027 등락률(상승/하락)'],
             'next_sources':[
                 {'api_id':'ka10029','name':'예상체결등락률상위','status':'LIVE_PREOPEN'},
-                {'api_id':'ka10046','name':'체결강도추이시간별','status':'SCORE_NEXT'},
-                {'api_id':'ka10054','name':'VI 발동종목','status':'SCORE_NEXT'}
+                {'api_id':'ka10046','name':'체결강도추이시간별','status':'LIVE_INTRADAY'},
+                {'api_id':'ka10054','name':'VI 발동종목','status':'LIVE_INTRADAY'}
             ]
         }

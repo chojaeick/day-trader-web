@@ -281,6 +281,16 @@ async def preopen_scheduler_forever():
             logging.exception('preopen scheduler loop failed')
         await asyncio.sleep(20)
 
+
+async def korea_intraday_pulse_forever():
+    while True:
+        try:
+            if korea._kst_market_open():
+                await asyncio.to_thread(korea.refresh_intraday_pulse,10,False)
+        except Exception:
+            logging.exception('KOREA intraday pulse refresh failed')
+        await asyncio.sleep(60)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not s.app_key or not s.app_secret:
@@ -293,7 +303,7 @@ async def lifespan(app: FastAPI):
         tasks.extend([asyncio.create_task(k.websocket_forever()),asyncio.create_task(k.snapshot_poll_forever()),
                       asyncio.create_task(k.daily_refresh_forever()),asyncio.create_task(k.backfill_forever_once()),
                       asyncio.create_task(k.discovery_forever()),asyncio.create_task(checkpoint_forever()),
-                      asyncio.create_task(preopen_scheduler_forever())])
+                      asyncio.create_task(preopen_scheduler_forever()),asyncio.create_task(korea_intraday_pulse_forever())])
     yield
     for t in tasks: t.cancel()
 
@@ -304,11 +314,26 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.6.2',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.7',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 
 
+
+
+@app.post('/api/korea/pulse/refresh')
+async def korea_pulse_refresh(force:bool=False):
+    try:
+        return await asyncio.to_thread(korea.refresh_intraday_pulse,10,force)
+    except Exception as e:
+        logging.exception('KOREA intraday pulse refresh failed')
+        raise HTTPException(500,str(e))
+
+@app.get('/api/korea/pulse')
+def korea_pulse():
+    if not korea.intraday_pulse.get('updated_at'):
+        return korea.refresh_intraday_pulse(10,False)
+    return korea.intraday_pulse
 
 @app.post('/api/korea/preopen/generate')
 async def korea_preopen_generate():
@@ -369,7 +394,7 @@ def korea_quote(stk_cd:str):
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.6.2','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.7','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

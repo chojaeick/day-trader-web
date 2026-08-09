@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.6.1') if live else '2.6.1'
+version=(health or {}).get('version','2.6.2') if live else '2.6.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.6.1.1 · KOREA PREOPEN VALIDATION · 시간유효성 + Coverage + PARTIAL/FALLBACK · NO AUTO ORDER')
+st.caption('V2.6.2 · KOREA OPERATIONS UI · 운영화면 정리 + 진단기능 분리 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,7 +73,7 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
-        st.caption('V2.6.1.1은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
+        st.caption('V2.6.2 운영화면입니다. 한국장 GAMMA/PREOPEN 핵심 정보만 노출하고 진단 기능은 접어서 분리합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
@@ -81,41 +81,42 @@ with tab_trading:
         k3.metric('Trading Score','GAMMA' if (ks or {}).get('score_live') else 'WAIT')
         k4.metric('자동주문','OFF')
 
-        c1,c2=st.columns([1,3])
-        with c1:
-            if live and st.button('🇰🇷 삼성전자 연결 테스트',use_container_width=True,key='kr_quote_probe'):
-                q=api('/api/korea/quote/005930',timeout=25) or {}
-                if q.get('ok'):
-                    st.session_state['kr_quote_probe_result']=q
-                    st.success('국내주식 ka10004 연결 성공')
-                else:
-                    st.error('국내주식 연결 실패')
-        with c2:
-            st.caption('첫 연결 검증은 공식 ka10004 주식호가요청으로 005930(삼성전자)을 조회합니다.')
-
-        qtest=st.session_state.get('kr_quote_probe_result')
-        if qtest:
-            with st.expander('국내주식 연결 테스트 RAW 응답',expanded=False):
-                st.json(qtest)
+        with st.expander('⚙️ Diagnostics · 연결/수동 점검',expanded=False):
+            st.caption('평소에는 열 필요 없습니다. API 연결 이상이나 수동 복구가 필요할 때만 사용합니다.')
+            d1,d2=st.columns(2)
+            with d1:
+                if live and st.button('국내 REST 연결 점검',use_container_width=True,key='kr_quote_probe'):
+                    q=api('/api/korea/quote/005930',timeout=25) or {}
+                    if q.get('ok'):
+                        st.session_state['kr_quote_probe_result']=q
+                        st.success('ka10004 연결 정상')
+                    else:
+                        st.error('국내주식 연결 실패')
+            with d2:
+                if live and st.button('Universe 강제 재검색',use_container_width=True,key='kr_market_scan_diag'):
+                    with st.spinner('KOSPI/KOSDAQ Universe 재검색 중...'):
+                        rr=api_post('/api/korea/scan?limit=50') or {}
+                    if rr.get('ok'):
+                        st.success(f"Universe {rr.get('count',0)}개 갱신")
+                        st.rerun()
+                    else:
+                        st.error('재검색 실패: '+str(rr.get('detail') or rr))
+            qtest=st.session_state.get('kr_quote_probe_result')
+            if qtest:
+                with st.expander('RAW 응답',expanded=False):
+                    st.json(qtest)
 
         st.markdown('### 🇰🇷 한국장 Universe')
-        if live and st.button('🔍 한국장 시장 재검색',use_container_width=True,key='kr_market_scan'):
-            with st.spinner('KOSPI/KOSDAQ 거래대금 상위 → Universe → KOREA TOP10 계산 중...'):
-                rr=api_post('/api/korea/scan?limit=50') or {}
-            if rr.get('ok'):
-                st.success(f"한국장 Multi-Source Universe {rr.get('count',0)}개 생성 · KOSPI 원천 {((rr.get('market_breakdown') or {}).get('KOSPI',0))} · KOSDAQ 원천 {((rr.get('market_breakdown') or {}).get('KOSDAQ',0))}")
-                st.rerun()
-            else:
-                st.error('한국장 재검색 실패: '+str(rr.get('error') or rr))
-
+        st.caption('전체 후보는 접어서 확인합니다. 수동 강제 재검색은 Diagnostics에서만 제공합니다.')
         ku=api('/api/korea/universe') if live else {}
         urows=(ku or {}).get('rows') or []
         if urows:
-            udf=pd.DataFrame(urows)
-            keep=['symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
-            udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','raw_symbol':'원본코드','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
-            st.dataframe(udf,use_container_width=True,hide_index=True)
-
+            with st.expander(f'Universe 전체 {len(urows)}개 보기',expanded=False):
+                udf=pd.DataFrame(urows)
+                keep=['symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
+                udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','raw_symbol':'원본코드','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
+                st.dataframe(udf,use_container_width=True,hide_index=True)
+    
         st.markdown('### 🇰🇷 한국장 TOP10 · KOREA_CURRENT_V1_GAMMA')
         st.caption('Trading Score는 Raw Score에서 CHASE_RISK/급증위험 감점을 차감한 값입니다. EXTREME은 후보에서 제거하지 않고 위험하게 표시합니다.')
         kt=api('/api/korea/top10') if live else {}
@@ -126,12 +127,12 @@ with tab_trading:
             tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={'symbol':'종목','name':'종목명','market':'시장','score':'Trading Score','raw_score':'Raw Score','risk_penalty':'위험감점','chase_risk':'추격위험','surge_risk':'급증위험','bias':'방향','price':'현재가','change_pct':'등락률%','value_rank':'거래대금순위','trading_value':'거래대금'})
             st.dataframe(tdf,use_container_width=True,hide_index=True)
         else:
-            st.info('아직 한국장 Universe가 없습니다. 위의 한국장 시장 재검색을 한 번 눌러주세요.')
+            st.info('아직 한국장 Universe가 없습니다. Diagnostics에서 Universe 강제 재검색을 실행해주세요.')
 
         st.markdown('### 🌅 한국장 08:30 PREOPEN')
         st.caption('평일 08:30 KST 자동 저장. ka10029는 실제 장전 유효시간(08:20~08:59 KST)에만 점수에 반영하며, TOP10 매칭 Coverage가 낮으면 PARTIAL/FALLBACK으로 표시합니다.')
-        if live and st.button('지금 한국장 PREOPEN 생성/테스트',use_container_width=True,key='kr_preopen_now'):
-            with st.spinner('한국장 Universe + 예상체결 데이터 + PREOPEN TOP10 생성 중...'):
+        if live and st.button('PREOPEN 수동 재생성',use_container_width=True,key='kr_preopen_now'):
+            with st.spinner('한국장 PREOPEN 재생성 중...'):
                 kp=api_post('/api/korea/preopen/generate') or {}
             if kp.get('id'):
                 st.success(f"한국장 PREOPEN 저장 완료 · {kp.get('trade_date')} · Report #{kp.get('id')}")
@@ -171,9 +172,9 @@ with tab_trading:
 
         nexts=(ks or {}).get('next_sources') or []
         if nexts:
-            with st.expander('V2.6.1.1 확장 예정 데이터 소스',expanded=False):
+            with st.expander('V2.6.2 확장 예정 데이터 소스',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.6.1.1에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.6.2에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}

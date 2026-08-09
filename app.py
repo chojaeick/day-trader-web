@@ -16,7 +16,7 @@ def f(v,d=0):
     try:return float(v)
     except Exception:return d
 def sko(s):return {'REGULAR':'정규장 거래중','PREMARKET':'프리마켓','AFTER':'애프터마켓','PREOPEN':'장 시작 전','CLOSED':'장 마감'}.get(str(s),str(s or '-'))
-def stko(s):return {'WATCH':'관찰','SETUP':'준비','READY':'진입 준비','ENTRY':'진입 신호','HOLD':'보유 유지','TAKE_PROFIT':'일부 익절 검토','REDUCE':'비중 축소','EXIT':'청산','STOP':'손절'}.get(str(s),str(s or '-'))
+def stko(s):return {'WATCH':'관찰','SETUP':'준비','READY':'진입 준비','ENTRY':'진입 신호','HOLD':'보유 유지','TAKE_PROFIT':'일부 익절 검토','REDUCE':'비중 축소','EXIT':'청산','STOP':'손절','DATA_INVALID':'데이터 오류'}.get(str(s),str(s or '-'))
 def rko(s):return {'NORMAL':'정상','CHASE':'추격주의','HIGH':'고위험','PENDING':'대기'}.get(str(s),str(s or '-'))
 def px(v,m):
     if v in (None,''):return '-'
@@ -33,7 +33,7 @@ def controls(m,row):
             held=f(row.get('qty')); st.caption(f'현재 보유 {held:g}주 · 평균단가 {px(row.get("avg_entry"),m)}'); a,b,c=st.columns(3); q=a.number_input('매도 수량',min_value=0.0,max_value=max(held,0.0),step=1.0,key=f'sq{m}{sym}'); p=b.number_input('실제 매도가',min_value=0.0,step=.01 if m=='USA' else 10.0,key=f'sp{m}{sym}')
             if c.button('매도 등록',key=f'sell{m}{sym}',use_container_width=True):
                 rr=post('/api/v4/position/sell',{'market':m,'symbol':sym,'qty':q,'price':p}); st.success('매도 등록 완료') if rr.get('ok') else st.error(rr.get('error')); st.rerun() if rr.get('ok') else None
-st.title('📈 DAY TRADER V4'); st.caption('CLEAN ENGINE · Finder → 최대 5종목 실시간 Tracker → Entry / Position / Exit → Validation · NO AUTO ORDER')
+st.title('📈 DAY TRADER V4'); st.caption('CLEAN ENGINE · Finder → 최대 5종목 Tracker → Data Integrity Gate → Entry / Position / Exit → Validation · NO AUTO ORDER')
 ml=st.radio('시장',['🇺🇸 USA','🇰🇷 KOREA'],horizontal=True,label_visibility='collapsed'); m='USA' if 'USA' in ml else 'KOREA'; t=st.tabs(['📈 Trading','🗞️ Briefing','🧪 Validation','📚 Archive'])
 # Real-time display option: backend always refreshes every 5s.
 # UI auto-refresh is opt-in so manual order-entry fields are not unexpectedly reset.
@@ -47,11 +47,19 @@ with t[0]:
     st.markdown('### 🔥 실시간 Power 순위' if live_now else '### 🕘 장 마감 기준 Power 순위')
     if not live_now: st.caption('현재 장중 실시간 값이 아니라 마지막 사용 가능한 시장 데이터 기준 참고값입니다.')
     if rows:
-        st.dataframe(pd.DataFrame([{'실시간순위':r.get('tracker_rank') or '-','Finder순위':r.get('finder_rank') or '-','종목':r.get('symbol'),'종목명':r.get('name'),'상태':stko(r.get('state')),'방향':r.get('direction'),'힘':r.get('power_label') or '-','Power':r.get('power'),'ΔPower':r.get('power_delta'),'위험':rko(r.get('risk')),'현재가':r.get('price'),'보유':'YES' if r.get('position_open') else '','핵심 이유':r.get('reason')} for r in rows]),use_container_width=True,hide_index=True)
-        pri={'STOP':0,'EXIT':1,'REDUCE':2,'TAKE_PROFIT':3,'ENTRY':4,'READY':5,'SETUP':6,'HOLD':7,'WATCH':8}; lead=sorted(rows,key=lambda r:(pri.get(r.get('state'),99),-abs(f(r.get('power')))))[0]; st.markdown('### 🚨 지금 가장 중요한 행동' if live_now else '### 📌 마지막 상태 요약'); st.info(f"{'장 마감 참고 · ' if not live_now else ''}{lead.get('name')} ({lead.get('symbol')}) · **{stko(lead.get('state'))}** · {lead.get('power_label') or ''} Power {f(lead.get('power')):+.0f} ({f(lead.get('power_delta')):+.0f}) · {lead.get('reason')}")
+        st.dataframe(pd.DataFrame([{'실시간순위':r.get('tracker_rank') or '-','Finder순위':r.get('finder_rank') or '-','종목':r.get('symbol'),'종목명':r.get('name'),'상태':stko(r.get('state')),'방향':r.get('direction'),'힘':r.get('power_label') or '-','Power':r.get('power'),'ΔPower':r.get('power_delta'),'위험':rko(r.get('risk')),'데이터':('정상' if (r.get('data_integrity') or {}).get('valid',True) else 'INVALID'),'현재가':r.get('price'),'보유':'YES' if r.get('position_open') else '','핵심 이유':r.get('reason')} for r in rows]),use_container_width=True,hide_index=True)
+        pri={'STOP':0,'EXIT':1,'REDUCE':2,'TAKE_PROFIT':3,'ENTRY':4,'READY':5,'SETUP':6,'HOLD':7,'WATCH':8,'DATA_INVALID':99}; lead=sorted(rows,key=lambda r:(pri.get(r.get('state'),99),-abs(f(r.get('power')))))[0]; st.markdown('### 🚨 지금 가장 중요한 행동' if live_now else '### 📌 마지막 상태 요약'); st.info(f"{'장 마감 참고 · ' if not live_now else ''}{lead.get('name')} ({lead.get('symbol')}) · **{stko(lead.get('state'))}** · {lead.get('power_label') or ''} Power {f(lead.get('power')):+.0f} ({f(lead.get('power_delta')):+.0f}) · {lead.get('reason')}")
         sel=st.selectbox('종목 상세',[r['symbol'] for r in rows],format_func=lambda x:next((f"{r.get('name')} ({x})" for r in rows if r['symbol']==x),x)); r=next(x for x in rows if x['symbol']==sel); q1,q2,q3,q4,q5=st.columns(5); q1.metric('상태',stko(r.get('state'))); q2.metric(r.get('power_label') or 'Power',f"{f(r.get('power')):+.0f}",delta=f"{f(r.get('power_delta')):+.0f}"); q3.metric('현재가',px(r.get('price'),m)); q4.metric('Floor 모드',r.get('floor_mode') or '-'); q5.metric('위험',rko(r.get('risk')))
         if m=='USA':
-            a,b,c,d=st.columns(4); a.metric('경고 Floor',px(r.get('warning_floor'),m)); b.metric('Hard Floor',px(r.get('hard_floor'),m)); c.metric('T1',px(r.get('target1'),m)); d.metric('T2',px(r.get('target2'),m)); comp=r.get('components') or {}; st.caption(f"Power 구성 · 가격구조 {f(comp.get('structure')):+.0f} / 거래량 {f(comp.get('volume')):+.0f} / 모멘텀 {f(comp.get('momentum')):+.0f} / 시장·섹터 {f(comp.get('market_sector')):+.0f} / 위험감점 {f(comp.get('risk_penalty')):.0f}")
+            di=r.get('data_integrity') or {}
+            if not di.get('valid',True):
+                st.error('DATA INVALID · 신호/Floor/Target 계산 중단 · '+' / '.join(di.get('reasons') or []))
+                st.caption(f"마지막 1분봉 {di.get('last_1m_time') or '-'} / 마지막 5분봉 {di.get('last_5m_time') or '-'} / 1분 종가 {di.get('last_1m_close') or '-'} / 5분 종가 {di.get('last_5m_close') or '-'}")
+            elif not live_now:
+                st.info('장 마감 참고 상태입니다. Floor/T1/T2는 정규장 중에만 계산합니다.')
+            else:
+                a,b,c,d=st.columns(4); a.metric('경고 Floor',px(r.get('warning_floor'),m)); b.metric('Hard Floor',px(r.get('hard_floor'),m)); c.metric('T1',px(r.get('target1'),m)); d.metric('T2',px(r.get('target2'),m))
+            comp=r.get('components') or {}; st.caption(f"Power 구성 · 가격구조 {f(comp.get('structure')):+.0f} / 거래량 {f(comp.get('volume')):+.0f} / 모멘텀 {f(comp.get('momentum')):+.0f} / 시장·섹터 {f(comp.get('market_sector')):+.0f} / 위험감점 {f(comp.get('risk_penalty')):.0f}")
             b1=api(f'/api/bars/{sel}?minutes=1&limit=120').get('data') or []; b5=api(f'/api/bars/{sel}?minutes=5&limit=120').get('data') or []; c1,c2=st.columns(2)
             with c1:
                 st.caption('1분봉 · Trigger');

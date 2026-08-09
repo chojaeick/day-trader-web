@@ -16,6 +16,7 @@ from .validation import HistoricalValidator, LiveTop10Validator
 from .archive import RankingArchive
 from .preopen import PreOpenReportStore, build_usa_preopen_report
 from .news_ai import analyze_news_with_openai
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); tasks=[]
@@ -153,15 +154,17 @@ async def lifespan(app: FastAPI):
 # process did not. Load the backend project .env explicitly before any API
 # client reads OPENAI_API_KEY.
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_BACKEND_ENV, override=False)
+load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.1.1',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.1.2',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.1.1','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'2.1.2','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+        'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
+        'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()

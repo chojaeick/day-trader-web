@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.1.1') if live else '2.1.1'
+version=(health or {}).get('version','2.1.2') if live else '2.1.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.1.1 · Backend .env 로딩 hotfix + PREMARKET freshness + News Catalyst · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.1.2 · Backend .env 우선 적용 + News AI 진단 표시 + PREMARKET freshness · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -732,4 +732,4 @@ with tab_live:
             st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
 
-st.caption('V2.1.1: FastAPI/systemd 백엔드도 프로젝트 .env를 직접 로딩합니다. News weight와 판단은 스냅샷에 저장하며 NO AUTO ORDER입니다.')
+st.caption('V2.1.2: 프로젝트 .env가 systemd 환경보다 우선하며 /health에 News AI 설정 여부만 안전하게 표시합니다. NO AUTO ORDER.')

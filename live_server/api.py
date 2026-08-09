@@ -16,7 +16,7 @@ from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_tick
 from .validation import HistoricalValidator, LiveTop10Validator
 from .archive import RankingArchive
 from .preopen import PreOpenReportStore, build_usa_preopen_report
-from .news_ai import analyze_news_with_openai
+from .news_ai import analyze_news_with_openai, analyze_news_resilient
 import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -45,6 +45,8 @@ def _briefing_job_view(job:dict):
         'report_id':job.get('report_id'),
         'trade_date':job.get('trade_date'),
         'error':job.get('error'),
+        'detail':job.get('detail'),
+        'updated_at':job.get('updated_at'),
     }
 
 async def _run_briefing_job(job_id:str):
@@ -54,9 +56,18 @@ async def _run_briefing_job(job_id:str):
     try:
         # The report builder performs discovery -> premarket probes -> News AI
         # -> archive. Stages are exposed conservatively around the long task.
-        job['stage']='NEWS_SEARCH_AI'; job['progress']=35
-        result=await generate_usa_preopen_report(scheduled=False,label=job.get('label') or 'MANUAL_PREOPEN')
-        job['stage']='SAVING'; job['progress']=90
+        def _job_progress(stage,pct,detail=''):
+            job['stage']=stage
+            job['progress']=max(0,min(99,int(pct)))
+            job['detail']=detail
+            job['updated_at']=datetime.now(timezone.utc).isoformat()
+
+        result=await generate_usa_preopen_report(
+            scheduled=False,
+            label=job.get('label') or 'MANUAL_PREOPEN',
+            progress_cb=_job_progress
+        )
+        job['stage']='SAVING'; job['progress']=95
         job['report_id']=result.get('id')
         job['trade_date']=result.get('trade_date')
         job['status']='COMPLETE'; job['stage']='COMPLETE'; job['progress']=100
@@ -111,13 +122,17 @@ async def checkpoint_forever():
         await asyncio.sleep(20)
 
 
-async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_30'):
+async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_30', progress_cb=None):
     # Force a fresh market-wide discovery at the official snapshot time.
     scan=None
     try:
         scan=await k.manual_discover_now()
     except Exception as e:
         logging.warning('preopen discovery refresh failed; using current universe: %s', e)
+
+    if progress_cb:
+        try: progress_cb('SCANNING',15,'Universe refresh complete')
+        except Exception: pass
 
     current=screener_rows(db.quotes(),db.daily_metrics(),10)
     shadow=shadow_screener_rows(db.quotes(),db.daily_metrics(),10)
@@ -142,6 +157,10 @@ async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_3
             logging.warning('premarket freshness probe %s failed: %s',sym,e)
             probes[sym]={'symbol':sym,'data_mode':'UNAVAILABLE','is_fresh_premarket':False,'error':str(e)}
 
+    if progress_cb:
+        try: progress_cb('PREMARKET_PROBE',25,'Premarket freshness probes complete')
+        except Exception: pass
+
     news_symbols=[]
     for r in current+shadow:
         sym=str(r.get('symbol') or '').upper()
@@ -153,7 +172,17 @@ async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_3
         'qqq_data_mode':(probes.get('QQQ') or {}).get('data_mode'),
         'smh_data_mode':(probes.get('SMH') or {}).get('data_mode'),
     }
-    news_result=await asyncio.to_thread(analyze_news_with_openai,news_symbols[:10],news_context)
+    def _news_progress(done,total,symbol,status):
+        if progress_cb:
+            # 30 -> 82 across TOP5, with a visible step after every symbol
+            pct=30+int((done/max(1,total))*52)
+            try: progress_cb('NEWS_SEARCH_AI',pct,f'{symbol} {status} ({done}/{total})')
+            except Exception: pass
+
+    news_result=await asyncio.to_thread(analyze_news_resilient,news_symbols[:5],news_context,_news_progress)
+    if progress_cb:
+        try: progress_cb('BUILDING_REPORT',86,'News analysis complete; building report')
+        except Exception: pass
 
     report=build_usa_preopen_report(
         current,shadow,db.quotes(),db.daily_metrics(),probes,
@@ -161,6 +190,9 @@ async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_3
         scheduled=scheduled,label=label,news_result=news_result
     )
     report['extra']['scan']=scan
+    if progress_cb:
+        try: progress_cb('SAVING',92,'Saving briefing and ranking archive')
+        except Exception: pass
     rid=preopen_store.save(report)
 
     # Also freeze the exact CURRENT/SHADOW ranking in the regular Archive.
@@ -219,13 +251,13 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.2.2',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.2.3',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.2.2','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.2.3','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

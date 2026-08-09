@@ -256,6 +256,58 @@ Rules:
         "items":items
     }
 
+
+def analyze_news_resilient(symbols:list[str], market_context:dict, progress_cb=None) -> dict:
+    """Analyze TOP5 one symbol at a time.
+
+    This avoids one large web-search request holding the whole briefing hostage.
+    A timeout/error on one symbol does not erase successful results from the others.
+    progress_cb(done,total,symbol,status) is optional and never allowed to break the job.
+    """
+    symbols=[str(x).upper() for x in symbols if x][:5]
+    merged={
+        "enabled":bool(os.getenv("OPENAI_API_KEY","").strip()),
+        "provider":"OPENAI_WEB_SEARCH",
+        "model":os.getenv("DAYTRADER_NEWS_AI_MODEL","gpt-5").strip() or "gpt-5",
+        "items":{},
+        "sources":[],
+        "symbol_status":{},
+        "errors":{}
+    }
+    if not merged["enabled"]:
+        merged["reason"]="OPENAI_API_KEY_NOT_CONFIGURED"
+        return merged
+
+    total=max(1,len(symbols))
+    for idx,sym in enumerate(symbols,1):
+        try:
+            if progress_cb:
+                try: progress_cb(idx-1,total,sym,"START")
+                except Exception: pass
+            one=analyze_news_with_openai([sym],market_context)
+            if one.get("items",{}).get(sym):
+                merged["items"][sym]=one["items"][sym]
+                merged["symbol_status"][sym]="OK"
+            else:
+                merged["symbol_status"][sym]="NO_RESULT"
+            for s in one.get("sources") or []:
+                if s not in merged["sources"]:
+                    merged["sources"].append(s)
+            if one.get("error"):
+                merged["errors"][sym]=one.get("error")
+                merged["symbol_status"][sym]="ERROR"
+        except Exception as e:
+            merged["errors"][sym]=str(e)
+            merged["symbol_status"][sym]="ERROR"
+        finally:
+            if progress_cb:
+                try: progress_cb(idx,total,sym,merged["symbol_status"].get(sym,"DONE"))
+                except Exception: pass
+
+    if merged["errors"]:
+        merged["error"]="; ".join(f"{k}: {v}" for k,v in merged["errors"].items())
+    return merged
+
 def combine_technical_and_news(row:dict, news:dict|None, premarket_live:bool) -> dict:
     tech_long=float(row.get("long_power") or 50)
     if not news:

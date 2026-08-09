@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.2.2') if live else '2.2.2'
+version=(health or {}).get('version','2.2.3') if live else '2.2.3'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.2.2 · 비동기 Briefing + 출처/근거 검증 + Catalyst 일치성 경고 · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.2.3 · TOP5 종목별 News AI 진행률 + 부분실패 복구 + Evidence 검증 · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -284,7 +284,7 @@ with tab_trading:
 
 with tab_brief:
     st.subheader('🗞️ Pre-Open Intelligence Briefing')
-    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.2부터 서버 Job으로 비동기 처리합니다.')
+    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.3부터 서버 Job으로 비동기 처리합니다.')
     c1,c2,c3=st.columns([1.2,1.2,3.6])
     with c1:
         if live and st.button('지금 미국장 브리핑 생성',use_container_width=True,key='brief_generate_now'):
@@ -309,7 +309,7 @@ with tab_brief:
             stage=js.get('stage') or status or 'UNKNOWN'
             progress=int(js.get('progress') or 0)
             if status in ('QUEUED','RUNNING'):
-                st.progress(max(0,min(100,progress)),text=f'브리핑 생성 중 · {stage} · {progress}%')
+                st.progress(max(0,min(100,progress)),text=f"브리핑 생성 중 · {stage} · {progress}% · {js.get('detail') or ''}")
                 st.caption('브라우저 요청은 이미 종료되었습니다. 서버가 뉴스 검색/AI 분석/저장을 계속 수행합니다.')
                 # Poll with short GET requests; no multi-minute POST connection is held.
                 time.sleep(3)
@@ -391,7 +391,7 @@ with tab_brief:
             })
             st.dataframe(rdf,use_container_width=True,hide_index=True)
 
-            # V2.2.2: evidence audit summary
+            # V2.2.3: evidence audit summary
             audit_rows=[]
             for x in r[:5]:
                 audit_rows.append({

@@ -168,8 +168,15 @@ class PreOpenReportStore:
         out=[]
         for rr in rows:
             d=dict(rr)
-            try: d['extra']=json.loads(d.pop('extra_json') or '{}')
-            except Exception: d['extra']={}
+            try:
+                extra=json.loads(d.pop('extra_json') or '{}')
+            except Exception:
+                extra={}
+            # V2.2.4b: restore enriched PREOPEN fields at the top level.
+            # The UI/report code expects catalyst/evidence/news status fields
+            # directly on each row, not nested under row['extra'].
+            if isinstance(extra,dict):
+                d.update(extra)
             out.append(d)
         return {'meta':m,'rows':out}
 

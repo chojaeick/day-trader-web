@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.2.4b') if live else '2.2.4b'
+version=(health or {}).get('version','2.5') if live else '2.5'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.2.4ba · Evidence Audit 정합성 + 종목별 상태/소요시간 + 실패 재시도 · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.5a · KOREA BASE 추가 · 국내주식 REST 연결 테스트 + 국장 전용 UI 틀 · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -68,6 +68,50 @@ tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
 ])
 
 with tab_trading:
+    market_view=st.radio('시장', ['🇺🇸 USA','🇰🇷 KOREA'], horizontal=True, key='trading_market_view')
+
+    if market_view=='🇰🇷 KOREA':
+        ks=api('/api/korea/status') if live else {}
+        st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
+        st.caption('V2.5는 국장 데이터 어댑터/화면 틀을 먼저 고정합니다. CURRENT 한국장 점수는 V2.5.1부터 별도로 계산합니다.')
+
+        k1,k2,k3,k4=st.columns(4)
+        k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
+        k2.metric('Universe','NEXT')
+        k3.metric('Trading Score','NEXT')
+        k4.metric('자동주문','OFF')
+
+        c1,c2=st.columns([1,3])
+        with c1:
+            if live and st.button('🇰🇷 삼성전자 연결 테스트',use_container_width=True,key='kr_quote_probe'):
+                q=api('/api/korea/quote/005930',timeout=25) or {}
+                if q.get('ok'):
+                    st.session_state['kr_quote_probe_result']=q
+                    st.success('국내주식 ka10004 연결 성공')
+                else:
+                    st.error('국내주식 연결 실패')
+        with c2:
+            st.caption('첫 연결 검증은 공식 ka10004 주식호가요청으로 005930(삼성전자)을 조회합니다.')
+
+        qtest=st.session_state.get('kr_quote_probe_result')
+        if qtest:
+            with st.expander('국내주식 연결 테스트 RAW 응답',expanded=False):
+                st.json(qtest)
+
+        planned=(ks or {}).get('planned_sources') or []
+        if planned:
+            st.markdown('### V2.5 → V2.5.1 국내 후보발굴 소스')
+            st.dataframe(pd.DataFrame(planned),use_container_width=True,hide_index=True)
+
+        st.markdown('### 🇰🇷 한국장 예정 구조')
+        st.info(
+            'KOSPI/KOSDAQ → 거래대금/거래량/급증/등락률 후보 병합 → 관리/저유동성 필터 → '
+            '한국장 CURRENT/SHADOW TOP10 → 체결강도/VI/갭 보강 → 08:30 KST PREOPEN 저장 → News AI 브리핑'
+        )
+        st.markdown('### 한국장 TOP10')
+        st.warning('V2.5 BASE 단계입니다. 실제 한국장 TOP10은 V2.5.1에서 순위 API를 연결한 뒤 활성화합니다.')
+        st.stop()
+
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
     qqq_pct=float((qqq or {}).get('change_pct') or 0); smh_pct=float((smh or {}).get('change_pct') or 0)
     market_label='BULL' if qqq_pct>=.3 else ('BEAR' if qqq_pct<=-.3 else 'NEUTRAL')
@@ -284,7 +328,7 @@ with tab_trading:
 
 with tab_brief:
     st.subheader('🗞️ Pre-Open Intelligence Briefing')
-    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.4ba부터 서버 Job으로 비동기 처리합니다.')
+    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.5a부터 서버 Job으로 비동기 처리합니다.')
     c1,c2,c3=st.columns([1.2,1.2,3.6])
     with c1:
         if live and st.button('지금 미국장 브리핑 생성',use_container_width=True,key='brief_generate_now'):
@@ -393,7 +437,7 @@ with tab_brief:
             })
             st.dataframe(rdf,use_container_width=True,hide_index=True)
 
-            # V2.2.4ba: evidence audit summary
+            # V2.5a: evidence audit summary
             audit_rows=[]
             # Use the enriched PREOPEN report rows, not the raw screener rows.
             evidence_rows = latest.get('rows') or r

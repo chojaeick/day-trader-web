@@ -17,10 +17,11 @@ from .validation import HistoricalValidator, LiveTop10Validator
 from .archive import RankingArchive
 from .preopen import PreOpenReportStore, build_usa_preopen_report
 from .news_ai import analyze_news_with_openai, analyze_news_resilient
+from .korea import KoreaMarketAdapter
 import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
-s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); tasks=[]
+s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); korea=KoreaMarketAdapter(k); tasks=[]
 manual_scan_state={'last_started_monotonic':0.0,'last_result':None}
 
 # V2.2.1: manual briefing generation is asynchronous so the browser never
@@ -253,13 +254,26 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.2.4b',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.5',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
+
+
+@app.get('/api/korea/status')
+def korea_status():
+    return korea.status()
+
+@app.get('/api/korea/quote/{stk_cd}')
+def korea_quote(stk_cd:str):
+    try:
+        return korea.quote(stk_cd)
+    except Exception as e:
+        logging.exception('korea quote probe failed')
+        raise HTTPException(500,str(e))
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.2.4b','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.5','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

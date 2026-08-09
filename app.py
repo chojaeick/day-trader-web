@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.5.3') if live else '2.5.3'
+version=(health or {}).get('version','2.6') if live else '2.6'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.5.3 · KOREA GAMMA · 다중소스 + CHASE_RISK + 코드 정규화 · NO AUTO ORDER')
+st.caption('V2.6 · KOREA PREOPEN · 08:30 KST + ka10029 예상체결 + GAMMA fallback · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,12 +73,12 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
-        st.caption('V2.5.3은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
+        st.caption('V2.6은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
         k2.metric('Universe',str((ks or {}).get('universe_count') or 0))
-        k3.metric('Trading Score','ALPHA' if (ks or {}).get('score_live') else 'WAIT')
+        k3.metric('Trading Score','GAMMA' if (ks or {}).get('score_live') else 'WAIT')
         k4.metric('자동주문','OFF')
 
         c1,c2=st.columns([1,3])
@@ -128,11 +128,48 @@ with tab_trading:
         else:
             st.info('아직 한국장 Universe가 없습니다. 위의 한국장 시장 재검색을 한 번 눌러주세요.')
 
+        st.markdown('### 🌅 한국장 08:30 PREOPEN')
+        st.caption('평일 08:30 KST에 서버가 자동으로 Universe 재검색 → ka10029 예상체결 → PREOPEN TOP10 → Archive 저장합니다. 예상체결 데이터가 없더라도 GAMMA fallback으로 스냅샷을 저장합니다.')
+        if live and st.button('지금 한국장 PREOPEN 생성/테스트',use_container_width=True,key='kr_preopen_now'):
+            with st.spinner('한국장 Universe + 예상체결 데이터 + PREOPEN TOP10 생성 중...'):
+                kp=api_post('/api/korea/preopen/generate') or {}
+            if kp.get('id'):
+                st.success(f"한국장 PREOPEN 저장 완료 · {kp.get('trade_date')} · Report #{kp.get('id')}")
+                st.rerun()
+            else:
+                st.error('한국장 PREOPEN 생성 실패: '+str(kp.get('detail') or kp))
+
+        kl=api('/api/korea/preopen/latest') if live else {}
+        if kl and (kl.get('meta') or {}).get('id'):
+            km=kl.get('meta') or {}
+            ke=km.get('extra') or {}
+            st.info(
+                f"최근 PREOPEN · {km.get('trade_date')} · {ke.get('data_mode','N/A')} · "
+                f"예상체결 {ke.get('expected_count',0)}개 · Market LONG {km.get('market_long_power','N/A')}"
+            )
+            krows=kl.get('rows') or []
+            if krows:
+                kpdf=pd.DataFrame(krows[:10])
+                keep=['current_rank','symbol','name','market','current_score','gamma_score','recommendation',
+                      'expected_change_pct','expected_rank','expected_price','expected_qty',
+                      'chase_risk','preopen_risk','preopen_data_mode','source_count']
+                kpdf=kpdf[[c for c in keep if c in kpdf.columns]].rename(columns={
+                    'current_rank':'순위','symbol':'종목','name':'종목명','market':'시장',
+                    'current_score':'PREOPEN Score','gamma_score':'GAMMA',
+                    'recommendation':'방향','expected_change_pct':'예상체결등락률%',
+                    'expected_rank':'예상순위','expected_price':'예상체결가',
+                    'expected_qty':'예상체결량','chase_risk':'추격위험',
+                    'preopen_risk':'PREOPEN위험','preopen_data_mode':'Data Mode','source_count':'소스수'
+                })
+                st.dataframe(kpdf,use_container_width=True,hide_index=True)
+            with st.expander('저장된 한국장 PREOPEN Report',expanded=False):
+                st.code(km.get('report_text') or '',language=None)
+
         nexts=(ks or {}).get('next_sources') or []
         if nexts:
-            with st.expander('V2.5.3 확장 예정 데이터 소스',expanded=False):
+            with st.expander('V2.6 확장 예정 데이터 소스',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.5.3에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.6에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}

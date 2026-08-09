@@ -15,7 +15,7 @@ from .kiwoom import KiwoomClient
 from .analytics import ticks_to_bars, multi_timeframe_signal, position_from_ticks, screener_rows, shadow_screener_rows, compare_current_shadow, context_for
 from .validation import HistoricalValidator, LiveTop10Validator
 from .archive import RankingArchive
-from .preopen import PreOpenReportStore, build_usa_preopen_report
+from .preopen import PreOpenReportStore, build_usa_preopen_report, build_korea_preopen_report
 from .news_ai import analyze_news_with_openai, analyze_news_resilient
 from .korea import KoreaMarketAdapter
 import os
@@ -210,23 +210,60 @@ async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_3
                      float((qmap.get('SMH') or {}).get('change_pct') or 0))
     return {'ok':True,'id':rid,**report}
 
+
+async def generate_korea_preopen_report(scheduled:bool=False,label:str='PREOPEN_30'):
+    # Always refresh the domestic multi-source universe first.
+    discovery=await asyncio.to_thread(korea.discover,50)
+    expected=None
+    expected_error=None
+    try:
+        expected=await asyncio.to_thread(korea.expected_execution_snapshot)
+    except Exception as e:
+        expected_error=str(e)
+        logging.warning('KOREA ka10029 expected-execution unavailable; GAMMA fallback: %s',e)
+
+    report=build_korea_preopen_report(discovery,expected,scheduled=scheduled,label=label)
+    if expected_error:
+        report.setdefault('extra',{})['expected_error']=expected_error
+    rid=preopen_store.save(report)
+    report['id']=rid
+    return report
+
 async def preopen_scheduler_forever():
     done=set()
     while True:
         try:
-            et=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
-            day=et.strftime('%Y-%m-%d')
-            key=('USA',day,'PREOPEN_30')
-            target=int(getattr(s,'preopen_usa_hour_et',9))*60+int(getattr(s,'preopen_usa_minute_et',0))
-            minute=et.hour*60+et.minute
-            enabled=bool(getattr(s,'preopen_usa_enabled',True))
-            if enabled and et.weekday()<5 and key not in done and target<=minute<=target+2:
+            now_utc=datetime.now(timezone.utc)
+
+            # USA: 09:00 ET, 30 minutes before regular open.
+            et=now_utc.astimezone(ZoneInfo('America/New_York'))
+            us_day=et.strftime('%Y-%m-%d')
+            us_key=('USA',us_day,'PREOPEN_30')
+            us_target=int(getattr(s,'preopen_usa_hour_et',9))*60+int(getattr(s,'preopen_usa_minute_et',0))
+            us_minute=et.hour*60+et.minute
+            us_enabled=bool(getattr(s,'preopen_usa_enabled',True))
+            if us_enabled and et.weekday()<5 and us_key not in done and us_target<=us_minute<=us_target+2:
                 try:
                     await generate_usa_preopen_report(scheduled=True,label='PREOPEN_30')
-                    done.add(key)
-                    logging.info('scheduled USA PREOPEN_30 report saved for %s',day)
+                    done.add(us_key)
+                    logging.info('scheduled USA PREOPEN_30 report saved for %s',us_day)
                 except Exception as e:
                     logging.exception('scheduled USA PREOPEN_30 failed: %s',e)
+
+            # KOREA: 08:30 KST. The snapshot is saved even when ka10029 is
+            # unavailable; in that case the report is marked GAMMA_FALLBACK.
+            kst=now_utc.astimezone(ZoneInfo('Asia/Seoul'))
+            kr_day=kst.strftime('%Y-%m-%d')
+            kr_key=('KOREA',kr_day,'PREOPEN_30')
+            kr_target=8*60+30
+            kr_minute=kst.hour*60+kst.minute
+            if kst.weekday()<5 and kr_key not in done and kr_target<=kr_minute<=kr_target+2:
+                try:
+                    await generate_korea_preopen_report(scheduled=True,label='PREOPEN_30')
+                    done.add(kr_key)
+                    logging.info('scheduled KOREA PREOPEN_30 report saved for %s',kr_day)
+                except Exception as e:
+                    logging.exception('scheduled KOREA PREOPEN_30 failed: %s',e)
         except Exception:
             logging.exception('preopen scheduler loop failed')
         await asyncio.sleep(20)
@@ -254,10 +291,38 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.5.3',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.6',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 
+
+
+@app.post('/api/korea/preopen/generate')
+async def korea_preopen_generate():
+    try:
+        return await generate_korea_preopen_report(scheduled=False,label='MANUAL_PREOPEN')
+    except Exception as e:
+        logging.exception('manual KOREA preopen generation failed')
+        raise HTTPException(500,str(e))
+
+@app.get('/api/korea/preopen/latest')
+def korea_preopen_latest():
+    x=preopen_store.latest('KOREA')
+    if not x:
+        raise HTTPException(404,'KOREA preopen briefing not available yet')
+    return x
+
+@app.get('/api/korea/preopen/history')
+def korea_preopen_history(limit:int=Query(60,ge=1,le=500)):
+    return {'data':preopen_store.history('KOREA',limit)}
+
+@app.get('/api/korea/expected')
+async def korea_expected_snapshot():
+    try:
+        return await asyncio.to_thread(korea.expected_execution_snapshot)
+    except Exception as e:
+        logging.exception('KOREA expected execution snapshot failed')
+        raise HTTPException(500,str(e))
 
 @app.post('/api/korea/scan')
 async def korea_scan(limit:int=40):
@@ -291,7 +356,7 @@ def korea_quote(stk_cd:str):
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.5.3','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.6','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 

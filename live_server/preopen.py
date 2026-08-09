@@ -416,3 +416,133 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
             'korea_engine':'PENDING_KOREA_MARKET_ADAPTER'
         }
     }
+
+
+def build_korea_preopen_report(
+    discovery:dict,
+    expected_snapshot:dict|None,
+    scheduled:bool=False,
+    label:str='PREOPEN_30'
+):
+    """Build a Korean-market 08:30 KST snapshot.
+
+    The report always saves a GAMMA fallback even if expected-execution data is
+    unavailable (weekend, holiday, outside auction window, or upstream outage).
+    """
+    kst=datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Seoul'))
+    trade_date=kst.strftime('%Y-%m-%d')
+    expected_snapshot=expected_snapshot or {}
+    emap={r.get('symbol'):r for r in (expected_snapshot.get('rows') or []) if r.get('symbol')}
+    base_rows=discovery.get('rows') or []
+    out=[]
+
+    for idx,b in enumerate(base_rows[:50],1):
+        r=dict(b)
+        e=emap.get(r.get('symbol')) or {}
+        gamma=float(r.get('score') or 0)
+        exp_pct=_f(e.get('expected_change_pct'),0.0)
+        exp_rank=int(e.get('expected_rank') or 9999)
+        exp_qty=_f(e.get('expected_qty'),0.0)
+
+        if e:
+            rank_bonus=max(0.0,18.0*(1-(exp_rank-1)/50.0)) if exp_rank<9999 else 0.0
+            momentum=min(14.0,abs(exp_pct)*1.4)
+            align = ((exp_pct>0 and r.get('bias')=='LONG') or (exp_pct<0 and r.get('bias')=='SHORT'))
+            alignment_bonus=5.0 if align else (-4.0 if exp_pct and r.get('bias') not in ('WATCH',None) else 0.0)
+            preopen_score=max(0.0,min(100.0,gamma*0.68+rank_bonus+momentum+alignment_bonus))
+            data_mode='PREOPEN_EXPECTED_LIVE'
+        else:
+            preopen_score=gamma
+            data_mode='GAMMA_FALLBACK'
+
+        ap=abs(exp_pct)
+        if ap>=20:
+            preopen_risk='EXTREME'
+            preopen_score=max(0.0,preopen_score-12.0)
+        elif ap>=12:
+            preopen_risk='HIGH'
+            preopen_score=max(0.0,preopen_score-7.0)
+        elif ap>=7:
+            preopen_risk='MEDIUM'
+            preopen_score=max(0.0,preopen_score-3.0)
+        else:
+            preopen_risk='NORMAL'
+
+        final_bias='LONG' if exp_pct>0 else ('SHORT' if exp_pct<0 else r.get('bias') or 'WATCH')
+        r.update({
+            'current_rank':idx,
+            'current_score':round(preopen_score,1),
+            'price':e.get('expected_price') or r.get('price'),
+            'change_pct':exp_pct if e else r.get('change_pct'),
+            'long_power':round(preopen_score,1) if final_bias=='LONG' else round(100-preopen_score,1),
+            'short_power':round(100-preopen_score,1) if final_bias=='LONG' else round(preopen_score,1),
+            'recommendation':final_bias,
+            'rationale':(
+                f"GAMMA {gamma:.1f} · 예상체결 {exp_pct:+.2f}% · 예상순위 {exp_rank}"
+                if e else f"GAMMA {gamma:.1f} · 예상체결 데이터 없음"
+            ),
+            'gamma_score':gamma,
+            'preopen_score':round(preopen_score,1),
+            'preopen_data_mode':data_mode,
+            'expected_rank':exp_rank if e else None,
+            'expected_price':e.get('expected_price') if e else None,
+            'base_price':e.get('base_price') if e else None,
+            'expected_change_pct':exp_pct if e else None,
+            'expected_qty':exp_qty if e else None,
+            'sell_qty':e.get('sell_qty') if e else None,
+            'buy_qty':e.get('buy_qty') if e else None,
+            'preopen_risk':preopen_risk,
+        })
+        out.append(r)
+
+    out=sorted(out,key=lambda r:(r.get('preopen_score',0),r.get('source_count',0)),reverse=True)
+    for i,r in enumerate(out,1):
+        r['current_rank']=i
+
+    top=out[:10]
+    if top:
+        longs=sum(1 for r in top if r.get('recommendation')=='LONG')
+        market_long=round(longs/len(top)*100,1)
+    else:
+        market_long=50.0
+
+    live_count=sum(1 for r in top if r.get('preopen_data_mode')=='PREOPEN_EXPECTED_LIVE')
+    overall_mode='PREOPEN_EXPECTED_LIVE' if live_count else 'GAMMA_FALLBACK'
+
+    lines=[
+        f"KR KOREA PRE-OPEN INTELLIGENCE · generated {kst.strftime('%Y-%m-%d %H:%M KST')}",
+        f"DATA MODE: {overall_mode} · Expected-execution covered {live_count}/{len(top)}",
+        f"Market LONG {market_long:.0f} · SHORT {100-market_long:.0f}",
+        "",
+        "TOP 10"
+    ]
+    for i,r in enumerate(top,1):
+        ep=r.get('expected_change_pct')
+        ep_txt=f"{ep:+.2f}%" if ep is not None else "N/A"
+        lines.append(
+            f"{i}. {r.get('symbol')} {r.get('name','')} · {r.get('recommendation')} · "
+            f"PREOPEN {r.get('preopen_score',0):.1f} · GAMMA {r.get('gamma_score',0):.1f} · "
+            f"예상체결 {ep_txt} · 추격위험 {r.get('chase_risk')} / PREOPEN위험 {r.get('preopen_risk')}"
+        )
+
+    return {
+        'market':'KOREA',
+        'trade_date':trade_date,
+        'label':label,
+        'generated_at':datetime.now(timezone.utc).isoformat(),
+        'scheduled':scheduled,
+        'model_version':'V2.6_KOREA_PREOPEN',
+        'qqq_pct':None,'smh_pct':None,
+        'market_long_power':market_long,
+        'market_short_power':round(100-market_long,1),
+        'universe_count':discovery.get('count',0),
+        'report_text':'\n'.join(lines),
+        'rows':out,
+        'extra':{
+            'data_mode':overall_mode,
+            'expected_api':'ka10029',
+            'expected_count':expected_snapshot.get('count',0),
+            'expected_source_counts':expected_snapshot.get('source_counts') or {},
+            'scheduled_time_kst':'08:30'
+        }
+    }

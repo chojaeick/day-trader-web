@@ -91,6 +91,63 @@ class KoreaMarketAdapter:
             'pric_cnd':'8','trde_prica_cnd':'10','stex_tp':'3'
         },'pred_pre_flu_rt_upper')
 
+    def _expected_change_rate(self, mrkt_tp, sort_tp='1'):
+        # Official Kiwoom ka10029 request schema verified from the official example.
+        return self._post_rank('ka10029',{
+            'mrkt_tp':mrkt_tp,
+            'sort_tp':sort_tp,
+            'trde_qty_cnd':'0',
+            'stk_cnd':'4',
+            'crd_cnd':'0',
+            'pric_cnd':'8',
+            'stex_tp':'3'
+        },'exp_cntr_flu_rt_upper')
+
+    def expected_execution_snapshot(self):
+        merged={}
+        source_counts={}
+        for mrkt_tp,market in [('001','KOSPI'),('101','KOSDAQ')]:
+            for label,sort_tp in [('expected_gainer','1'),('expected_loser','4')]:
+                rows=self._expected_change_rate(mrkt_tp,sort_tp)
+                source_counts[f'{market}_{label}']=len(rows)
+                for idx,x in enumerate(rows,1):
+                    raw=str(x.get('stk_cd') or '').strip()
+                    sym=_clean_code(raw)
+                    if not sym:
+                        continue
+                    row=merged.setdefault(sym,{
+                        'symbol':sym,'raw_symbol':raw,
+                        'name':str(x.get('stk_nm') or '').strip(),
+                        'market':market,'expected_rank':9999,
+                        'expected_side':None,'expected_price':0.0,
+                        'base_price':0.0,'expected_change_pct':0.0,
+                        'expected_qty':0.0,'sell_qty':0.0,'sell_bid':0.0,
+                        'buy_bid':0.0,'buy_qty':0.0
+                    })
+                    if not row.get('name'):
+                        row['name']=str(x.get('stk_nm') or '').strip()
+                    row['expected_rank']=min(row['expected_rank'],idx)
+                    row['expected_side']='UP' if label=='expected_gainer' else 'DOWN'
+                    row['expected_price']=abs(_num(x.get('exp_cntr_pric')))
+                    row['base_price']=abs(_num(x.get('base_pric')))
+                    row['expected_change_pct']=_num(x.get('flu_rt'))
+                    row['expected_qty']=abs(_num(x.get('exp_cntr_qty')))
+                    row['sell_qty']=abs(_num(x.get('sel_req')))
+                    row['sell_bid']=abs(_num(x.get('sel_bid')))
+                    row['buy_bid']=abs(_num(x.get('buy_bid')))
+                    row['buy_qty']=abs(_num(x.get('buy_req')))
+        rows=sorted(
+            merged.values(),
+            key=lambda r:(r.get('expected_rank',9999),-abs(r.get('expected_change_pct',0)))
+        )
+        return {
+            'updated_at':datetime.now(timezone.utc).isoformat(),
+            'rows':rows,
+            'count':len(rows),
+            'source_counts':source_counts,
+            'api_id':'ka10029'
+        }
+
     def _upsert(self, merged, x, market, source, rank):
         raw_symbol=str(x.get('stk_cd') or '').strip()
         symbol=_clean_code(raw_symbol)
@@ -220,12 +277,12 @@ class KoreaMarketAdapter:
         return {
             'ok':True,'phase':'KOREA_RISK_NORMALIZATION','market':'KOREA',
             'adapter_ready':True,'ranking_live':True,'score_live':True,
-            'preopen_live':False,'score_model':'KOREA_CURRENT_V1_GAMMA',
+            'preopen_live':True,'score_model':'KOREA_CURRENT_V1_GAMMA',
             'universe_count':self.discovery.get('count',0),
             'updated_at':self.discovery.get('updated_at'),
             'sources':['ka10032 거래대금','ka10030 당일거래량','ka10023 거래량급증','ka10027 등락률(상승/하락)'],
             'next_sources':[
-                {'api_id':'ka10029','name':'예상체결등락률상위','status':'PREOPEN_NEXT_OFFICIAL_BODY_PENDING'},
+                {'api_id':'ka10029','name':'예상체결등락률상위','status':'LIVE_PREOPEN'},
                 {'api_id':'ka10046','name':'체결강도추이시간별','status':'SCORE_NEXT'},
                 {'api_id':'ka10054','name':'VI 발동종목','status':'SCORE_NEXT'}
             ]

@@ -126,6 +126,12 @@ Rules:
    confidence LOW, confidence_score <= 50, source_quality NONE, impact_horizon NONE.
 5. Use source_url only when supported by the web-search result. Never fabricate a URL.
 6. Do not give personalized financial advice or certainty language.
+7. catalyst_type MUST match the actual news item. If the article is about an acquisition, do not label it earnings/guidance.
+8. If source_quality is PRIMARY, source_url SHOULD be present and must point to the official/primary source whenever available.
+9. If a credible source URL cannot be established, set source_quality one tier lower rather than claiming PRIMARY without evidence.
+10. When credible recent sources materially disagree, set news_bias=MIXED and explain the conflict in conflict_ko.
+11. evidence_check must be PASS only when catalyst_type, bias, source quality, title/url, and summary are internally consistent.
+12. Never fabricate timestamps or URLs. UNKNOWN/empty is preferable to an invented value.
 """
 
     schema={
@@ -157,14 +163,17 @@ Rules:
                         "headline_ko":{"type":"string"},
                         "why_now_ko":{"type":"string"},
                         "summary_ko":{"type":"string"},
-                        "risk_ko":{"type":"string"}
+                        "risk_ko":{"type":"string"},
+                        "evidence_check":{"type":"string","enum":["PASS","WARN","FAIL"]},
+                        "evidence_warning":{"type":"string"},
+                        "conflict_ko":{"type":"string"}
                     },
                     "required":[
                         "symbol","catalyst_strength","catalyst_type","news_bias",
                         "news_long_power","news_short_power","ai_confidence","confidence_score",
                         "price_reaction","source_quality","event_recency","impact_horizon",
                         "event_time_utc","source_title","source_url","headline_ko","why_now_ko",
-                        "summary_ko","risk_ko"
+                        "summary_ko","risk_ko","evidence_check","evidence_warning","conflict_ko"
                     ],
                     "additionalProperties":False
                 }
@@ -221,6 +230,21 @@ Rules:
             x["confidence_score"]=0
         if not str(x.get("source_url") or "").startswith(("http://","https://")):
             x["source_url"]=""
+        # Evidence consistency guardrails
+        warnings=[]
+        if x.get("source_quality")=="PRIMARY" and not x.get("source_url"):
+            warnings.append("PRIMARY_WITHOUT_URL")
+            # degrade rather than overstate evidence quality
+            x["source_quality"]="TIER1"
+        if x.get("catalyst_strength")=="NONE":
+            x["catalyst_type"]="NONE"
+            x["news_bias"]="NEUTRAL"
+        if x.get("news_bias")=="MIXED" and not x.get("conflict_ko"):
+            warnings.append("MIXED_WITHOUT_CONFLICT_NOTE")
+        if warnings:
+            x["evidence_check"]="WARN" if x.get("evidence_check")!="FAIL" else "FAIL"
+            prior=str(x.get("evidence_warning") or "").strip()
+            x["evidence_warning"]="; ".join(([prior] if prior else [])+warnings)
         items[sym]=x
 
     return {

@@ -311,6 +311,9 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
             row['news_why_now_ko']=news.get('why_now_ko')
             row['news_summary_ko']=news.get('summary_ko')
             row['news_risk_ko']=news.get('risk_ko')
+            row['evidence_check']=news.get('evidence_check')
+            row['evidence_warning']=news.get('evidence_warning')
+            row['news_conflict_ko']=news.get('conflict_ko')
         rows.append(row)
 
     # Final AI combination is done after the transparent technical/pre-market score is frozen.
@@ -362,11 +365,12 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
         conf=r.get('confidence_score')
         conf_txt=f"{float(conf):.0f}" if conf is not None else "N/A"
         srcq=r.get('source_quality') or 'N/A'
+        ev=r.get('evidence_check') or 'N/A'
         delta=float(r.get('news_delta_long') or 0)
         news_txt=r.get('news_summary_ko') or '뉴스 AI 미사용'
         text_lines.append(
             f"{i}. {r['symbol']} · {final_sig} · FINAL LONG {final_long:.0f} / SHORT {final_short:.0f} "
-            f"· PM {pm_txt} · Catalyst {catalyst}/{ctype} · AI conf {conf_txt} · Source {srcq} "
+            f"· PM {pm_txt} · Catalyst {catalyst}/{ctype} · AI conf {conf_txt} · Source {srcq} · Evidence {ev} "
             f"· News ΔLONG {delta:+.1f} · {r['rationale']} · {news_txt}"
         )
     text_lines += [
@@ -382,7 +386,7 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
     return {
         'market':'USA','trade_date':et.strftime('%Y-%m-%d'),'label':label,
         'generated_at':now_utc.isoformat(),'scheduled':scheduled,
-        'model_version':'V2.2_NEWS_CATALYST_QUALITY',
+        'model_version':'V2.2.2_SOURCE_EVIDENCE',
         'qqq_pct':qqq_context if market_mode=='PREMARKET_LIVE' else None,
         'smh_pct':smh_context if market_mode=='PREMARKET_LIVE' else None,
         'market_long_power':market_long,'market_short_power':market_short,

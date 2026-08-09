@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.2.1') if live else '2.2.1'
+version=(health or {}).get('version','2.2.2') if live else '2.2.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.2.1 · 비동기 Briefing Job + News Catalyst Quality · 브라우저 timeout 제거 · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.2.2 · 비동기 Briefing + 출처/근거 검증 + Catalyst 일치성 경고 · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -284,7 +284,7 @@ with tab_trading:
 
 with tab_brief:
     st.subheader('🗞️ Pre-Open Intelligence Briefing')
-    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.1부터 서버 Job으로 비동기 처리합니다.')
+    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.2부터 서버 Job으로 비동기 처리합니다.')
     c1,c2,c3=st.columns([1.2,1.2,3.6])
     with c1:
         if live and st.button('지금 미국장 브리핑 생성',use_container_width=True,key='brief_generate_now'):
@@ -370,6 +370,7 @@ with tab_brief:
                   'price_reaction','news_weight_pct','news_delta_long',
                   'final_long_power','final_short_power','final_signal',
                   'news_headline_ko','news_why_now_ko','news_summary_ko','news_risk_ko',
+                  'evidence_check','evidence_warning','news_conflict_ko',
                   'source_title','source_url','rationale']
             rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
                 'symbol':'종목','current_rank':'CURRENT','shadow_rank':'SHADOW',
@@ -384,10 +385,28 @@ with tab_brief:
                 'final_long_power':'FINAL LONG','final_short_power':'FINAL SHORT',
                 'final_signal':'최종판단','news_headline_ko':'뉴스 헤드라인',
                 'news_why_now_ko':'왜 지금 중요한가','news_summary_ko':'AI 뉴스판단',
-                'news_risk_ko':'뉴스 리스크','source_title':'대표 출처','source_url':'대표 URL',
+                'news_risk_ko':'뉴스 리스크','evidence_check':'Evidence','evidence_warning':'근거 경고',
+                'news_conflict_ko':'상충 뉴스','source_title':'대표 출처','source_url':'대표 URL',
                 'rationale':'기술근거'
             })
             st.dataframe(rdf,use_container_width=True,hide_index=True)
+
+            # V2.2.2: evidence audit summary
+            audit_rows=[]
+            for x in r[:5]:
+                audit_rows.append({
+                    '종목':x.get('symbol'),
+                    'Catalyst':x.get('catalyst_strength'),
+                    'Type':x.get('catalyst_type'),
+                    'Evidence':x.get('evidence_check'),
+                    'Source':x.get('source_quality'),
+                    'AI신뢰':x.get('confidence_score'),
+                    'URL':bool(x.get('source_url')),
+                    '경고':x.get('evidence_warning') or ''
+                })
+            if audit_rows:
+                with st.expander('🔎 TOP5 Evidence Audit · 출처/분류 일치성',expanded=False):
+                    st.dataframe(pd.DataFrame(audit_rows),use_container_width=True,hide_index=True)
 
             # V2.2: human-readable catalyst audit trail. This is research/briefing information only.
             material=[x for x in r[:5] if x.get('catalyst_strength') not in (None,'','NONE')]
@@ -400,10 +419,15 @@ with tab_brief:
                         )
                         st.caption(
                             f"AI 신뢰 {x.get('confidence_score','N/A')}/100 ({x.get('ai_confidence','N/A')}) · "
-                            f"출처 {x.get('source_quality','N/A')} · 시점 {x.get('event_recency','N/A')} · "
-                            f"영향 {x.get('impact_horizon','N/A')} · News 가중치 {x.get('news_weight_pct',0)}% · "
+                            f"출처 {x.get('source_quality','N/A')} · Evidence {x.get('evidence_check','N/A')} · "
+                            f"시점 {x.get('event_recency','N/A')} · 영향 {x.get('impact_horizon','N/A')} · "
+                            f"News 가중치 {x.get('news_weight_pct',0)}% · "
                             f"FINAL LONG 영향 {float(x.get('news_delta_long') or 0):+.1f}p"
                         )
+                        if x.get('evidence_warning'):
+                            st.warning('근거 검증: '+str(x.get('evidence_warning')))
+                        if x.get('news_conflict_ko'):
+                            st.info('상충 뉴스: '+str(x.get('news_conflict_ko')))
                         if x.get('news_headline_ko'):
                             st.write('**핵심:** '+str(x.get('news_headline_ko')))
                         if x.get('news_why_now_ko'):

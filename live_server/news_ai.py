@@ -272,7 +272,8 @@ def analyze_news_resilient(symbols:list[str], market_context:dict, progress_cb=N
         "items":{},
         "sources":[],
         "symbol_status":{},
-        "errors":{}
+        "errors":{},
+        "symbol_elapsed_sec":{}
     }
     if not merged["enabled"]:
         merged["reason"]="OPENAI_API_KEY_NOT_CONFIGURED"
@@ -280,6 +281,7 @@ def analyze_news_resilient(symbols:list[str], market_context:dict, progress_cb=N
 
     total=max(1,len(symbols))
     for idx,sym in enumerate(symbols,1):
+        started=time.monotonic()
         try:
             if progress_cb:
                 try: progress_cb(idx-1,total,sym,"START")
@@ -300,6 +302,7 @@ def analyze_news_resilient(symbols:list[str], market_context:dict, progress_cb=N
             merged["errors"][sym]=str(e)
             merged["symbol_status"][sym]="ERROR"
         finally:
+            merged["symbol_elapsed_sec"][sym]=round(time.monotonic()-started,1)
             if progress_cb:
                 try: progress_cb(idx,total,sym,merged["symbol_status"].get(sym,"DONE"))
                 except Exception: pass

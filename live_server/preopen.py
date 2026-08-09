@@ -314,6 +314,9 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
             row['evidence_check']=news.get('evidence_check')
             row['evidence_warning']=news.get('evidence_warning')
             row['news_conflict_ko']=news.get('conflict_ko')
+            row['news_symbol_status']=(news_result.get('symbol_status') or {}).get(row['symbol'])
+            row['news_elapsed_sec']=(news_result.get('symbol_elapsed_sec') or {}).get(row['symbol'])
+            row['news_symbol_error']=(news_result.get('errors') or {}).get(row['symbol'])
         rows.append(row)
 
     # Final AI combination is done after the transparent technical/pre-market score is frozen.

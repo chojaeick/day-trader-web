@@ -47,6 +47,7 @@ def _briefing_job_view(job:dict):
         'error':job.get('error'),
         'detail':job.get('detail'),
         'updated_at':job.get('updated_at'),
+        'elapsed_sec':job.get('elapsed_sec'),
     }
 
 async def _run_briefing_job(job_id:str):
@@ -72,6 +73,7 @@ async def _run_briefing_job(job_id:str):
         job['trade_date']=result.get('trade_date')
         job['status']='COMPLETE'; job['stage']='COMPLETE'; job['progress']=100
         job['finished_at']=datetime.now(timezone.utc).isoformat()
+        job['elapsed_sec']=round((datetime.now(timezone.utc)-datetime.fromisoformat(job['started_at'])).total_seconds(),1)
     except Exception as e:
         logging.exception('async manual briefing generation failed')
         job['status']='FAILED'; job['stage']='FAILED'; job['progress']=100
@@ -251,13 +253,13 @@ async def lifespan(app: FastAPI):
 _BACKEND_ENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_BACKEND_ENV, override=True)
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.2.3',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.2.4',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.2.3','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
+    return {'ok':True,'mode':'LIVE','version':'2.2.4','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path,
         'news_ai_configured': bool(os.getenv('OPENAI_API_KEY')),
         'news_ai_model': os.getenv('DAYTRADER_NEWS_AI_MODEL') or 'gpt-5'}
 
@@ -429,6 +431,22 @@ async def briefing_generate(market:str='USA'):
         raise HTTPException(501,'KOREA briefing requires the Korean-market data adapter; scheduled schema is already prepared')
     job,created=await _start_manual_briefing_job(market)
     return {'ok':True,'accepted':True,'created':created,**_briefing_job_view(job)}
+
+
+@app.post('/api/briefing/retry-failed')
+async def briefing_retry_failed(market:str='USA'):
+    market=market.upper()
+    if market!='USA':
+        raise HTTPException(501,'KOREA briefing retry requires the Korean-market adapter')
+    latest=preopen_store.latest('USA') or {}
+    rows=latest.get('rows') or []
+    failed=[r.get('symbol') for r in rows if r.get('news_symbol_status')=='ERROR']
+    if not failed:
+        return {'ok':True,'accepted':False,'reason':'NO_FAILED_NEWS_SYMBOLS','failed_symbols':[]}
+    job,created=await _start_manual_briefing_job(market)
+    job['label']='MANUAL_RETRY_FAILED'
+    job['detail']='Retry requested after failed News AI symbols: '+','.join(failed)
+    return {'ok':True,'accepted':True,'created':created,'failed_symbols':failed,**_briefing_job_view(job)}
 
 @app.get('/api/briefing/job/{job_id}')
 def briefing_job(job_id:str):

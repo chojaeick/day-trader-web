@@ -14,8 +14,13 @@ def _num(v):
 
 def _clean_code(raw):
     s=str(raw or '').strip()
-    # Kiwoom integrated-market symbols may look like 005930_AL.
-    m=re.match(r'^(\d{6})', s)
+    # Kiwoom integrated-market symbols can include suffixes such as _AL.
+    # Prefer a canonical 6-character Korean security code when safely extractable.
+    if '_' in s:
+        head=s.split('_',1)[0]
+        if len(head)==6:
+            return head
+    m=re.match(r'^([0-9A-Z]{6})', s)
     return m.group(1) if m else s
 
 def _first_list(d, preferred):
@@ -32,7 +37,7 @@ class KoreaMarketAdapter:
         self.discovery={
             'updated_at':None,'rows':[],'count':0,'top10':[],
             'source_counts':{},'market_breakdown':{'KOSPI':0,'KOSDAQ':0},
-            'score_model':'KOREA_CURRENT_V1_BETA'
+            'score_model':'KOREA_CURRENT_V1_GAMMA'
         }
 
     def quote(self, stk_cd='005930'):
@@ -162,9 +167,40 @@ class KoreaMarketAdapter:
             score += max(rank_pts(r['gainer_rank'],14), rank_pts(r['loser_rank'],14))
             score += min(12.0, max(0,r['source_count']-1)*4.0)
             score += min(10.0, abs(r['change_pct'])*1.2)
-            r['score']=round(min(100.0,score),1)
+            raw_score=min(100.0,score)
+
+            # KOREA risk layer: separate "interesting" from "safe to chase".
+            ap=abs(r['change_pct'])
+            if ap >= 25:
+                chase_risk='EXTREME'
+                chase_penalty=18.0
+            elif ap >= 20:
+                chase_risk='HIGH'
+                chase_penalty=12.0
+            elif ap >= 12:
+                chase_risk='MEDIUM'
+                chase_penalty=6.0
+            else:
+                chase_risk='NORMAL'
+                chase_penalty=0.0
+
+            # Huge surge percentages often occur in event-driven names; flag rather than discard.
+            if r.get('surge_pct',0) >= 3000:
+                surge_risk='EXTREME'
+                chase_penalty += 4.0
+            elif r.get('surge_pct',0) >= 1000:
+                surge_risk='HIGH'
+                chase_penalty += 2.0
+            else:
+                surge_risk='NORMAL'
+
+            r['raw_score']=round(raw_score,1)
+            r['chase_risk']=chase_risk
+            r['surge_risk']=surge_risk
+            r['risk_penalty']=round(chase_penalty,1)
+            r['score']=round(max(0.0,raw_score-chase_penalty),1)
             r['bias']='LONG' if r['change_pct']>0 else ('SHORT' if r['change_pct']<0 else 'WATCH')
-            r['score_model']='KOREA_CURRENT_V1_BETA'
+            r['score_model']='KOREA_CURRENT_V1_GAMMA'
             r['source_text']=','.join(r['sources'])
             rows.append(r)
 
@@ -175,21 +211,21 @@ class KoreaMarketAdapter:
             'updated_at':datetime.now(timezone.utc).isoformat(),
             'rows':rows,'count':len(rows),'top10':top10,
             'source_counts':source_counts,'market_breakdown':market_breakdown,
-            'score_model':'KOREA_CURRENT_V1_BETA',
+            'score_model':'KOREA_CURRENT_V1_GAMMA',
             'sources':['ka10032','ka10030','ka10023','ka10027']
         }
         return self.discovery
 
     def status(self):
         return {
-            'ok':True,'phase':'KOREA_MULTI_SOURCE_BETA','market':'KOREA',
+            'ok':True,'phase':'KOREA_RISK_NORMALIZATION','market':'KOREA',
             'adapter_ready':True,'ranking_live':True,'score_live':True,
-            'preopen_live':False,'score_model':'KOREA_CURRENT_V1_BETA',
+            'preopen_live':False,'score_model':'KOREA_CURRENT_V1_GAMMA',
             'universe_count':self.discovery.get('count',0),
             'updated_at':self.discovery.get('updated_at'),
             'sources':['ka10032 거래대금','ka10030 당일거래량','ka10023 거래량급증','ka10027 등락률(상승/하락)'],
             'next_sources':[
-                {'api_id':'ka10029','name':'예상체결등락률상위','status':'PREOPEN_NEXT'},
+                {'api_id':'ka10029','name':'예상체결등락률상위','status':'PREOPEN_NEXT_OFFICIAL_BODY_PENDING'},
                 {'api_id':'ka10046','name':'체결강도추이시간별','status':'SCORE_NEXT'},
                 {'api_id':'ka10054','name':'VI 발동종목','status':'SCORE_NEXT'}
             ]

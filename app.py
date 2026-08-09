@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.5.2') if live else '2.5.2'
+version=(health or {}).get('version','2.5.3') if live else '2.5.3'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.5.2 · KOREA Multi-Source BETA · 거래대금+거래량+급증+등락률 병합 · NO AUTO ORDER')
+st.caption('V2.5.3 · KOREA GAMMA · 다중소스 + CHASE_RISK + 코드 정규화 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,7 +73,7 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
-        st.caption('V2.5.2은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
+        st.caption('V2.5.3은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
@@ -112,26 +112,27 @@ with tab_trading:
         urows=(ku or {}).get('rows') or []
         if urows:
             udf=pd.DataFrame(urows)
-            keep=['symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','score','bias']
-            udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
+            keep=['symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
+            udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','raw_symbol':'원본코드','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
             st.dataframe(udf,use_container_width=True,hide_index=True)
 
-        st.markdown('### 🇰🇷 한국장 TOP10 · KOREA_CURRENT_V1_BETA')
+        st.markdown('### 🇰🇷 한국장 TOP10 · KOREA_CURRENT_V1_GAMMA')
+        st.caption('Trading Score는 Raw Score에서 CHASE_RISK/급증위험 감점을 차감한 값입니다. EXTREME은 후보에서 제거하지 않고 위험하게 표시합니다.')
         kt=api('/api/korea/top10') if live else {}
         trows=(kt or {}).get('data') or []
         if trows:
             tdf=pd.DataFrame(trows); tdf.insert(0,'순위',range(1,len(tdf)+1))
-            keep=['순위','symbol','name','market','score','bias','price','change_pct','source_count','source_text','value_rank','volume_rank','surge_rank','trading_value']
-            tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={'symbol':'종목','name':'종목명','market':'시장','score':'Trading Score','bias':'방향','price':'현재가','change_pct':'등락률%','value_rank':'거래대금순위','trading_value':'거래대금'})
+            keep=['순위','symbol','name','market','score','raw_score','risk_penalty','chase_risk','surge_risk','bias','price','change_pct','source_count','source_text','value_rank','volume_rank','surge_rank','trading_value']
+            tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={'symbol':'종목','name':'종목명','market':'시장','score':'Trading Score','raw_score':'Raw Score','risk_penalty':'위험감점','chase_risk':'추격위험','surge_risk':'급증위험','bias':'방향','price':'현재가','change_pct':'등락률%','value_rank':'거래대금순위','trading_value':'거래대금'})
             st.dataframe(tdf,use_container_width=True,hide_index=True)
         else:
             st.info('아직 한국장 Universe가 없습니다. 위의 한국장 시장 재검색을 한 번 눌러주세요.')
 
         nexts=(ks or {}).get('next_sources') or []
         if nexts:
-            with st.expander('V2.5.2 확장 예정 데이터 소스',expanded=False):
+            with st.expander('V2.5.3 확장 예정 데이터 소스',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.5.2에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.5.3에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}

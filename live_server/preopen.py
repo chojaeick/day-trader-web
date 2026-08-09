@@ -174,54 +174,73 @@ class PreOpenReportStore:
         return {'meta':m,'rows':out}
 
 
-def _power(row:dict, qqq_pct:float, smh_pct:float):
-    """Pre-open directional power v1; transparent heuristic, not production Trading Score."""
+def _power(row:dict, qqq_context:float, smh_context:float, data_mode:str):
+    """
+    PREOPEN Intelligence V2.
+    CURRENT/SHADOW are base evidence.
+    Intraday/premarket momentum is added ONLY when timestamp-verified PREMARKET_LIVE data exists.
+    """
     score=(_f(row.get('current_score'))+_f(row.get('shadow_score')))/2
-    day=_f(row.get('change_pct'))
     slope=_f(row.get('ma5_slope_pct'))
-    rvol=_f(row.get('rvol'))
     atr=_f(row.get('atr_pct'))
     sym=str(row.get('symbol') or '').upper()
-    sector=smh_pct if sym in {
-        'NVDA','AMD','AVGO','MU','ARM','TSM','ASML','INTC','QCOM','SMH','SOXL','SOXS'
-    } else qqq_pct
 
     raw=50.0
-    raw += (score-50.0)*0.28
-    raw += max(-12,min(12,day*2.0))
-    raw += max(-8,min(8,slope*1.5))
-    raw += max(-5,min(7,(rvol-1.0)*3.0))
+    raw += (score-50.0)*0.25
+    raw += max(-7,min(7,slope*1.2))
+
+    # Market context also uses timestamp-verified premarket changes when available.
+    sector=smh_context if sym in {
+        'NVDA','AMD','AVGO','MU','ARM','TSM','ASML','INTC','QCOM','SMH','SOXL','SOXS'
+    } else qqq_context
     raw += max(-6,min(6,sector*2.0))
+
+    if data_mode=='PREMARKET_LIVE':
+        pm=_f(row.get('premarket_change_pct'))
+        vol_pct=_f(row.get('premarket_volume_pct_avg_daily'))
+        raw += max(-14,min(14,pm*2.4))
+        # This is NOT called RVOL. It is the fraction of normal full-day volume already traded premarket.
+        if vol_pct >= 20: raw += 5
+        elif vol_pct >= 10: raw += 3
+        elif vol_pct >= 5: raw += 1
+
     if atr>12: raw-=4
     long_power=max(1,min(99,round(raw,1)))
     short_power=round(100-long_power,1)
     return long_power,short_power
 
-def _rec(long_power:float, change_pct:float):
-    if change_pct >= 12:
+def _rec(long_power:float, pm_change, data_mode:str):
+    if data_mode=='PREMARKET_LIVE' and pm_change is not None and pm_change >= 12:
         return 'CHASE_RISK'
-    if long_power >= 78:
-        return 'STRONG_LONG'
-    if long_power >= 65:
-        return 'LONG'
-    if long_power <= 28:
-        return 'STRONG_SHORT'
-    if long_power <= 40:
-        return 'SHORT'
+    if long_power >= 78: return 'STRONG_LONG'
+    if long_power >= 65: return 'LONG'
+    if long_power <= 28: return 'STRONG_SHORT'
+    if long_power <= 40: return 'SHORT'
     return 'WATCH'
 
 def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[dict],
-                             universe_count:int, scheduled:bool, label:str='PREOPEN_30'):
+                             metrics:list[dict], probes:dict, universe_count:int,
+                             scheduled:bool, label:str='PREOPEN_30'):
     now_utc=datetime.now(timezone.utc)
     et=now_utc.astimezone(ZoneInfo('America/New_York'))
     qmap={str(q.get('symbol') or '').upper():q for q in quotes}
-    qqq=_f((qmap.get('QQQ') or {}).get('change_pct'))
-    smh=_f((qmap.get('SMH') or {}).get('change_pct'))
+    mmap={str(m.get('symbol') or '').upper():m for m in metrics}
+
+    qqq_probe=probes.get('QQQ') or {}
+    smh_probe=probes.get('SMH') or {}
+    qqq_live=qqq_probe.get('premarket_change_pct') if qqq_probe.get('is_fresh_premarket') else None
+    smh_live=smh_probe.get('premarket_change_pct') if smh_probe.get('is_fresh_premarket') else None
+    qqq_last=_f((qmap.get('QQQ') or {}).get('change_pct'))
+    smh_last=_f((qmap.get('SMH') or {}).get('change_pct'))
+    qqq_context=_f(qqq_live) if qqq_live is not None else 0.0
+    smh_context=_f(smh_live) if smh_live is not None else 0.0
+
+    fresh_count=sum(1 for x in probes.values() if x.get('is_fresh_premarket'))
+    market_mode='PREMARKET_LIVE' if (qqq_probe.get('is_fresh_premarket') or smh_probe.get('is_fresh_premarket')) else 'LAST_SESSION_REFERENCE'
 
     cr={r.get('symbol'):i for i,r in enumerate(current,1)}
     sr={r.get('symbol'):i for i,r in enumerate(shadow,1)}
-    cm={r.get('symbol'):r for r in current}
-    sm={r.get('symbol'):r for r in shadow}
+    cm={r.get('symbol'):r for r in current}; sm={r.get('symbol'):r for r in shadow}
     syms=[]
     for r in current+shadow:
         s=r.get('symbol')
@@ -229,82 +248,108 @@ def build_usa_preopen_report(current:list[dict], shadow:list[dict], quotes:list[
 
     rows=[]
     for sym in syms:
-        c=cm.get(sym) or {}
-        sh=sm.get(sym) or {}
-        base=sh or c
+        c=cm.get(sym) or {}; sh=sm.get(sym) or {}; base=sh or c
+        probe=probes.get(sym) or {}
+        m=mmap.get(sym) or {}
+        avg5vol=_f(m.get('avg5_volume'))
+        pmvol=probe.get('premarket_volume')
+        pmvol_pct=(float(pmvol)/avg5vol*100) if pmvol is not None and avg5vol>0 else None
+        mode=probe.get('data_mode') or 'LAST_SESSION'
         row={
-            'symbol':sym,
-            'current_rank':cr.get(sym),
-            'shadow_rank':sr.get(sym),
-            'current_score':c.get('score'),
-            'shadow_score':sh.get('score'),
-            'price':base.get('price'),
-            'change_pct':base.get('change_pct'),
-            'ma5':base.get('ma5'),
-            'ma5_slope_pct':base.get('ma5_slope_pct'),
-            'rvol':base.get('rvol'),
+            'symbol':sym,'current_rank':cr.get(sym),'shadow_rank':sr.get(sym),
+            'current_score':c.get('score'),'shadow_score':sh.get('score'),
+            'price':base.get('price'),'last_session_change_pct':base.get('change_pct'),
+            'ma5':base.get('ma5'),'ma5_slope_pct':base.get('ma5_slope_pct'),
             'atr_pct':base.get('atr_pct'),
-            'current_parts':c.get('parts'),
-            'shadow_parts':sh.get('parts'),
+            'data_mode':mode,'market_phase':probe.get('phase'),
+            'latest_bar_at':probe.get('latest_bar_at'),
+            'latest_bar_et':probe.get('latest_bar_et'),
+            'latest_age_minutes':probe.get('latest_age_minutes'),
+            'premarket_price':probe.get('premarket_price'),
+            'premarket_change_pct':probe.get('premarket_change_pct'),
+            'premarket_volume':pmvol,
+            'premarket_volume_pct_avg_daily':round(pmvol_pct,2) if pmvol_pct is not None else None,
+            'premarket_bar_count':probe.get('premarket_bar_count'),
+            'current_parts':c.get('parts'),'shadow_parts':sh.get('parts'),
             'penalties':base.get('penalties') or [],
         }
-        lp,sp=_power(row,qqq,smh)
+        lp,sp=_power(row,qqq_context,smh_context,mode)
         row['long_power']=lp; row['short_power']=sp
-        row['recommendation']=_rec(lp,_f(row.get('change_pct')))
+        row['recommendation']=_rec(lp,row.get('premarket_change_pct'),mode)
+
         reasons=[]
-        day=_f(row.get('change_pct')); slope=_f(row.get('ma5_slope_pct')); rv=_f(row.get('rvol'))
-        if day>=2: reasons.append(f'장전/현재 모멘텀 {day:+.1f}%')
-        elif day<=-2: reasons.append(f'장전/현재 약세 {day:+.1f}%')
+        if mode=='PREMARKET_LIVE':
+            pm=_f(row.get('premarket_change_pct'))
+            reasons.append(f'실제 프리마켓 {pm:+.1f}%')
+            if pmvol_pct is not None:
+                reasons.append(f'프리마켓 거래량/5일평균 일거래량 {pmvol_pct:.1f}%')
+        else:
+            reasons.append('프리마켓 미확인: 당일 모멘텀 가중치 제외')
+        slope=_f(row.get('ma5_slope_pct'))
         if slope>=1: reasons.append(f'MA5 기울기 +{slope:.1f}%')
         elif slope<0: reasons.append(f'MA5 기울기 {slope:.1f}%')
-        if rv>=1.5: reasons.append(f'RVOL {rv:.1f}x')
-        if cr.get(sym) and sr.get(sym) and sr[sym]<cr[sym]: reasons.append(f'SHADOW {cr[sym]}→{sr[sym]}위 상향')
-        if row['penalties']: reasons.append('주의: '+', '.join(row['penalties'][:2]))
-        row['rationale']=' · '.join(reasons[:4]) or '기존 기술/시장 점수 기반 관찰'
+        if cr.get(sym) and sr.get(sym) and sr[sym]<cr[sym]:
+            reasons.append(f'SHADOW {cr[sym]}→{sr[sym]}위 상향')
+        row['rationale']=' · '.join(reasons[:4])
         rows.append(row)
 
     rows.sort(key=lambda x:(x['long_power'], -(x['current_rank'] or 999)), reverse=True)
-    market_raw=50 + qqq*8 + smh*4
+    market_raw=50 + qqq_context*8 + smh_context*4
     market_long=max(1,min(99,round(market_raw,1)))
     market_short=round(100-market_long,1)
 
     top=rows[:5]
+    data_as_of=max(
+        [x.get('latest_bar_at') for x in probes.values() if x.get('latest_bar_at')] or [None]
+    )
     text_lines=[
-        f"🇺🇸 USA PRE-OPEN INTELLIGENCE · {et.strftime('%Y-%m-%d %H:%M ET')}",
-        f"Market LONG {market_long:.0f} : SHORT {market_short:.0f} · QQQ {qqq:+.2f}% · SMH {smh:+.2f}%",
-        "",
-        "TOP 5"
+        f"🇺🇸 USA PRE-OPEN INTELLIGENCE · generated {et.strftime('%Y-%m-%d %H:%M ET')}",
+        f"DATA MODE: {market_mode} · Market data as of: {data_as_of or 'N/A'}",
     ]
+    if market_mode=='PREMARKET_LIVE':
+        text_lines.append(
+            f"Market LONG {market_long:.0f} : SHORT {market_short:.0f} · "
+            f"QQQ PM {qqq_context:+.2f}% · SMH PM {smh_context:+.2f}%"
+        )
+    else:
+        text_lines.append(
+            f"Last-session reference only · QQQ last {qqq_last:+.2f}% · SMH last {smh_last:+.2f}% "
+            f"· premarket momentum intentionally NOT scored"
+        )
+    text_lines += ["","TOP 5"]
     for i,r in enumerate(top,1):
+        pm = r.get('premarket_change_pct')
+        pm_txt=f"{pm:+.2f}%" if pm is not None else "N/A"
         text_lines.append(
             f"{i}. {r['symbol']} · {r['recommendation']} · LONG {r['long_power']:.0f} / SHORT {r['short_power']:.0f} "
-            f"· {(r.get('change_pct') or 0):+.2f}% · {r['rationale']}"
+            f"· PM {pm_txt} · {r['rationale']}"
         )
     text_lines += [
         "",
-        "※ V2.0은 저장/스케줄/기술·시장 Intelligence 기반입니다.",
-        "※ 뉴스 Catalyst와 외부 AI 뉴스판단은 V2.1에서 연결 예정입니다.",
-        "※ CURRENT 운영 Trading Score와 자동주문 로직은 변경하지 않습니다."
+        "※ PREMARKET_LIVE는 실제 1분봉의 ET 날짜/시각이 당일 프리마켓이고 최근 15분 이내일 때만 표시합니다.",
+        "※ 그렇지 않으면 LAST_SESSION_REFERENCE로 표시하고 프리마켓 모멘텀/거래량 가중치를 0으로 둡니다.",
+        "※ '프리마켓 거래량/5일평균 일거래량%'은 full-day 평균 대비 비율이며 RVOL이라고 부르지 않습니다.",
+        "※ 뉴스 Catalyst/외부 AI 뉴스판단은 다음 단계에서 연결합니다.",
+        "※ CURRENT Trading Score 및 자동주문 로직은 변경하지 않습니다."
     ]
 
     return {
-        'market':'USA',
-        'trade_date':et.strftime('%Y-%m-%d'),
-        'label':label,
-        'generated_at':now_utc.isoformat(),
-        'scheduled':scheduled,
-        'model_version':'V2.0_PREOPEN_INTEL_1',
-        'qqq_pct':qqq,
-        'smh_pct':smh,
-        'market_long_power':market_long,
-        'market_short_power':market_short,
-        'universe_count':universe_count,
-        'rows':rows,
-        'report_text':'\n'.join(text_lines),
+        'market':'USA','trade_date':et.strftime('%Y-%m-%d'),'label':label,
+        'generated_at':now_utc.isoformat(),'scheduled':scheduled,
+        'model_version':'V2.0.1_PREMARKET_FRESHNESS',
+        'qqq_pct':qqq_context if market_mode=='PREMARKET_LIVE' else None,
+        'smh_pct':smh_context if market_mode=='PREMARKET_LIVE' else None,
+        'market_long_power':market_long,'market_short_power':market_short,
+        'universe_count':universe_count,'rows':rows,'report_text':'\n'.join(text_lines),
         'extra':{
             'timezone':'America/New_York',
             'target_time':'09:00 ET (regular open -30m)',
-            'news_catalyst':'PENDING_V2_1',
+            'market_data_mode':market_mode,
+            'market_data_as_of':data_as_of,
+            'fresh_premarket_probe_count':fresh_count,
+            'qqq_last_session_pct':qqq_last,
+            'smh_last_session_pct':smh_last,
+            'news_catalyst':'PENDING_NEXT',
             'korea_engine':'PENDING_KOREA_MARKET_ADAPTER'
         }
     }

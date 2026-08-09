@@ -281,6 +281,68 @@ class KiwoomClient:
         parsed.sort(key=lambda x:x['time'])
         return parsed
 
+
+    def premarket_probe(self, symbol:str, exchange:str) -> dict:
+        """
+        Inspect actual 1-minute chart timestamps instead of assuming the REST quote is live.
+        A value is called PREMARKET_LIVE only when the latest minute bar belongs to today
+        (America/New_York) and is recent enough during the 04:00-09:29 ET premarket window.
+        """
+        now_utc=datetime.now(timezone.utc)
+        et=now_utc.astimezone(ZoneInfo('America/New_York'))
+        phase='CLOSED'
+        if et.weekday()<5:
+            minute=et.hour*60+et.minute
+            if 4*60 <= minute < 9*60+30:
+                phase='PREMARKET'
+            elif 9*60+30 <= minute < 16*60:
+                phase='REGULAR'
+            elif 16*60 <= minute < 20*60:
+                phase='AFTER_HOURS'
+
+        rows=self.minute_chart(symbol,exchange,1)
+        latest=rows[-1] if rows else None
+        latest_et=latest['time'].astimezone(ZoneInfo('America/New_York')) if latest else None
+        age_min=((now_utc-latest['time']).total_seconds()/60.0) if latest else None
+        same_day=bool(latest_et and latest_et.date()==et.date())
+
+        fresh=bool(
+            phase=='PREMARKET' and same_day and age_min is not None
+            and -2 <= age_min <= 15
+            and latest_et.hour*60+latest_et.minute >= 4*60
+            and latest_et.hour*60+latest_et.minute < 9*60+30
+        )
+        mode='PREMARKET_LIVE' if fresh else ('LIVE_OTHER_SESSION' if same_day and age_min is not None and age_min<=15 else 'LAST_SESSION')
+
+        pm_rows=[]
+        if rows:
+            for r in rows:
+                rt=r['time'].astimezone(ZoneInfo('America/New_York'))
+                rm=rt.hour*60+rt.minute
+                if rt.date()==et.date() and 4*60 <= rm < 9*60+30:
+                    pm_rows.append(r)
+
+        q=self.db.get_quote(symbol) if hasattr(self.db,'get_quote') else None
+        prev_close=float((q or {}).get('prev_close') or 0)
+        pm_price=float(latest['close']) if fresh and latest else 0.0
+        pm_change=((pm_price/prev_close-1)*100) if fresh and pm_price>0 and prev_close>0 else None
+        pm_volume=sum(float(x.get('volume') or 0) for x in pm_rows) if fresh else None
+
+        return {
+            'symbol':symbol,
+            'phase':phase,
+            'data_mode':mode,
+            'is_fresh_premarket':fresh,
+            'checked_at':now_utc.isoformat(),
+            'latest_bar_at':latest['time'].isoformat() if latest else None,
+            'latest_bar_et':latest_et.isoformat() if latest_et else None,
+            'latest_age_minutes':round(age_min,2) if age_min is not None else None,
+            'premarket_price':pm_price if fresh else None,
+            'premarket_change_pct':round(pm_change,4) if pm_change is not None else None,
+            'premarket_volume':pm_volume,
+            'premarket_bar_count':len(pm_rows) if fresh else 0,
+        }
+
     def backfill_symbol(self, symbol: str, exchange: str, min_bars: int = 80):
         rows=self.minute_chart(symbol, exchange, 1)
         if not rows: raise RuntimeError(f'backfill {symbol}: empty minute chart')

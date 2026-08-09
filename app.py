@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.0') if live else '2.0'
+version=(health or {}).get('version','2.0.1') if live else '2.0.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.0 · 미국장 개장 -30분 자동 Snapshot/Intelligence Report 저장 시작 · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.0.1 · PREMARKET_LIVE / LAST_SESSION_REFERENCE를 실제 1분봉 시각으로 구분 · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -304,23 +304,37 @@ with tab_brief:
     if latest:
         meta=latest.get('meta') or {}
         st.markdown(f"### 🇺🇸 {meta.get('trade_date','')} PRE-OPEN")
+        extra=meta.get('extra') or {}
+        data_mode=extra.get('market_data_mode') or 'UNKNOWN'
+        data_as_of=extra.get('market_data_as_of') or 'N/A'
         m1,m2,m3,m4=st.columns(4)
         m1.metric('Market LONG',f"{float(meta.get('market_long_power') or 0):.0f}")
         m2.metric('Market SHORT',f"{float(meta.get('market_short_power') or 0):.0f}")
-        m3.metric('QQQ',f"{float(meta.get('qqq_pct') or 0):+.2f}%")
-        m4.metric('SMH',f"{float(meta.get('smh_pct') or 0):+.2f}%")
+        if data_mode=='PREMARKET_LIVE':
+            m3.metric('QQQ Premarket',f"{float(meta.get('qqq_pct') or 0):+.2f}%")
+            m4.metric('SMH Premarket',f"{float(meta.get('smh_pct') or 0):+.2f}%")
+            st.success(f'PREMARKET_LIVE · market data as of {data_as_of}')
+        else:
+            m3.metric('QQQ Premarket','N/A')
+            m4.metric('SMH Premarket','N/A')
+            st.warning(f'{data_mode} · 프리마켓 가중치 제외 · latest market bar {data_as_of}')
         if meta.get('report_text'):
             st.code(meta.get('report_text'),language=None)
         r=latest.get('rows') or []
         if r:
             rdf=pd.DataFrame(r)
             keep=['symbol','current_rank','shadow_rank','current_score','shadow_score',
-                  'change_pct','rvol','ma5_slope_pct','long_power','short_power',
-                  'recommendation','rationale']
+                  'data_mode','premarket_price','premarket_change_pct',
+                  'premarket_volume_pct_avg_daily','latest_age_minutes',
+                  'ma5_slope_pct','long_power','short_power','recommendation','rationale']
             rdf=rdf[[c for c in keep if c in rdf.columns]].rename(columns={
                 'symbol':'종목','current_rank':'CURRENT','shadow_rank':'SHADOW',
                 'current_score':'Current Score','shadow_score':'Shadow Score',
-                'change_pct':'장전/현재%','rvol':'RVOL','ma5_slope_pct':'MA5기울기%',
+                'data_mode':'Data Mode','premarket_price':'PM 가격',
+                'premarket_change_pct':'PM %',
+                'premarket_volume_pct_avg_daily':'PM거래량/5일평균일거래량%',
+                'latest_age_minutes':'데이터Age(분)',
+                'ma5_slope_pct':'MA5기울기%',
                 'long_power':'LONG 힘','short_power':'SHORT 힘',
                 'recommendation':'판단','rationale':'근거'
             })
@@ -704,4 +718,4 @@ with tab_live:
             st.info('아직 저장된 TOP10 스냅샷이 없습니다. 다음 미국장부터 자동으로 누적됩니다.')
 
 
-st.caption('V2.0: PREOPEN_30 자동 Snapshot/Report 저장 엔진 추가. CURRENT/SHADOW 운영·연구 분리 및 NO AUTO ORDER 유지.')
+st.caption('V2.0.1: 실제 1분봉 timestamp로 PREMARKET_LIVE 여부를 검증하고, stale 데이터에는 장전 모멘텀 가중치를 적용하지 않습니다. NO AUTO ORDER.')

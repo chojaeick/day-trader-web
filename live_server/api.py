@@ -57,8 +57,26 @@ async def generate_usa_preopen_report(scheduled:bool=False, label:str='PREOPEN_3
     if not current:
         raise RuntimeError('preopen screener rows not ready')
 
+    # Timestamp-check actual 1-minute data for the names that matter to this report.
+    probe_symbols=[]
+    for r in current+shadow:
+        sym=str(r.get('symbol') or '').upper()
+        if sym and sym not in probe_symbols:
+            probe_symbols.append(sym)
+    for sym in ('QQQ','SMH'):
+        if sym not in probe_symbols:
+            probe_symbols.append(sym)
+
+    probes={}
+    for sym in probe_symbols:
+        try:
+            probes[sym]=await asyncio.to_thread(k.premarket_probe,sym,k.active_exchange(sym))
+        except Exception as e:
+            logging.warning('premarket freshness probe %s failed: %s',sym,e)
+            probes[sym]={'symbol':sym,'data_mode':'UNAVAILABLE','is_fresh_premarket':False,'error':str(e)}
+
     report=build_usa_preopen_report(
-        current,shadow,db.quotes(),
+        current,shadow,db.quotes(),db.daily_metrics(),probes,
         len(getattr(s,'symbols',[]) or []),
         scheduled=scheduled,label=label
     )
@@ -114,13 +132,13 @@ async def lifespan(app: FastAPI):
     yield
     for t in tasks: t.cancel()
 
-app=FastAPI(title='DAY TRADER LIVE API',version='2.0',lifespan=lifespan)
+app=FastAPI(title='DAY TRADER LIVE API',version='2.0.1',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
 
 @app.get('/health')
 def health():
     qs=db.quotes()
-    return {'ok':True,'mode':'LIVE','version':'2.0','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
+    return {'ok':True,'mode':'LIVE','version':'2.0.1','hotfix':'scan-3','symbols':s.symbols,'quotes':len(qs),'daily_metrics':len(db.daily_metrics()),'db':s.db_path}
 
 @app.get('/api/quotes')
 def quotes(): return db.quotes()

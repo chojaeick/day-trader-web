@@ -265,10 +265,10 @@ def render_detail_shell(state, bias, signal_score, confirm_5m, volume_strength, 
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','3.4') if live else '3.4'
+version=(health or {}).get('version','3.4.1') if live else '3.4.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>시장 → 최종추천 → 종목상세 → 후보 → 검증</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V3.4 · ALL TABS MARKET AWARE · 전 탭 시장선택 연동 · NO AUTO ORDER')
+st.caption('V3.4.1 · ALL TABS MARKET AWARE · 전 탭 시장선택 연동 · NO AUTO ORDER')
 
 
 st.markdown('### 시장 선택')
@@ -711,11 +711,14 @@ with tab_brief:
         with kb1:
             if live and st.button('한국장 장전 브리핑 다시 생성',key='kr_brief_generate',use_container_width=True):
                 rr=api_post('/api/korea/preopen/generate') or {}
-                if rr.get('ok') or rr.get('report_id'):
+                # Backend returns the saved report itself with `id`; it does not
+                # wrap the response in {ok: true} or use report_id.
+                if rr.get('id') or rr.get('ok') or rr.get('report_id'):
                     st.success('한국장 PREOPEN 리포트 생성 완료')
                     st.rerun()
                 else:
-                    st.error('PREOPEN 리포트 생성 실패')
+                    err=rr.get('detail') or rr.get('error') or '응답에 저장 ID가 없습니다.'
+                    st.error(f'PREOPEN 리포트 생성 실패 · {err}')
         with kb2:
             st.info('자동 저장 시각: 평일 08:30 KST · 장전 예상체결 유효시간에만 해당 데이터를 점수에 반영합니다.')
 

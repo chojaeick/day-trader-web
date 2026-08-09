@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.5.1') if live else '2.5.1'
+version=(health or {}).get('version','2.5.2') if live else '2.5.2'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.5.1 · KOREA Universe + TOP10 ALPHA · ka10032 거래대금상위 실데이터 · NO AUTO ORDER')
+st.caption('V2.5.2 · KOREA Multi-Source BETA · 거래대금+거래량+급증+등락률 병합 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,7 +73,7 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · 국내주식 Day Trader BASE')
-        st.caption('V2.5.1은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
+        st.caption('V2.5.2은 한국장 거래대금 상위 실데이터로 Universe/TOP10 ALPHA를 계산합니다. USA 점수 공식과 분리합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
@@ -101,9 +101,9 @@ with tab_trading:
         st.markdown('### 🇰🇷 한국장 Universe')
         if live and st.button('🔍 한국장 시장 재검색',use_container_width=True,key='kr_market_scan'):
             with st.spinner('KOSPI/KOSDAQ 거래대금 상위 → Universe → KOREA TOP10 계산 중...'):
-                rr=api_post('/api/korea/scan?limit=40') or {}
+                rr=api_post('/api/korea/scan?limit=50') or {}
             if rr.get('ok'):
-                st.success(f"한국장 Universe {rr.get('count',0)}개 생성 · KOSPI 원천 {((rr.get('market_breakdown') or {}).get('KOSPI',0))} · KOSDAQ 원천 {((rr.get('market_breakdown') or {}).get('KOSDAQ',0))}")
+                st.success(f"한국장 Multi-Source Universe {rr.get('count',0)}개 생성 · KOSPI 원천 {((rr.get('market_breakdown') or {}).get('KOSPI',0))} · KOSDAQ 원천 {((rr.get('market_breakdown') or {}).get('KOSDAQ',0))}")
                 st.rerun()
             else:
                 st.error('한국장 재검색 실패: '+str(rr.get('error') or rr))
@@ -112,16 +112,16 @@ with tab_trading:
         urows=(ku or {}).get('rows') or []
         if urows:
             udf=pd.DataFrame(urows)
-            keep=['value_rank','symbol','name','market','price','change_pct','volume','trading_value','score','bias','source']
+            keep=['symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','score','bias']
             udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
             st.dataframe(udf,use_container_width=True,hide_index=True)
 
-        st.markdown('### 🇰🇷 한국장 TOP10 · KOREA_CURRENT_V1_ALPHA')
+        st.markdown('### 🇰🇷 한국장 TOP10 · KOREA_CURRENT_V1_BETA')
         kt=api('/api/korea/top10') if live else {}
         trows=(kt or {}).get('data') or []
         if trows:
             tdf=pd.DataFrame(trows); tdf.insert(0,'순위',range(1,len(tdf)+1))
-            keep=['순위','symbol','name','market','score','bias','price','change_pct','value_rank','trading_value']
+            keep=['순위','symbol','name','market','score','bias','price','change_pct','source_count','source_text','value_rank','volume_rank','surge_rank','trading_value']
             tdf=tdf[[c for c in keep if c in tdf.columns]].rename(columns={'symbol':'종목','name':'종목명','market':'시장','score':'Trading Score','bias':'방향','price':'현재가','change_pct':'등락률%','value_rank':'거래대금순위','trading_value':'거래대금'})
             st.dataframe(tdf,use_container_width=True,hide_index=True)
         else:

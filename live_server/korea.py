@@ -1,60 +1,196 @@
+
 from __future__ import annotations
 from datetime import datetime, timezone
-import requests
+import requests, re
 
 def _num(v):
     try:
-        s=str(v).replace(',', '').replace('+','').strip()
-        return 0.0 if s in ('','None','null') else float(s)
+        s=str(v).replace(',','').replace('+','').strip()
+        if s in ('','None','null'):
+            return 0.0
+        return float(s)
     except Exception:
         return 0.0
 
-def _first_list_payload(d:dict):
-    if isinstance(d.get('trde_prica_upper'), list): return d.get('trde_prica_upper') or []
+def _clean_code(raw):
+    s=str(raw or '').strip()
+    # Kiwoom integrated-market symbols may look like 005930_AL.
+    m=re.match(r'^(\d{6})', s)
+    return m.group(1) if m else s
+
+def _first_list(d, preferred):
+    if preferred and isinstance(d.get(preferred), list):
+        return d.get(preferred) or []
     for v in d.values():
-        if isinstance(v,list): return v
+        if isinstance(v, list):
+            return v
     return []
 
 class KoreaMarketAdapter:
     def __init__(self, kiwoom_client):
         self.k=kiwoom_client
-        self.discovery={'updated_at':None,'rows':[],'count':0,'source':'ka10032','market_breakdown':{'KOSPI':0,'KOSDAQ':0},'top10':[]}
+        self.discovery={
+            'updated_at':None,'rows':[],'count':0,'top10':[],
+            'source_counts':{},'market_breakdown':{'KOSPI':0,'KOSDAQ':0},
+            'score_model':'KOREA_CURRENT_V1_BETA'
+        }
 
-    def quote(self, stk_cd:str='005930'):
-        code=str(stk_cd or '').strip()
-        r=requests.post(self.k.s.rest_base+'/api/dostk/mrkcond',headers=self.k.headers('ka10004'),json={'stk_cd':code},timeout=20)
+    def quote(self, stk_cd='005930'):
+        code=_clean_code(stk_cd)
+        r=requests.post(
+            self.k.s.rest_base+'/api/dostk/mrkcond',
+            headers=self.k.headers('ka10004'),
+            json={'stk_cd':code},
+            timeout=20
+        )
         d=r.json()
-        if d.get('return_code') not in (None,0): raise RuntimeError(f"ka10004 {code}: {d.get('return_code')} {d.get('return_msg')}")
-        return {'ok':True,'api_id':'ka10004','symbol':code,'checked_at':datetime.now(timezone.utc).isoformat(),'raw':d}
+        if d.get('return_code') not in (None,0):
+            raise RuntimeError(f"ka10004 {code}: {d.get('return_code')} {d.get('return_msg')}")
+        return {'ok':True,'api_id':'ka10004','symbol':code,'raw_symbol':stk_cd,
+                'checked_at':datetime.now(timezone.utc).isoformat(),'raw':d}
 
-    def _rank_trading_value(self,mrkt_tp:str):
-        body={'mrkt_tp':mrkt_tp,'mang_stk_incls':'0','stex_tp':'3'}
-        r=requests.post(self.k.s.rest_base+'/api/dostk/rkinfo',headers=self.k.headers('ka10032'),json=body,timeout=25)
+    def _post_rank(self, api_id, body, preferred_key):
+        r=requests.post(
+            self.k.s.rest_base+'/api/dostk/rkinfo',
+            headers=self.k.headers(api_id),
+            json=body,
+            timeout=30
+        )
         d=r.json()
-        if d.get('return_code') not in (None,0): raise RuntimeError(f"ka10032/{mrkt_tp}: {d.get('return_code')} {d.get('return_msg')}")
-        return _first_list_payload(d)
+        if d.get('return_code') not in (None,0):
+            raise RuntimeError(f"{api_id}: {d.get('return_code')} {d.get('return_msg')}")
+        return _first_list(d, preferred_key)
 
-    def discover(self,limit:int=40):
-        merged={}; breakdown={'KOSPI':0,'KOSDAQ':0}
-        for mrkt_tp,label in [('001','KOSPI'),('101','KOSDAQ')]:
-            rows=self._rank_trading_value(mrkt_tp); breakdown[label]=len(rows)
-            for idx,x in enumerate(rows,1):
-                sym=str(x.get('stk_cd') or '').strip(); price=abs(_num(x.get('cur_prc')))
-                if not sym or price<=0: continue
-                row={'symbol':sym,'name':str(x.get('stk_nm') or '').strip(),'market':label,'exchange':'INTEGRATED','price':price,'change_pct':_num(x.get('flu_rt')),'volume':abs(_num(x.get('now_trde_qty') or x.get('trde_qty') or x.get('acc_trde_qty'))),'trading_value':abs(_num(x.get('trde_prica') or x.get('acc_trde_prica'))),'value_rank':int(_num(x.get('now_rank') or idx) or idx),'source':'ka10032'}
-                if sym not in merged or row['value_rank'] < merged[sym].get('value_rank',9999): merged[sym]=row
-        rows=sorted(merged.values(),key=lambda r:(r.get('value_rank',9999),-r.get('trading_value',0)))[:max(10,int(limit))]
-        max_rank=max([r['value_rank'] for r in rows],default=1)
-        for r in rows:
-            rank_score=max(0.0,60.0*(1-(r['value_rank']-1)/max(1,max_rank)))
-            momentum=min(20.0,abs(r['change_pct'])*2.0)
-            direction_bonus=10.0 if r['change_pct']>0 else (5.0 if r['change_pct']==0 else 0.0)
-            r['score']=round(min(100.0,rank_score+momentum+direction_bonus),1)
-            r['bias']='LONG' if r['change_pct']>=0 else 'SHORT'
-            r['score_model']='KOREA_CURRENT_V1_ALPHA'
-        top10=sorted(rows,key=lambda r:(r['score'],-r['value_rank']),reverse=True)[:10]
-        self.discovery={'updated_at':datetime.now(timezone.utc).isoformat(),'rows':rows,'count':len(rows),'source':'ka10032','market_breakdown':breakdown,'top10':top10}
+    def _trading_value(self, mrkt_tp):
+        return self._post_rank('ka10032',
+            {'mrkt_tp':mrkt_tp,'mang_stk_incls':'0','stex_tp':'3'},
+            'trde_prica_upper')
+
+    def _today_volume(self, mrkt_tp):
+        return self._post_rank('ka10030',{
+            'mrkt_tp':mrkt_tp,'sort_tp':'1','mang_stk_incls':'1','crd_tp':'0',
+            'trde_qty_tp':'0','pric_tp':'0','trde_prica_tp':'0',
+            'mrkt_open_tp':'0','stex_tp':'3'
+        },'tdy_trde_qty_upper')
+
+    def _volume_surge(self, mrkt_tp):
+        return self._post_rank('ka10023',{
+            'mrkt_tp':mrkt_tp,'sort_tp':'2','tm_tp':'2','trde_qty_tp':'5',
+            'stk_cnd':'1','pric_tp':'0','stex_tp':'3','tm':''
+        },'trde_qty_sdnin')
+
+    def _change_rate(self, mrkt_tp, sort_tp='1'):
+        return self._post_rank('ka10027',{
+            'mrkt_tp':mrkt_tp,'sort_tp':sort_tp,'trde_qty_cnd':'0010',
+            'stk_cnd':'1','crd_cnd':'0','updown_incls':'1',
+            'pric_cnd':'8','trde_prica_cnd':'10','stex_tp':'3'
+        },'pred_pre_flu_rt_upper')
+
+    def _upsert(self, merged, x, market, source, rank):
+        raw_symbol=str(x.get('stk_cd') or '').strip()
+        symbol=_clean_code(raw_symbol)
+        if not symbol:
+            return
+        r=merged.setdefault(symbol,{
+            'symbol':symbol,'raw_symbol':raw_symbol,
+            'name':str(x.get('stk_nm') or '').strip(),
+            'market':market,'exchange':'INTEGRATED',
+            'price':0.0,'change_pct':0.0,'volume':0.0,'trading_value':0.0,
+            'surge_pct':0.0,'sources':[],'source_count':0,
+            'value_rank':9999,'volume_rank':9999,'surge_rank':9999,
+            'gainer_rank':9999,'loser_rank':9999
+        })
+        if not r['name']:
+            r['name']=str(x.get('stk_nm') or '').strip()
+        r['raw_symbol']=raw_symbol or r.get('raw_symbol')
+        price=abs(_num(x.get('cur_prc')))
+        if price: r['price']=price
+        chg=_num(x.get('flu_rt'))
+        if chg or r['change_pct']==0: r['change_pct']=chg
+        vol=abs(_num(x.get('now_trde_qty') or x.get('trde_qty') or x.get('acc_trde_qty')))
+        if vol: r['volume']=max(r['volume'],vol)
+        tv=abs(_num(x.get('trde_prica') or x.get('trde_amt') or x.get('acc_trde_prica')))
+        if tv: r['trading_value']=max(r['trading_value'],tv)
+        surge=_num(x.get('sdnin_rt'))
+        if surge: r['surge_pct']=surge
+        if source not in r['sources']:
+            r['sources'].append(source)
+        r['source_count']=len(r['sources'])
+        if source=='value': r['value_rank']=min(r['value_rank'],rank)
+        elif source=='volume': r['volume_rank']=min(r['volume_rank'],rank)
+        elif source=='surge': r['surge_rank']=min(r['surge_rank'],rank)
+        elif source=='gainer': r['gainer_rank']=min(r['gainer_rank'],rank)
+        elif source=='loser': r['loser_rank']=min(r['loser_rank'],rank)
+
+    def discover(self, limit=50):
+        merged={}
+        source_counts={}
+        market_breakdown={'KOSPI':0,'KOSDAQ':0}
+        for mrkt_tp,market in [('001','KOSPI'),('101','KOSDAQ')]:
+            source_jobs=[
+                ('value', self._trading_value(mrkt_tp)),
+                ('volume', self._today_volume(mrkt_tp)),
+                ('surge', self._volume_surge(mrkt_tp)),
+                ('gainer', self._change_rate(mrkt_tp,'1')),
+                ('loser', self._change_rate(mrkt_tp,'3')),
+            ]
+            seen=set()
+            for source,rows in source_jobs:
+                source_counts[f'{market}_{source}']=len(rows)
+                for idx,x in enumerate(rows,1):
+                    self._upsert(merged,x,market,source,idx)
+                    sym=_clean_code(x.get('stk_cd'))
+                    if sym: seen.add(sym)
+            market_breakdown[market]=len(seen)
+
+        rows=[]
+        for r in merged.values():
+            # practical day-trading quality gate
+            if r['price'] < 1000:
+                continue
+            if r['volume'] and r['volume'] < 10000 and r['source_count'] < 2:
+                continue
+
+            def rank_pts(rank, weight):
+                if rank>=9999: return 0.0
+                return weight*max(0.0,1.0-(rank-1)/50.0)
+
+            score=0.0
+            score += rank_pts(r['value_rank'],28)
+            score += rank_pts(r['volume_rank'],18)
+            score += rank_pts(r['surge_rank'],18)
+            score += max(rank_pts(r['gainer_rank'],14), rank_pts(r['loser_rank'],14))
+            score += min(12.0, max(0,r['source_count']-1)*4.0)
+            score += min(10.0, abs(r['change_pct'])*1.2)
+            r['score']=round(min(100.0,score),1)
+            r['bias']='LONG' if r['change_pct']>0 else ('SHORT' if r['change_pct']<0 else 'WATCH')
+            r['score_model']='KOREA_CURRENT_V1_BETA'
+            r['source_text']=','.join(r['sources'])
+            rows.append(r)
+
+        rows=sorted(rows,key=lambda x:(x['score'],x['source_count'],x['trading_value']),reverse=True)[:max(20,int(limit))]
+        top10=rows[:10]
+
+        self.discovery={
+            'updated_at':datetime.now(timezone.utc).isoformat(),
+            'rows':rows,'count':len(rows),'top10':top10,
+            'source_counts':source_counts,'market_breakdown':market_breakdown,
+            'score_model':'KOREA_CURRENT_V1_BETA',
+            'sources':['ka10032','ka10030','ka10023','ka10027']
+        }
         return self.discovery
 
     def status(self):
-        return {'ok':True,'phase':'KOREA_UNIVERSE_TOP10_ALPHA','market':'KOREA','adapter_ready':True,'quote_probe_ready':True,'ranking_live':True,'score_live':True,'preopen_live':False,'score_model':'KOREA_CURRENT_V1_ALPHA','universe_count':self.discovery.get('count',0),'updated_at':self.discovery.get('updated_at'),'source':'ka10032 거래대금상위','next_sources':[{'api_id':'ka10030','name':'당일거래량상위','status':'V2.5.2'},{'api_id':'ka10023','name':'거래량급증','status':'V2.5.2'},{'api_id':'ka10027','name':'전일대비등락률상위','status':'V2.5.2'},{'api_id':'ka10029','name':'예상체결등락률상위','status':'PREOPEN'},{'api_id':'ka10046','name':'체결강도추이시간별','status':'SCORE_ENHANCEMENT'},{'api_id':'ka10054','name':'VI 발동종목','status':'SCORE_ENHANCEMENT'}]}
+        return {
+            'ok':True,'phase':'KOREA_MULTI_SOURCE_BETA','market':'KOREA',
+            'adapter_ready':True,'ranking_live':True,'score_live':True,
+            'preopen_live':False,'score_model':'KOREA_CURRENT_V1_BETA',
+            'universe_count':self.discovery.get('count',0),
+            'updated_at':self.discovery.get('updated_at'),
+            'sources':['ka10032 거래대금','ka10030 당일거래량','ka10023 거래량급증','ka10027 등락률(상승/하락)'],
+            'next_sources':[
+                {'api_id':'ka10029','name':'예상체결등락률상위','status':'PREOPEN_NEXT'},
+                {'api_id':'ka10046','name':'체결강도추이시간별','status':'SCORE_NEXT'},
+                {'api_id':'ka10054','name':'VI 발동종목','status':'SCORE_NEXT'}
+            ]
+        }

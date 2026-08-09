@@ -59,6 +59,22 @@ def grade_usa_row(row:dict, is_core:bool=False)->dict:
     r['quality_market_cap_check']='PENDING_VERIFIED_SOURCE'
     return r
 
+
+def _kr_is_etf(name:str, market_name:str='', company_class:str='')->bool:
+    n=str(name or '').upper()
+    mk=str(market_name or '').upper()
+    cc=str(company_class or '').upper()
+    return (
+        'ETF' in mk or 'ETF' in cc or
+        n.startswith('KODEX ') or n.startswith('TIGER ') or n.startswith('RISE ') or
+        n.startswith('ACE ') or n.startswith('SOL ') or n.startswith('HANARO ') or
+        n.startswith('KBSTAR ') or n.startswith('ARIRANG ') or n.startswith('KOSEF ')
+    )
+
+def _kr_is_leveraged_etf(name:str)->bool:
+    n=str(name or '').upper()
+    return any(k in n for k in ('레버리지','인버스','2X','2X선물','선물인버스'))
+
 def build_korea_metadata(rows:list[dict])->tuple[dict,bool]:
     meta={}; caps=[]
     for x in rows or []:
@@ -89,6 +105,7 @@ def build_korea_metadata(rows:list[dict])->tuple[dict,bool]:
             meta[code]['market_cap_rank']=rank
     return meta,cap_rank_enabled
 
+
 def grade_korea_row(row:dict, meta:dict|None=None, cap_rank_enabled:bool=False)->dict:
     r=dict(row); m=meta or {}
     name=str(r.get('name') or m.get('name') or '')
@@ -100,14 +117,23 @@ def grade_korea_row(row:dict, meta:dict|None=None, cap_rank_enabled:bool=False)-
     state=str(m.get('state') or '')
     warning=str(m.get('order_warning') or '')
     company_class=str(m.get('company_class_name') or '')
+    market_name=str(m.get('market_name') or '')
     cap_rank=m.get('market_cap_rank')
     reasons=[]
 
     bad_state=any(k in state for k in ('관리','정리','거래정지','상장폐지'))
     warning_yes=warning.strip().upper() not in ('','0','N','NO','정상','FALSE','NONE')
     preferred=_kr_preferred(name,company_class)
+    is_etf=_kr_is_etf(name,market_name,company_class)
+    leveraged_etf=_kr_is_leveraged_etf(name) if is_etf else False
 
-    if preferred:
+    # ETFs are not evaluated using corporate market-cap rank.
+    if is_etf:
+        if leveraged_etf:
+            grade='B_EVENT'; reasons.append('LEVERAGED_OR_INVERSE_ETF')
+        else:
+            grade='A'; reasons.append('ETF_CORE')
+    elif preferred:
         grade='REJECT'; reasons.append('PREFERRED_SHARE')
     elif bad_state:
         grade='REJECT'; reasons.append('BAD_SECURITY_STATE')
@@ -117,45 +143,49 @@ def grade_korea_row(row:dict, meta:dict|None=None, cap_rank_enabled:bool=False)-
         event_exception=(source_count>=4 and value_rank<=20 and change<20)
 
         if cap_rank_enabled and cap_rank:
-            if cap_rank>800 and not event_exception:
-                grade='REJECT'; reasons.append('MARKET_CAP_RANK_GT_800')
-            elif cap_rank>500:
-                grade='B_EVENT'; reasons.append('MARKET_CAP_RANK_501_800')
-            else:
+            if cap_rank<=500:
                 grade='A'; reasons.append('MARKET_CAP_TOP500')
+            elif cap_rank<=800:
+                grade='B_EVENT'; reasons.append('MARKET_CAP_RANK_501_800')
+            elif event_exception:
+                grade='B_EVENT'; reasons.append('EVENT_EXCEPTION')
+            else:
+                grade='REJECT'; reasons.append('MARKET_CAP_RANK_GT_800')
         else:
             if source_count>=3 or value_rank<=25:
                 grade='A'; reasons.append('CAP_RANK_PENDING_STRONG_LIQUIDITY')
             else:
                 grade='B_EVENT'; reasons.append('CAP_RANK_PENDING_EVENT_ONLY')
 
-        if event_exception and grade=='REJECT':
-            grade='B_EVENT'; reasons.append('EVENT_EXCEPTION')
-        if warning_yes:
+        if warning_yes and grade!='REJECT':
             grade='C_HIGH_RISK'; reasons.append('INVESTMENT_WARNING')
-        if chase in ('HIGH','EXTREME') or change>=20:
+        if (chase in ('HIGH','EXTREME') or change>=20) and grade!='REJECT':
             grade='C_HIGH_RISK'; reasons.append('HIGH_CHASE_RISK')
 
-    reg=str(m.get('reg_day') or '')
-    if len(reg)>=8 and reg[:8].isdigit():
-        try:
-            d=datetime.strptime(reg[:8],'%Y%m%d').replace(tzinfo=timezone.utc)
-            age=(datetime.now(timezone.utc)-d).days
-            r['listing_age_days']=age
-            if age<90 and grade=='A':
-                grade='B_EVENT'; reasons.append('NEW_LISTING_LT_90D')
-        except Exception:
-            pass
+    # Listing-age caution applies only to company stocks, not ETFs.
+    if not is_etf:
+        reg=str(m.get('reg_day') or '')
+        if len(reg)>=8 and reg[:8].isdigit():
+            try:
+                d=datetime.strptime(reg[:8],'%Y%m%d').replace(tzinfo=timezone.utc)
+                age=(datetime.now(timezone.utc)-d).days
+                r['listing_age_days']=age
+                if age<90 and grade=='A':
+                    grade='B_EVENT'; reasons.append('NEW_LISTING_LT_90D')
+            except Exception:
+                pass
 
     r.update({
         'quality_grade':grade,
         'quality_reasons':'|'.join(reasons),
-        'quality_gate':'QUALITY_GATE_KOREA_V1',
-        'market_cap_est':m.get('market_cap_est'),
-        'market_cap_rank':cap_rank,
-        'market_cap_rank_enabled':bool(cap_rank_enabled),
+        'quality_gate':'QUALITY_GATE_KOREA_V1_1',
+        'market_cap_est':None if is_etf else m.get('market_cap_est'),
+        'market_cap_rank':None if is_etf else cap_rank,
+        'market_cap_rank_enabled':bool(cap_rank_enabled and not is_etf),
         'security_state':state or None,
         'company_class_name':company_class or None,
         'order_warning':warning or None,
+        'instrument_type':'LEVERAGED_ETF' if leveraged_etf else ('ETF' if is_etf else 'STOCK'),
     })
     return r
+

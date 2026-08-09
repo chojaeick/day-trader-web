@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.8') if live else '2.8'
+version=(health or {}).get('version','2.8.1') if live else '2.8.1'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.8 · QUALITY GATE V1 · USA + KOREA 보수적 후보 필터 · NO AUTO ORDER')
+st.caption('V2.8.1.1 · QUALITY GATE V1 · USA + KOREA 보수적 후보 필터 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -73,7 +73,7 @@ with tab_trading:
     if market_view=='🇰🇷 KOREA':
         ks=api('/api/korea/status') if live else {}
         st.subheader('🇰🇷 KOREA · Day Trader')
-        st.caption('V2.8 · Quality Gate 통과 종목만 GAMMA/PREOPEN/Pulse 정밀분석 대상으로 사용합니다.')
+        st.caption('V2.8.1.1 · Quality Gate 통과 종목만 GAMMA/PREOPEN/Pulse 정밀분석 대상으로 사용합니다.')
 
         k1,k2,k3,k4=st.columns(4)
         k1.metric('국내 REST','READY' if (ks or {}).get('adapter_ready') else 'WAIT')
@@ -119,12 +119,13 @@ with tab_trading:
         if urows:
             with st.expander(f'Universe 전체 {len(urows)}개 보기',expanded=False):
                 udf=pd.DataFrame(urows)
-                keep=['quality_grade','quality_reasons','market_cap_rank','symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
+                keep=['quality_grade','quality_reasons','instrument_type','market_cap_rank','symbol','raw_symbol','name','market','price','change_pct','volume','trading_value','surge_pct','source_count','source_text','value_rank','volume_rank','surge_rank','gainer_rank','loser_rank','raw_score','risk_penalty','chase_risk','surge_risk','score','bias']
                 udf=udf[[c for c in keep if c in udf.columns]].rename(columns={'value_rank':'거래대금순위','symbol':'종목','raw_symbol':'원본코드','name':'종목명','market':'시장','price':'현재가','change_pct':'등락률%','volume':'거래량','trading_value':'거래대금','score':'Korea Score','bias':'방향','source':'소스'})
                 st.dataframe(udf,use_container_width=True,hide_index=True)
     
-        st.markdown('### 🇰🇷 한국장 TOP10 · KOREA_CURRENT_V1_GAMMA')
-        st.caption('Trading Score는 Raw Score에서 CHASE_RISK/급증위험 감점을 차감한 값입니다. EXTREME은 후보에서 제거하지 않고 위험하게 표시합니다.')
+        st.markdown('### 🇰🇷 Candidate TOP10 · KOREA_CURRENT_V1_GAMMA')
+        st.caption('Quality Gate를 통과한 정밀분석 후보입니다. LONG/SHORT는 방향성 참고이며 아직 최종 추천이 아닙니다.')
+        st.caption('Candidate Score는 정밀분석 우선순위입니다. 매수 추천점수가 아닙니다. SHORT/WAIT 후보도 포함될 수 있습니다.')
         kt=api('/api/korea/top10') if live else {}
         trows=(kt or {}).get('data') or []
         if trows:
@@ -227,7 +228,7 @@ with tab_trading:
         if nexts:
             with st.expander('데이터 소스 상태',expanded=False):
                 st.dataframe(pd.DataFrame(nexts),use_container_width=True,hide_index=True)
-        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.8에서 거래량 급증/등락률 순위를 병합합니다.')
+        st.caption('현재 한국장 점수는 거래대금 순위 + 당일 등락률 기반 ALPHA입니다. V2.8.1.1에서 거래량 급증/등락률 순위를 병합합니다.')
         st.stop()
 
     qqq=api('/api/quote/QQQ') if live else {}; smh=api('/api/quote/SMH') if live else {}
@@ -323,7 +324,8 @@ with tab_trading:
                     f"Universe {lr.get('before_count','-')}→{lr.get('after_count','-')} · "
                     f"Archive {lr.get('archive_label','-')}"
                 )
-    st.subheader('오늘의 단타 후보 TOP 10')
+    st.subheader('Candidate TOP10 · 정밀분석 대상')
+    st.caption('이 목록은 추천주가 아니라 정밀분석 우선순위입니다. 최종 추천 1~5는 별도 엔진에서 결정합니다.')
     if live:
         payload=api('/api/screener?top_n=10') or {'data':[]}; rows=payload.get('data',[])
         if rows:

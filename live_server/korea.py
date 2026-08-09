@@ -294,7 +294,7 @@ class KoreaMarketAdapter:
             'source_counts':source_counts,'market_breakdown':market_breakdown,
             'score_model':'KOREA_CURRENT_V1_GAMMA',
             'sources':['ka10032','ka10030','ka10023','ka10027'],
-            'quality_gate':'QUALITY_GATE_KOREA_V1',
+            'quality_gate':'QUALITY_GATE_KOREA_V1_1',
             'quality_counts':{
                 'A':len([r for r in passed if r.get('quality_grade')=='A']),
                 'B_EVENT':len([r for r in passed if r.get('quality_grade')=='B_EVENT']),
@@ -530,7 +530,7 @@ class KoreaMarketAdapter:
             'intraday_status':self.intraday_pulse.get('status'),
             'universe_count':self.discovery.get('count',0),
             'updated_at':self.discovery.get('updated_at'),
-            'quality_gate':self.discovery.get('quality_gate','QUALITY_GATE_KOREA_V1'),
+            'quality_gate':self.discovery.get('quality_gate','QUALITY_GATE_KOREA_V1_1'),
             'quality_counts':self.discovery.get('quality_counts') or {},
             'market_cap_rank_enabled':bool(self.discovery.get('market_cap_rank_enabled')),
             'metadata_count':self.discovery.get('metadata_count',0),

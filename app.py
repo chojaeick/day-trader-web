@@ -61,6 +61,52 @@ def _safe_float(v, default=0.0):
     except Exception:
         return default
 
+
+def _market_session_label(raw_status, market='USA'):
+    s=str(raw_status or '').upper()
+    if market=='USA':
+        if 'PRE' in s:
+            return '프리마켓'
+        if 'AFTER' in s or 'POST' in s:
+            return '애프터마켓'
+        if 'OPEN' in s or 'REGULAR' in s or 'LIVE' in s:
+            return '정규장 거래중'
+        return '장 마감'
+    else:
+        if 'OPEN' in s:
+            return '정규장 거래중'
+        if 'PRE' in s:
+            return '장 시작 전'
+        return '장 마감'
+
+def _bias_label(raw):
+    s=str(raw or '').upper()
+    if s=='BULL':
+        return '상승 우세'
+    if s=='BEAR':
+        return '하락 우세'
+    if s=='NEUTRAL':
+        return '혼조'
+    return str(raw or '-')
+
+def _quality_label(raw):
+    s=str(raw or '')
+    return {
+        'A':'일반',
+        'B_EVENT':'주의',
+        'C_HIGH_RISK':'고위험',
+        'REJECT':'제외'
+    }.get(s,s or '-')
+
+def _risk_label(raw):
+    s=str(raw or '').upper()
+    return {
+        'NORMAL':'보통',
+        'MEDIUM':'주의',
+        'HIGH':'높음',
+        'EXTREME':'매우 높음'
+    }.get(s, s or '-')
+
 def render_market_summary(market_name, market_status, market_bias, universe_count, final_count, data_status, quality_counts=None):
     st.subheader(f'{market_name} · Trading')
     st.caption('시장 → 최종 추천 → 종목 상세 → 후보 → 시장 맥락')
@@ -96,19 +142,32 @@ def render_final_table(rows):
         })
     st.dataframe(pd.DataFrame(normalized),use_container_width=True,hide_index=True)
 
-def render_candidate_table(rows, quality_map=None):
+def render_candidate_table(rows, quality_map=None, key_prefix='candidate'):
     with st.expander('👀 후보 TOP10 · 더 깊게 볼 종목',expanded=False):
         st.caption('추천주가 아닙니다. 최종 추천 엔진이 추가 검토할 정밀분석 후보입니다.')
         if not rows:
             st.info('후보 데이터가 아직 없습니다.')
             return
-        out=[]
+
+        sort_mode=st.selectbox(
+            '정렬 기준',
+            ['엔진 기본순위','품질 우선','후보점수 높은순','등락률 높은순','거래량강도 높은순','위험 낮은순'],
+            index=0,
+            key=f'{key_prefix}_sort'
+        )
+
         qmap=quality_map or {}
-        for i,r in enumerate(rows[:10],1):
+        prepared=[]
+        for i,r in enumerate(rows[:50],1):
             q=qmap.get(str(r.get('symbol') or '').upper(),{})
-            out.append({
+            quality=r.get('quality_grade') or q.get('quality_grade') or '-'
+            risk=r.get('chase_risk') or q.get('chase_risk') or 'NORMAL'
+            prepared.append({
+                '_engine_rank':i,
+                '_quality_raw':quality,
+                '_risk_raw':risk,
                 '순위':i,
-                '품질':r.get('quality_grade') or q.get('quality_grade') or '-',
+                '품질':_quality_label(quality),
                 '종목':r.get('symbol','-'),
                 '종목명':r.get('name') or q.get('name') or '-',
                 '후보점수':r.get('score','-'),
@@ -116,10 +175,35 @@ def render_candidate_table(rows, quality_map=None):
                 '현재가':r.get('price','-'),
                 '등락률%':r.get('change_pct','-'),
                 '거래량강도':r.get('rvol') if r.get('rvol') is not None else '-',
-                '위험':r.get('chase_risk') or q.get('chase_risk') or 'NORMAL',
+                '위험':_risk_label(risk),
             })
-        st.dataframe(pd.DataFrame(out),use_container_width=True,hide_index=True)
-        st.caption('품질 A=일반 후보 · B_EVENT=이벤트/레버리지 등 추가 주의 후보 · 후보점수는 매수확률이 아닙니다.')
+
+        def n(v, default=-999999):
+            try:
+                return float(v)
+            except Exception:
+                return default
+
+        quality_rank={'A':0,'B_EVENT':1,'C_HIGH_RISK':2,'REJECT':3,'-':4}
+        risk_rank={'NORMAL':0,'MEDIUM':1,'HIGH':2,'EXTREME':3}
+
+        if sort_mode=='품질 우선':
+            prepared.sort(key=lambda x:(quality_rank.get(x['_quality_raw'],9),-n(x['후보점수'])))
+        elif sort_mode=='후보점수 높은순':
+            prepared.sort(key=lambda x:-n(x['후보점수']))
+        elif sort_mode=='등락률 높은순':
+            prepared.sort(key=lambda x:-n(x['등락률%']))
+        elif sort_mode=='거래량강도 높은순':
+            prepared.sort(key=lambda x:-n(x['거래량강도']))
+        elif sort_mode=='위험 낮은순':
+            prepared.sort(key=lambda x:(risk_rank.get(x['_risk_raw'],9),-n(x['후보점수'])))
+
+        for j,x in enumerate(prepared[:10],1):
+            x['순위']=j
+
+        show=pd.DataFrame([{k:v for k,v in x.items() if not k.startswith('_')} for x in prepared[:10]])
+        st.dataframe(show,use_container_width=True,hide_index=True)
+        st.caption('품질: 일반=기본 분석 후보 · 주의=이벤트/레버리지 등 추가 주의 · 고위험=정상 추천 제외 대상')
 
 def render_chart_placeholder(title, message):
     st.caption(title)
@@ -162,9 +246,9 @@ def render_detail_shell(state, bias, signal_score, confirm_5m, volume_strength, 
     m1,m2,m3,m4,m5,m6=st.columns(6)
     m1.metric('상태',state)
     m2.metric('방향',bias)
-    m3.metric('신호점수',signal_score)
-    m4.metric('5분 확인',confirm_5m)
-    m5.metric('거래량강도',volume_strength)
+    m3.metric('매매 신호점수',signal_score)
+    m4.metric('5분 추세 확인',confirm_5m)
+    m5.metric('거래 강도',volume_strength)
     m6.metric('현재가',price)
     l,r=st.columns(2)
     if pending_message:
@@ -181,10 +265,10 @@ def render_detail_shell(state, bias, signal_score, confirm_5m, volume_strength, 
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','3.2') if live else '3.2'
+version=(health or {}).get('version','3.3') if live else '3.3'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>시장 → 최종추천 → 종목상세 → 후보 → 검증</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V3.2 · ONE TRADING UI · USA/KOREA 공통 화면 · NO AUTO ORDER')
+st.caption('V3.3 · MARKET LANGUAGE UX · 쉬운 시장표현/정렬 · NO AUTO ORDER')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -219,8 +303,8 @@ with tab_trading:
 
         render_market_summary(
             '🇺🇸 USA',
-            'LIVE' if live else 'DEMO',
-            f'{market_label} {qqq_pct:+.2f}%',
+            _market_session_label((qqq or {}).get('session') or (qqq or {}).get('market_status') or ('OPEN' if live else 'CLOSED'),'USA'),
+            f"{_bias_label(market_label)} · 나스닥 {qqq_pct:+.2f}%",
             uni.get('count',0),
             len(frows),
             'LIVE' if live else 'DEMO',
@@ -233,7 +317,19 @@ with tab_trading:
 
         st.markdown('### 📈 종목 상세보기')
         if symbols:
-            selected=st.selectbox('종목 선택',symbols,key='us_detail_symbol')
+            us_label_map={}
+            for rr in frows+rows+(uni.get('rows') or []):
+                s=rr.get('symbol')
+                if not s:
+                    continue
+                nm=rr.get('name') or ''
+                us_label_map[s]=f"{nm} ({s})" if nm and nm!=s else s
+            selected=st.selectbox(
+                '종목 선택',
+                symbols,
+                key='us_detail_symbol',
+                format_func=lambda x:us_label_map.get(x,x)
+            )
             q=(api(f'/api/quote/{selected}') or {}) if live else {}
             sig=(api(f'/api/signal/{selected}') or {}) if live else {}
             b1=(api(f'/api/bars/{selected}?minutes=1&limit=200') or {'data':[]}) if live else {'data':[]}
@@ -259,14 +355,15 @@ with tab_trading:
         else:
             st.info('상세보기 대상 종목이 없습니다.')
 
-        render_candidate_table(rows,qmap)
+        render_candidate_table(rows,qmap,'us_candidate')
 
-        st.markdown('### 📍 시장 맥락')
+        st.markdown('### 📍 시장 상황')
+        st.caption('시장 전체의 흐름과 현재 거래 가능 시간대를 간단히 보여줍니다.')
         x1,x2,x3,x4=st.columns(4)
-        x1.metric('시장 방향',f'{market_label} {qqq_pct:+.2f}%')
-        x2.metric('섹터',f'{sector_label} {smh_pct:+.2f}%')
-        x3.metric('장세','TREND' if abs(qqq_pct)>=.4 else 'MIXED')
-        x4.metric('데이터','LIVE' if live else 'DEMO')
+        x1.metric('현재 거래시간',_market_session_label((qqq or {}).get('session') or (qqq or {}).get('market_status') or ('OPEN' if live else 'CLOSED'),'USA'))
+        x2.metric('지수 흐름',f"{_bias_label(market_label)} · 나스닥 {qqq_pct:+.2f}%")
+        x3.metric('반도체 흐름',f"{'강세' if smh_pct>=.5 else ('약세' if smh_pct<=-.5 else '보합')} · {smh_pct:+.2f}%")
+        x4.metric('장세','추세장' if abs(qqq_pct)>=.4 else '혼조장')
 
         with st.expander('⚙️ 진단/수동 복구',expanded=False):
             st.caption('평소에는 사용하지 않습니다. 데이터 이상이 있을 때만 사용하세요.')
@@ -300,8 +397,8 @@ with tab_trading:
 
         render_market_summary(
             '🇰🇷 KOREA',
-            'OPEN' if po else 'CLOSED',
-            f'{bias} {long_power:.0f}',
+            _market_session_label('OPEN' if po else 'CLOSED','KOREA'),
+            f"{_bias_label(bias)} · 후보군 {long_power:.0f}%",
             (ks or {}).get('universe_count') or 0,
             len(krfd),
             'LIVE' if (ks or {}).get('adapter_ready') else 'WAIT',
@@ -322,7 +419,19 @@ with tab_trading:
 
         st.markdown('### 📈 종목 상세보기')
         if detail_symbols:
-            ksel=st.selectbox('종목 선택',detail_symbols,key='kr_detail_symbol')
+            klabel_map={}
+            for rr in krfd+trows:
+                s=rr.get('symbol')
+                if not s:
+                    continue
+                nm=rr.get('name') or ''
+                klabel_map[s]=f"{nm} ({s})" if nm else s
+            ksel=st.selectbox(
+                '종목 선택',
+                detail_symbols,
+                key='kr_detail_symbol',
+                format_func=lambda x:klabel_map.get(x,x)
+            )
             prow=next((x for x in ((kpulse or {}).get('top10') or []) if x.get('symbol')==ksel),{})
             brow=next((x for x in trows if x.get('symbol')==ksel),{})
             state='WATCH' if any(x.get('symbol')==ksel and x.get('action')=='WATCH' for x in krfd) else 'WAIT'
@@ -339,14 +448,17 @@ with tab_trading:
         else:
             st.info('상세보기 대상 종목이 없습니다.')
 
-        render_candidate_table(trows,{str(r.get('symbol') or '').upper():r for r in (ku.get('rows') or [])})
+        render_candidate_table(trows,{str(r.get('symbol') or '').upper():r for r in (ku.get('rows') or [])},'kr_candidate')
 
-        st.markdown('### 📍 시장 맥락')
+        st.markdown('### 📍 시장 상황')
+        st.caption('지수/후보군 분위기와 장전·장중 데이터가 실제 판단에 사용 중인지 보여줍니다.')
         x1,x2,x3,x4=st.columns(4)
-        x1.metric('시장 방향',f'{bias} {long_power:.0f}')
-        x2.metric('장전 상태',str(kle.get('data_mode') or 'N/A'))
-        x3.metric('예상체결 반영',f"{kle.get('expected_coverage_pct',0)}%")
-        x4.metric('장중 Pulse','LIVE' if po else 'OFF-HOURS')
+        x1.metric('현재 거래시간',_market_session_label('OPEN' if po else 'CLOSED','KOREA'))
+        x2.metric('후보군 분위기',f"{_bias_label(bias)} · 상승 {long_power:.0f}% / 하락 {100-long_power:.0f}%")
+        x3.metric('장전 데이터','반영 중' if _safe_float(kle.get('expected_coverage_pct'),0)>0 else '미사용')
+        x4.metric('장중 체결 데이터','사용 중' if po else '미사용')
+        if not po and _safe_float(kle.get('expected_coverage_pct'),0)==0:
+            st.caption('현재는 장전 예상체결과 장중 체결강도 데이터를 추천 점수에 사용하지 않는 시간대입니다.')
 
         with st.expander('⚙️ 진단/수동 복구',expanded=False):
             st.caption('평소에는 사용하지 않습니다. 데이터 이상이 있을 때만 사용하세요.')
@@ -379,11 +491,21 @@ with tab_trading:
     with st.expander('❓ 용어 설명',expanded=False):
         st.markdown(
             '''
+**현재 거래시간**  
+- 정규장 거래중: 일반 주식시장이 열려 있는 시간  
+- 프리마켓: 미국 정규장 시작 전 거래시간  
+- 애프터마켓: 미국 정규장 종료 후 거래시간  
+- 장 마감: 현재 정규 거래시간이 아님  
+
+**시장/후보군 분위기**  
+- 상승 우세: 상승 방향 신호가 더 많음  
+- 하락 우세: 하락 방향 신호가 더 많음  
+- 혼조: 방향이 뚜렷하지 않음  
+
 **분석 후보군**: 전체 시장에서 기본 품질·유동성 기준을 통과한 종목입니다.  
-**후보점수**: 매수 확률이 아니라 더 깊게 분석할 우선순위입니다.  
+**후보점수**: 매수확률이 아니라 더 깊게 분석할 우선순위입니다.  
 **추천점수**: 최종 엔진이 차트·시장·위험조건을 반영해 계산하는 실제 매매 적합도입니다.  
-**품질 A**: 일반 분석 후보. **B_EVENT**: 이벤트/레버리지 등 추가 주의 후보.  
-**거래량강도**: 미장은 RVOL 기준입니다. 국장은 분봉 연결 전이라 체결강도/후보 데이터로 보완합니다.  
+**품질 일반**: 기본 분석 후보. **품질 주의**: 이벤트/레버리지 등 추가 주의가 필요한 후보.  
 **BUY NOW / WATCH / WAIT / AVOID**: 실제 행동 단계입니다. 조건을 못 넘으면 추천 0개도 정상입니다.
 '''
         )

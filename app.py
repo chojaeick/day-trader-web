@@ -57,10 +57,10 @@ def fmt_level(v):
 health=api('/health') if API_URL else None
 live=bool(health and health.get('ok'))
 mode='LIVE DATA' if live else 'DEMO DATA'
-version=(health or {}).get('version','2.2.4') if live else '2.2.4'
+version=(health or {}).get('version','2.2.4a') if live else '2.2.4a'
 st.markdown(f'''<div class="hero"><div><h1>DAY TRADER WEB</h1><div>TOP10 → 1·5분봉 Signal → Position → Critical Alert</div></div><div><span class="badge">{mode}</span><span class="badge">NO AUTO ORDER</span><span class="badge">v{version}</span></div></div>''',unsafe_allow_html=True)
 
-st.caption('V2.2.4 · Evidence Audit 정합성 + 종목별 상태/소요시간 + 실패 재시도 · CURRENT 운영 로직은 변경하지 않음')
+st.caption('V2.2.4aa · Evidence Audit 정합성 + 종목별 상태/소요시간 + 실패 재시도 · CURRENT 운영 로직은 변경하지 않음')
 
 
 tab_trading, tab_brief, tab_research, tab_archive, tab_live = st.tabs([
@@ -284,7 +284,7 @@ with tab_trading:
 
 with tab_brief:
     st.subheader('🗞️ Pre-Open Intelligence Briefing')
-    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.4부터 서버 Job으로 비동기 처리합니다.')
+    st.caption('웹 접속 여부와 무관하게 미국장 정규개장 30분 전(09:00 ET) 서버가 자동으로 Universe 재검색 → CURRENT/SHADOW TOP10 → News/AI Intelligence Report → Archive 저장을 끝까지 수행합니다. 수동 생성도 V2.2.4aa부터 서버 Job으로 비동기 처리합니다.')
     c1,c2,c3=st.columns([1.2,1.2,3.6])
     with c1:
         if live and st.button('지금 미국장 브리핑 생성',use_container_width=True,key='brief_generate_now'):
@@ -393,7 +393,7 @@ with tab_brief:
             })
             st.dataframe(rdf,use_container_width=True,hide_index=True)
 
-            # V2.2.4: evidence audit summary
+            # V2.2.4aa: evidence audit summary
             audit_rows=[]
             # Use the enriched PREOPEN report rows, not the raw screener rows.
             evidence_rows = latest.get('rows') or r

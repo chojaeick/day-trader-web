@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-import os, json, urllib.request, urllib.error
+import os, json, time, urllib.request, urllib.error
 from datetime import datetime, timezone
 
 OPENAI_URL = "https://api.openai.com/v1/responses"

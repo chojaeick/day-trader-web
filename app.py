@@ -185,16 +185,40 @@ def px(v,m):
     try:return f'${float(v):,.2f}' if m=='USA' else f'{float(v):,.0f}원'
     except Exception:return '-'
 def controls(m,row):
-    sym=row['symbol']; pos=bool(row.get('position_open'))
+    sym=row['symbol']; pos=bool(row.get('position_open')); held=f(row.get('qty'))
     with st.expander(f"수동 매매 입력 · {row.get('name') or sym} ({sym})"):
-        if not pos:
-            a,b,c=st.columns(3); q=a.number_input('매수 수량',min_value=0.0,step=1.0,key=f'bq{m}{sym}'); p=b.number_input('실제 매수가',min_value=0.0,step=.01 if m=='USA' else 10.0,key=f'bp{m}{sym}')
-            if c.button('매수 등록',key=f'buy{m}{sym}',use_container_width=True):
-                rr=post('/api/v4/position/buy',{'market':m,'symbol':sym,'qty':q,'price':p}); st.success('매수 등록 완료') if rr.get('ok') else st.error(rr.get('error')); st.rerun() if rr.get('ok') else None
+        if pos:
+            st.caption(f'현재 보유 {held:g}주 · 평균단가 {px(row.get("avg_entry"),m)}')
         else:
-            held=f(row.get('qty')); st.caption(f'현재 보유 {held:g}주 · 평균단가 {px(row.get("avg_entry"),m)}'); a,b,c=st.columns(3); q=a.number_input('매도 수량',min_value=0.0,max_value=max(held,0.0),step=1.0,key=f'sq{m}{sym}'); p=b.number_input('실제 매도가',min_value=0.0,step=.01 if m=='USA' else 10.0,key=f'sp{m}{sym}')
-            if c.button('매도 등록',key=f'sell{m}{sym}',use_container_width=True):
-                rr=post('/api/v4/position/sell',{'market':m,'symbol':sym,'qty':q,'price':p}); st.success('매도 등록 완료') if rr.get('ok') else st.error(rr.get('error')); st.rerun() if rr.get('ok') else None
+            st.caption('현재 보유 없음 · 매수 등록 후 매도/부분매도 입력이 활성화됩니다.')
+
+        buy_col,sell_col=st.columns(2)
+
+        with buy_col:
+            st.markdown('**매수 / 추가매수**')
+            b1,b2=st.columns(2)
+            bq=b1.number_input('매수 수량',min_value=0.0,step=1.0,key=f'bq{m}{sym}')
+            bp=b2.number_input('실제 매수가',min_value=0.0,step=.01 if m=='USA' else 10.0,key=f'bp{m}{sym}')
+            if st.button('매수 등록',key=f'buy{m}{sym}',use_container_width=True):
+                rr=post('/api/v4/position/buy',{'market':m,'symbol':sym,'qty':bq,'price':bp})
+                st.success('매수 등록 완료') if rr.get('ok') else st.error(rr.get('error'))
+                st.rerun() if rr.get('ok') else None
+
+        with sell_col:
+            st.markdown('**매도 / 부분매도**')
+            s1,s2=st.columns(2)
+            sq=s1.number_input(
+                '매도 수량',min_value=0.0,max_value=max(held,0.0),step=1.0,
+                key=f'sq{m}{sym}',disabled=not pos
+            )
+            sp=s2.number_input(
+                '실제 매도가',min_value=0.0,step=.01 if m=='USA' else 10.0,
+                key=f'sp{m}{sym}',disabled=not pos
+            )
+            if st.button('매도 등록',key=f'sell{m}{sym}',use_container_width=True,disabled=not pos):
+                rr=post('/api/v4/position/sell',{'market':m,'symbol':sym,'qty':sq,'price':sp})
+                st.success('매도 등록 완료') if rr.get('ok') else st.error(rr.get('error'))
+                st.rerun() if rr.get('ok') else None
 st.title('📈 DAY TRADER V4'); st.caption('CLEAN ENGINE · Finder → 최대 5종목 Tracker → Data Integrity Gate → 5m Setup + 1m Trigger → Position / Exit → Validation · NO AUTO ORDER')
 ml=st.radio('시장',['🇺🇸 USA','🇰🇷 KOREA'],horizontal=True,label_visibility='collapsed'); m='USA' if 'USA' in ml else 'KOREA'; t=st.tabs(['📈 Trading','🗞️ Briefing','🧪 Validation','📚 Archive'])
 # Real-time display option: backend always refreshes every 5s.

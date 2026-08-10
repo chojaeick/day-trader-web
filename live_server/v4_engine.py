@@ -402,6 +402,135 @@ class V4Store:
         out.sort(key=lambda r:str(r.get('stage_ts') or ''),reverse=True)
         return out
 
+    def validation_entry_shadow(self,market=None,limit=5000,bridge_minutes=5):
+        """Episode-deduplicated threshold shadow test.
+
+        Uses the FIRST qualifying validation mark per Episode for each profile.
+        It never changes live ENTRY logic and never creates an order.
+
+        Grid trigger count is recomputed self-consistently:
+        green + break_prev_high + volume_expansion + one_min_impulse
+        + dynamic Power acceleration for that profile.
+        """
+        episodes=self.validation_episodes(market,limit,bridge_minutes)
+        if not episodes:return {'grid':[],'current_core':None,'current_ready':None,'anchors':0}
+
+        sql='SELECT * FROM v4_validation_marks'; args=[]
+        if market:sql+=' WHERE market=?'; args=[market.upper()]
+        sql+=' ORDER BY ts ASC'
+        with self._c() as c:
+            marks=[dict(r) for r in c.execute(sql,args).fetchall()]
+
+        def dt(v):
+            try:
+                x=datetime.fromisoformat(str(v).replace('Z','+00:00'))
+                return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+            except Exception:return None
+
+        parsed=[]
+        for r in marks:
+            try:feat=json.loads(r.get('feature_json') or '{}')
+            except Exception:feat={}
+            gate=feat.get('entry_gate') or {}
+            checks=gate.get('trigger_checks') or {}
+            r['_setup_ok']=bool(gate.get('setup_ok'))
+            r['_chase_ok']=bool(gate.get('chase_ok'))
+            r['_ready']=bool(gate.get('ready'))
+            r['_entry']=bool(gate.get('entry'))
+            r['_green']=bool(checks.get('green_1m'))
+            r['_break']=bool(checks.get('break_prev_high'))
+            r['_volume']=bool(checks.get('volume_expansion'))
+            r['_impulse']=bool(checks.get('one_min_impulse'))
+            r['_ts']=dt(r.get('ts'))
+            parsed.append(r)
+
+        by_symbol={}
+        for r in parsed:
+            sym=str(r.get('symbol') or '').upper()
+            if sym:by_symbol.setdefault(sym,[]).append(r)
+
+        windows=[]
+        for ep in episodes:
+            sym=str(ep.get('symbol') or '').upper()
+            st=dt(ep.get('start_ts')); en=dt(ep.get('end_ts'))
+            if not sym or not st or not en:continue
+            rows=[r for r in by_symbol.get(sym,[]) if r.get('_ts') and st<=r['_ts']<=en]
+            if rows:windows.append((ep,rows))
+
+        def summarize(hits,name,meta=None):
+            if not hits:return {
+                'profile':name,'episodes':0,'complete_60':0,
+                'ret_5m':None,'ret_15m':None,'ret_30m':None,'ret_60m':None,
+                'hit_60_pct':None,'mfe_pct':None,'mae_pct':None,**(meta or {})
+            }
+            def avg(col):
+                v=[_f(x.get(col),float('nan')) for x in hits if x.get(col) is not None]
+                v=[x for x in v if not math.isnan(x)]
+                return round(sum(v)/len(v),3) if v else None
+            r60=[_f(x.get('ret_60m')) for x in hits if x.get('ret_60m') is not None]
+            return {
+                'profile':name,
+                'episodes':len(hits),
+                'complete_60':len(r60),
+                'ret_5m':avg('ret_5m'),'ret_15m':avg('ret_15m'),
+                'ret_30m':avg('ret_30m'),'ret_60m':avg('ret_60m'),
+                'hit_60_pct':round(sum(1 for x in r60 if x>0)/len(r60)*100,1) if r60 else None,
+                'mfe_pct':avg('mfe_pct'),'mae_pct':avg('mae_pct'),
+                **(meta or {})
+            }
+
+        # Actual live definitions, evaluated from stored entry_gate booleans.
+        ready_hits=[]; entry_hits=[]
+        for ep,rows in windows:
+            rr=next((r for r in rows if r.get('_ready')),None)
+            ee=next((r for r in rows if r.get('_entry')),None)
+            if rr:ready_hits.append(rr)
+            if ee:entry_hits.append(ee)
+
+        current_ready=summarize(ready_hits,'CURRENT_READY',{'rule':'stored gate.ready'})
+        current_core=summarize(entry_hits,'CURRENT_CORE',{'rule':'stored gate.entry'})
+
+        grid=[]
+        powers=(55,60,65,68)
+        triggers=(3,4,5)
+        deltas=(0,2,4)
+        for pmin in powers:
+            for tmin in triggers:
+                for dmin in deltas:
+                    hits=[]
+                    core_pass=0
+                    for ep,rows in windows:
+                        hit=None
+                        for r in rows:
+                            if not r.get('_setup_ok') or not r.get('_chase_ok'):continue
+                            power=_f(r.get('power')); delta=_f(r.get('power_delta'))
+                            accel=bool(power>=pmin and delta>=dmin)
+                            nonpower=sum(1 for k in ('_green','_break','_volume','_impulse') if r.get(k))
+                            trig=nonpower+(1 if accel else 0)
+                            if accel and trig>=tmin:
+                                hit=r; break
+                        if hit:
+                            hits.append(hit)
+                            if hit.get('_green') and hit.get('_break') and hit.get('_volume'):
+                                core_pass+=1
+                    meta={
+                        'power_min':pmin,'trigger_min':tmin,'delta_min':dmin,
+                        'core_pass_pct':round(core_pass/len(hits)*100,1) if hits else None
+                    }
+                    grid.append(summarize(hits,f'P{pmin}/T{tmin}/D{dmin}',meta))
+
+        grid.sort(key=lambda x:(
+            -(x.get('complete_60') or 0),
+            -(x.get('ret_30m') if x.get('ret_30m') is not None else -999)
+        ))
+        return {
+            'grid':grid,
+            'current_core':current_core,
+            'current_ready':current_ready,
+            'episode_windows':len(windows),
+            'note':'Shadow only. First qualifying mark per Episode. No live rule or order behavior is changed.'
+        }
+
     def validation_marks(self,market=None,limit=1000):
         sql='SELECT id,ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,setup_count,trigger_count,rvol,volume_ratio,hard_floor,warning_floor,floor_mode,ret_5m,ret_15m,ret_30m,ret_60m,mfe_pct,mae_pct,settled_at FROM v4_validation_marks'; args=[]
         if market:sql+=' WHERE market=?'; args=[market.upper()]

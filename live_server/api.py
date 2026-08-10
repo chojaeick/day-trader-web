@@ -546,6 +546,10 @@ def v4_validation_stage_anchors(market:str|None=None,limit:int=Query(5000,ge=1,l
         'note':'First SETUP / READY / ENTRY marks within each signal Episode, with their own forward returns and MFE/MAE.'
     }
 
+@app.get('/api/v4/validation/entry-shadow')
+def v4_validation_entry_shadow(market:str|None=None,limit:int=Query(5000,ge=1,le=10000),bridge_minutes:int=Query(5,ge=1,le=15)):
+    return v4.store.validation_entry_shadow(market,limit,bridge_minutes)
+
 @app.get('/health')
 def health():
     qs=db.quotes()

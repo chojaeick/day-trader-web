@@ -668,6 +668,54 @@ with t[2]:
                 elif entry_reach<5:
                     st.warning(f'ENTRY 실제 관측은 {entry_reach}건뿐입니다. 진입 임계값 보정에는 아직 표본이 부족합니다.')
 
+                st.markdown('##### 🥷 Entry Threshold Shadow Test')
+                st.caption('실제 ENTRY 기준은 변경하지 않습니다. 각 조합은 Episode당 최초 1개 가상 진입만 사용합니다. Trigger는 해당 조합의 Power/ΔPower 가속 조건을 포함해 5개 체크로 다시 계산합니다.')
+                shadow=api(f'/api/v4/validation/entry-shadow?market={m}&limit=5000&bridge_minutes=5') or {}
+                grid=shadow.get('grid') or []
+                current_ready=shadow.get('current_ready') or {}
+                current_core=shadow.get('current_core') or {}
+
+                s1,s2,s3,s4=st.columns(4)
+                s1.metric('현재 READY Episode',current_ready.get('episodes',0))
+                s2.metric('현재 ENTRY Episode',current_core.get('episodes',0))
+                s3.metric('READY 30분%',f"{current_ready.get('ret_30m'):+.3f}%" if current_ready.get('ret_30m') is not None else '-')
+                s4.metric('ENTRY 30분%',f"{current_core.get('ret_30m'):+.3f}%" if current_core.get('ret_30m') is not None else '-')
+
+                if grid:
+                    gdf=pd.DataFrame(grid)
+                    # Avoid ranking tiny samples above mature profiles.
+                    gdf['신뢰표본']=pd.to_numeric(gdf['complete_60'],errors='coerce').fillna(0)
+                    gdf['30분점수']=pd.to_numeric(gdf['ret_30m'],errors='coerce')
+                    view=gdf.rename(columns={
+                        'profile':'Shadow','episodes':'Episode','complete_60':'60분완료',
+                        'power_min':'Power≥','trigger_min':'Trigger≥','delta_min':'ΔPower≥',
+                        'ret_5m':'5분%','ret_15m':'15분%','ret_30m':'30분%','ret_60m':'60분%',
+                        'hit_60_pct':'60분상승%','mfe_pct':'MFE%','mae_pct':'MAE%',
+                        'core_pass_pct':'Core통과%'
+                    })
+                    cols=[c for c in ['Shadow','Power≥','Trigger≥','ΔPower≥','Episode','60분완료','5분%','15분%','30분%','60분%','60분상승%','MFE%','MAE%','Core통과%'] if c in view.columns]
+                    st.dataframe(view[cols],use_container_width=True,hide_index=True)
+
+                    eligible=gdf[gdf['complete_60']>=5].copy()
+                    if len(eligible):
+                        eligible=eligible.sort_values(['ret_30m','ret_15m'],ascending=False,na_position='last')
+                        best=eligible.iloc[0]
+                        st.success(
+                            f"현재 최소 5개 60분 완료 표본 기준 상위 Shadow · {best['profile']} · "
+                            f"Episode {int(best['episodes'])} · 15분 {best['ret_15m']:+.3f}% · "
+                            f"30분 {best['ret_30m']:+.3f}% · 60분 "
+                            + (f"{best['ret_60m']:+.3f}%" if pd.notna(best['ret_60m']) else '-')
+                        )
+                    else:
+                        st.info('아직 60분 완료 Episode가 5개 이상인 Shadow 조합이 없습니다. 임계값 변경 판단은 보류합니다.')
+
+                    with st.expander('Shadow 해석 기준'):
+                        st.write('• CURRENT_READY / CURRENT_CORE는 저장 당시 실제 live gate 판정입니다.')
+                        st.write('• Pxx/Ty/Dz는 Power≥xx, 동적 Trigger≥y/5, ΔPower≥z를 만족한 첫 시점을 가상 Anchor로 잡습니다.')
+                        st.write('• Shadow는 chase guard와 5분 Setup을 통과한 mark만 사용합니다.')
+                        st.write('• Core통과%는 해당 Shadow Anchor에서 양봉+직전고가돌파+거래량확장이 동시에 성립한 비율입니다.')
+                        st.write('• 단일 세션 또는 소표본 상위 조합을 실제 ENTRY 기준으로 자동 승격하지 않습니다.')
+
                 ready=a[a['stage']=='READY'].copy()
                 if len(ready):
                     ready['Power구간']=pd.cut(ready['power'],bins=[-1e9,20,30,40,50,60,1e9],labels=['<20','20~30','30~40','40~50','50~60','60+'],right=False)
@@ -739,7 +787,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.5.2 · STAGE FUNNEL + OBSERVED REACH SEMANTICS · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.5.3 · ENTRY THRESHOLD SHADOW + STAGE FUNNEL · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

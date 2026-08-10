@@ -461,19 +461,24 @@ class CleanEngine:
 
             # V4.4: daily/live screener remains the base, but actual last 5m/15m
             # leadership can promote a fresh mover or demote a fading earlier winner.
-            score=.65*live_score+.25*base
+            # V4.4.8 Finder Score Calibration
+            # Keep selection responsive, but prevent Recent + Fresh from stacking
+            # into easy 100-point saturation.
+            live_component=.58*live_score
+            base_component=.22*base
             recent=recent_leadership(sym)
-            score+=recent['score']
+            recent_component=.72*_f(recent.get('score'))
+            score=live_component+base_component+recent_component
 
-            # Fresh movement is intentionally separate from daily momentum.
-            # This lets a +1~3% stock that just accelerated compete with an
-            # earlier +10% winner that is now flat/fading.
+            # Fresh is a promotion signal, not an independent 40-point score.
+            # Full Fresh remains meaningful, but is capped so one short burst
+            # cannot make the Finder read like a probability.
             raw_fresh=max(0.0,_f(recent.get('fresh_score')))
             if recent.get('fresh_mover'):
-                fresh_bonus=raw_fresh
+                fresh_bonus=min(18.0,raw_fresh*0.65)
             else:
-                # WATCH diagnostics should not dominate Finder ranking.
-                fresh_bonus=min(4.0,raw_fresh*0.20)
+                # WATCH diagnostics remain small context only.
+                fresh_bonus=min(3.0,raw_fresh*0.15)
             score+=fresh_bonus
 
             # We do not auto-short common stocks. A negative common-stock move should not
@@ -501,9 +506,19 @@ class CleanEngine:
                     fade_penalty += min(18.0, 8.0 + abs(observed_power)*0.22)
             score-=fade_penalty
 
-            reason=f"live {live_score:.0f} + quality/liquidity {base:.0f} + recent {recent['score']:+.0f}"
+            # Preserve a raw diagnostic score, then compress only the crowded high end.
+            # Monotonic compression keeps ordering while restoring score separation.
+            raw_score=score
+            if score>85:
+                score=85+(score-85)*0.35
+            score=_clip(score,0,96)
+
+            reason=(
+                f"live {live_component:.1f} + base {base_component:.1f}"
+                f" + recent {recent_component:+.1f}"
+            )
             if fresh_bonus:
-                reason+=f" + fresh {fresh_bonus:.0f}/{recent.get('fresh_mode','WATCH')}"
+                reason+=f" + fresh {fresh_bonus:.1f}/{recent.get('fresh_mode','WATCH')}"
             if recent.get('bars',0)>=6:
                 reason+=(
                     f" (1m {recent['ret_1m']:+.2f}% / 3m {recent['ret_3m']:+.2f}%"
@@ -534,7 +549,17 @@ class CleanEngine:
 
             rows.append({
                 'market':'USA','symbol':sym,'name':q.get('name') or c.get('name') or sym,
-                'quality':quality,'finder_score':round(_clip(score,0,100),1),
+                'quality':quality,'finder_score':round(score,1),
+                'finder_raw_score':round(raw_score,1),
+                'score_components':{
+                    'live':round(live_component,1),
+                    'base':round(base_component,1),
+                    'recent':round(recent_component,1),
+                    'fresh':round(fresh_bonus,1),
+                    'fade':round(-fade_penalty,1),
+                    'down':round(-down_penalty,1),
+                    'inverse':round(inverse_bonus,1),
+                },
                 'direction':'UP' if chg>=0 else 'DOWN','price':price,'change_pct':chg,
                 'dollar_volume':dv,'rvol':rvol,'atr_pct':atr,
                 'risk':'EXTREME' if quality=='C_HIGH_RISK' else 'CHASE' if chase else 'NORMAL',

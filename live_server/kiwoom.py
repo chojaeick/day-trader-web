@@ -416,7 +416,7 @@ class KiwoomClient:
 
                 if not regular:
                     if not closed_bootstrap_done:
-                        for symbol in tuple(self.s.symbols)[:8]:
+                        for symbol in tuple(self.s.symbols)[:30]:
                             try:
                                 inserted,bars=await asyncio.to_thread(
                                     self.backfill_symbol,symbol,self.active_exchange(symbol),80
@@ -436,7 +436,7 @@ class KiwoomClient:
                     continue
 
                 # Keep the fallback intentionally small to limit REST load.
-                for symbol in tuple(self.s.symbols)[:8]:
+                for symbol in tuple(self.s.symbols)[:30]:
                     try:
                         inserted,bars=await asyncio.to_thread(
                             self.backfill_symbol,symbol,self.active_exchange(symbol),40

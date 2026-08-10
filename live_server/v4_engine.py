@@ -270,17 +270,69 @@ class CleanEngine:
     def __init__(self,db_path):
         self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._lock=threading.RLock()
     def build_usa_finder(self,candidates,discovery,limit=5):
-        qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}; rows=[]
+        qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}
+        rows=[]
+        inverse_syms={'SOXS','SQQQ'}
+        regime='NEUTRAL'
+        for c in candidates or []:
+            if c.get('market_regime'):
+                regime=str(c.get('market_regime')).upper()
+                break
+
         for c in candidates or []:
             sym=str(c.get('symbol') or '').upper(); q=qmap.get(sym) or {}; quality=q.get('quality_grade')
             if quality not in ('A','B_EVENT'):continue
             price=_f(c.get('price')); dv=_f(c.get('dollar_volume')); rvol=_f(c.get('rvol')); atr=abs(_f(c.get('atr_pct'))); chg=_f(c.get('change_pct'))
             if price<5 or dv<20_000_000 or atr<=0 or atr>12:continue
-            liq=_clip((math.log10(max(dv,1))-7.3)/2*25,0,25); act=_clip((rvol-.5)/2.5*25,0,25); vol=20 if 2<=atr<=7 else 14 if 1<=atr<=10 else 7; directional=_clip(abs(chg)/8*15,0,15); qp=15 if quality=='A' else 9; chase=12 if abs(chg)>=15 else 6 if abs(chg)>=10 else 0
-            rows.append({'market':'USA','symbol':sym,'name':q.get('name') or c.get('name') or sym,'quality':quality,'finder_score':round(_clip(liq+act+vol+directional+qp-chase,0,100),1),'direction':'UP' if chg>=0 else 'DOWN','price':price,'change_pct':chg,'dollar_volume':dv,'rvol':rvol,'atr_pct':atr,'risk':'CHASE' if chase else 'NORMAL'})
-        rows.sort(key=lambda r:(r['finder_score'],r['dollar_volume']),reverse=True); rows=rows[:limit]
-        for i,r in enumerate(rows,1):r['rank']=i
-        self._update_finder('USA',rows); return self.finder['USA']
+
+            liq=_clip((math.log10(max(dv,1))-7.3)/2*25,0,25)
+            act=_clip((rvol-.5)/2.5*25,0,25)
+            vol=20 if 2<=atr<=7 else 14 if 1<=atr<=10 else 7
+            directional=_clip(abs(chg)/8*15,0,15)
+            qp=15 if quality=='A' else 9
+            chase=12 if abs(chg)>=15 else 6 if abs(chg)>=10 else 0
+            base=_clip(liq+act+vol+directional+qp-chase,0,100)
+
+            # Make Finder responsive to the current tape instead of mostly static
+            # liquidity/ATR characteristics.
+            live_score=_f(c.get('score'),base)
+            score=.58*live_score+.42*base
+
+            inverse_bonus=0.0
+            if regime in ('BEAR','STRONG_BEAR') and sym in inverse_syms and chg>0:
+                inverse_bonus=8 if regime=='BEAR' else 14
+                score+=inverse_bonus
+
+            reason=f"live {live_score:.0f} + quality/liquidity {base:.0f}"
+            if inverse_bonus:
+                reason+=f" + {regime} inverse {inverse_bonus:.0f}"
+
+            rows.append({
+                'market':'USA','symbol':sym,'name':q.get('name') or c.get('name') or sym,
+                'quality':quality,'finder_score':round(_clip(score,0,100),1),
+                'direction':'UP' if chg>=0 else 'DOWN','price':price,'change_pct':chg,
+                'dollar_volume':dv,'rvol':rvol,'atr_pct':atr,
+                'risk':'CHASE' if chase else 'NORMAL',
+                'market_regime':regime,'finder_reason':reason,
+                'inverse_candidate':sym in inverse_syms
+            })
+
+        rows.sort(key=lambda r:(r['finder_score'],r['dollar_volume']),reverse=True)
+        selected=rows[:limit]
+
+        # A bearish regime must not silently hide a qualified inverse ETF.
+        if regime in ('BEAR','STRONG_BEAR'):
+            inv=[r for r in rows if r.get('inverse_candidate') and r.get('change_pct',0)>0 and r.get('finder_score',0)>=35]
+            inv.sort(key=lambda r:(r['finder_score'],r['dollar_volume']),reverse=True)
+            if inv and inv[0]['symbol'] not in {r['symbol'] for r in selected}:
+                selected=selected[:max(0,limit-1)]+[inv[0]]
+                selected.sort(key=lambda r:(r['finder_score'],r['dollar_volume']),reverse=True)
+
+        selected=selected[:limit]
+        for i,r in enumerate(selected,1):r['rank']=i
+        self._update_finder('USA',selected)
+        self.finder['USA']['market_regime']=regime
+        return self.finder['USA']
     def build_korea_finder(self,discovery,limit=5):
         rows=[]
         for r in discovery.get('rows') or []:

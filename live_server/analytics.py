@@ -122,9 +122,52 @@ def screener_rows(quotes: list[dict], metrics: list[dict], top_n: int=10) -> lis
     index_strength=float((qmap.get('QQQ') or {}).get('change_pct') or 0)
     semi_strength=float((qmap.get('SMH') or {}).get('change_pct') or 0)
     progress=rvol_progress()
+
+    # V4.3.5 market regime. This is a routing aid, not a buy signal.
+    breadth_proxy=(index_strength+semi_strength)/2
+    if index_strength<=-1.2 and semi_strength<=-1.5:
+        regime='STRONG_BEAR'
+    elif index_strength<=-0.5 and semi_strength<=-0.7:
+        regime='BEAR'
+    elif index_strength>=1.2 and semi_strength>=1.5:
+        regime='STRONG_BULL'
+    elif index_strength>=0.5 and semi_strength>=0.7:
+        regime='BULL'
+    else:
+        regime='NEUTRAL'
+
     out=[_score_row(q,mm.get(q['symbol'],{}),index_strength,semi_strength,progress) for q in quotes]
+    for r in out:
+        r['market_regime']=regime
+        r['market_proxy_pct']=round(breadth_proxy,3)
+
+        # In a bearish tape, explicitly evaluate the liquid inverse pair instead
+        # of letting a long-only style ranking crowd them out.
+        if regime in ('BEAR','STRONG_BEAR') and r['symbol'] in INVERSE:
+            inverse_alignment=max(0.0,-(semi_strength if r['symbol']=='SOXS' else index_strength))
+            live_ok=(r['price']>=5 and r['dollar_volume']>=20_000_000 and
+                     r['change_pct']>0 and r['ma5']>0 and r['price']>=r['ma5']*0.995)
+            if live_ok:
+                boost=min(22,8+inverse_alignment*5)
+                r['score']=min(100,round(r['score']+boost))
+                r['eligible']=True
+                r['parts']['Bear inverse rotation']=round(boost,1)
+
     rows=[r for r in out if r['eligible']]
     rows.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
+
+    # In BEAR regimes reserve visibility for the best qualified inverse ETF.
+    if regime in ('BEAR','STRONG_BEAR'):
+        inverse=sorted(
+            [r for r in rows if r['symbol'] in INVERSE],
+            key=lambda r:(r['score'],r['dollar_volume']),reverse=True
+        )
+        selected=rows[:top_n]
+        if inverse and inverse[0]['symbol'] not in {r['symbol'] for r in selected}:
+            selected=(selected[:max(0,top_n-1)]+[inverse[0]])
+            selected.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
+        return selected[:top_n]
+
     return rows[:top_n]
 
 def context_for(symbol:str, quotes:list[dict]):

@@ -281,23 +281,75 @@ class CleanEngine:
 
         def recent_leadership(sym):
             if db is None:
-                return {'ret_5m':0.0,'ret_15m':0.0,'vol_accel':1.0,'bars':0,'score':0.0}
+                return {
+                    'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
+                    'vol_accel':1.0,'break_3m_high':False,'fresh_score':0.0,
+                    'fresh_mover':False,'bars':0,'score':0.0
+                }
             try:
                 ticks=db.ticks(sym,2500)
                 b=ticks_to_bars(ticks,1)
                 if len(b)<6:
-                    return {'ret_5m':0.0,'ret_15m':0.0,'vol_accel':1.0,'bars':len(b),'score':0.0}
+                    return {
+                        'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
+                        'vol_accel':1.0,'break_3m_high':False,'fresh_score':0.0,
+                        'fresh_mover':False,'bars':len(b),'score':0.0
+                    }
                 b=b.tail(25).copy()
                 close=pd.to_numeric(b['close'],errors='coerce')
                 volume=pd.to_numeric(b['volume'],errors='coerce').fillna(0)
                 last=_f(close.iloc[-1])
+                p1=_f(close.iloc[-2]) if len(close)>=2 else last
+                p3=_f(close.iloc[-4]) if len(close)>=4 else last
                 p5=_f(close.iloc[-6]) if len(close)>=6 else last
                 p15=_f(close.iloc[-16]) if len(close)>=16 else _f(close.iloc[0])
+                r1=(last/p1-1)*100 if p1>0 else 0.0
+                r3=(last/p3-1)*100 if p3>0 else 0.0
                 r5=(last/p5-1)*100 if p5>0 else 0.0
                 r15=(last/p15-1)*100 if p15>0 else 0.0
+
                 recent_vol=_f(volume.tail(3).mean(),0)
                 prior_vol=_f(volume.iloc[-13:-3].mean(),0) if len(volume)>=13 else _f(volume.iloc[:-3].mean(),0)
                 vacc=recent_vol/max(prior_vol,1.0)
+
+                highs=pd.to_numeric(b['high'],errors='coerce')
+                prev3_high=_f(highs.iloc[-4:-1].max(),0) if len(highs)>=4 else 0
+                break3=bool(prev3_high>0 and last>prev3_high)
+
+                # V4.4.4 Fresh Breakout Detector:
+                # reward acceleration that started in the last few minutes, before
+                # it becomes a large daily mover. Diagnostic score, not probability.
+                fresh=0.0
+                if r1>=0.40: fresh+=10
+                elif r1>=0.20: fresh+=7
+                elif r1>=0.10: fresh+=4
+                elif r1<=-0.20: fresh-=6
+
+                if r3>=1.20: fresh+=12
+                elif r3>=0.60: fresh+=9
+                elif r3>=0.30: fresh+=6
+                elif r3<=-0.60: fresh-=8
+
+                if r5>=1.50: fresh+=8
+                elif r5>=0.75: fresh+=6
+                elif r5>=0.35: fresh+=3
+
+                if break3: fresh+=8
+                if vacc>=3.0: fresh+=8
+                elif vacc>=2.0: fresh+=6
+                elif vacc>=1.5: fresh+=4
+                elif vacc>=1.2: fresh+=2
+
+                if r1>0 and r3>0 and r5>0: fresh+=3
+                fresh=_clip(fresh,-12,36)
+
+                fresh_mover=bool(
+                    r1>=0.10 and
+                    r3>=0.30 and
+                    break3 and
+                    vacc>=1.20 and
+                    fresh>=18
+                )
 
                 lead=0.0
                 # Reward what is moving NOW, not only what moved earlier today.
@@ -321,12 +373,18 @@ class CleanEngine:
                 elif vacc<0.65: lead-=3
 
                 return {
+                    'ret_1m':round(r1,3),'ret_3m':round(r3,3),
                     'ret_5m':round(r5,3),'ret_15m':round(r15,3),
-                    'vol_accel':round(vacc,2),'bars':len(b),
-                    'score':round(_clip(lead,-35,40),1)
+                    'vol_accel':round(vacc,2),'break_3m_high':break3,
+                    'fresh_score':round(fresh,1),'fresh_mover':fresh_mover,
+                    'bars':len(b),'score':round(_clip(lead,-35,40),1)
                 }
             except Exception:
-                return {'ret_5m':0.0,'ret_15m':0.0,'vol_accel':1.0,'bars':0,'score':0.0}
+                return {
+                    'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
+                    'vol_accel':1.0,'break_3m_high':False,'fresh_score':0.0,
+                    'fresh_mover':False,'bars':0,'score':0.0
+                }
 
         for c in candidates or []:
             sym=str(c.get('symbol') or '').upper(); q=qmap.get(sym) or {}; quality=q.get('quality_grade')
@@ -351,6 +409,12 @@ class CleanEngine:
             score=.65*live_score+.25*base
             recent=recent_leadership(sym)
             score+=recent['score']
+
+            # Fresh movement is intentionally separate from daily momentum.
+            # This lets a +1~3% stock that just accelerated compete with an
+            # earlier +10% winner that is now flat/fading.
+            fresh_bonus=max(0.0,_f(recent.get('fresh_score')))
+            score+=fresh_bonus
 
             # We do not auto-short common stocks. A negative common-stock move should not
             # dominate the actionable TOP5 merely because its absolute move is large.
@@ -378,8 +442,14 @@ class CleanEngine:
             score-=fade_penalty
 
             reason=f"live {live_score:.0f} + quality/liquidity {base:.0f} + recent {recent['score']:+.0f}"
+            if fresh_bonus:
+                reason+=f" + fresh {fresh_bonus:.0f}"
             if recent.get('bars',0)>=6:
-                reason+=f" (5m {recent['ret_5m']:+.2f}% / 15m {recent['ret_15m']:+.2f}% / vol×{recent['vol_accel']:.1f})"
+                reason+=(
+                    f" (1m {recent['ret_1m']:+.2f}% / 3m {recent['ret_3m']:+.2f}%"
+                    f" / 5m {recent['ret_5m']:+.2f}% / vol×{recent['vol_accel']:.1f}"
+                    f" / break3 {'Y' if recent['break_3m_high'] else 'N'})"
+                )
             if fade_penalty:
                 reason+=f" - fading {fade_penalty:.0f}"
             if down_penalty:
@@ -392,10 +462,13 @@ class CleanEngine:
                 # Extreme movers are visible in Light20, but Heavy5 requires evidence
                 # that the move is still alive NOW. Thresholds are hypotheses for validation.
                 extreme_continue=bool(
-                    recent.get('bars',0)>=6 and
-                    _f(recent.get('ret_5m'))>=0.25 and
-                    _f(recent.get('vol_accel'),1)>=1.10 and
-                    fade_penalty<=3
+                    (
+                        recent.get('bars',0)>=6 and
+                        _f(recent.get('ret_5m'))>=0.25 and
+                        _f(recent.get('vol_accel'),1)>=1.10 and
+                        fade_penalty<=3
+                    )
+                    or bool(recent.get('fresh_mover'))
                 )
                 reason+=(" + extreme continuing" if extreme_continue else " + extreme watch-only")
 
@@ -406,8 +479,11 @@ class CleanEngine:
                 'dollar_volume':dv,'rvol':rvol,'atr_pct':atr,
                 'risk':'EXTREME' if quality=='C_HIGH_RISK' else 'CHASE' if chase else 'NORMAL',
                 'market_regime':regime,'finder_reason':reason,
+                'ret_1m':recent.get('ret_1m'),'ret_3m':recent.get('ret_3m'),
                 'ret_5m':recent.get('ret_5m'),'ret_15m':recent.get('ret_15m'),
                 'volume_accel':recent.get('vol_accel'),'recent_score':recent.get('score'),
+                'break_3m_high':recent.get('break_3m_high'),
+                'fresh_score':recent.get('fresh_score'),'fresh_mover':recent.get('fresh_mover'),
                 'observed_power':observed_power,'fade_penalty':round(fade_penalty,1),
                 'extreme_continue':extreme_continue,
                 'extreme_watch':quality=='C_HIGH_RISK',
@@ -417,7 +493,16 @@ class CleanEngine:
 
         # Light Tracker 20:
         # broad/daily screening first, then live 5m/15m leadership + fade controls.
-        rows.sort(key=lambda r:(r['finder_score'],r['recent_score'],r['dollar_volume']),reverse=True)
+        rows.sort(
+            key=lambda r:(
+                r['finder_score'],
+                1 if r.get('fresh_mover') else 0,
+                _f(r.get('fresh_score')),
+                r['recent_score'],
+                r['dollar_volume']
+            ),
+            reverse=True
+        )
         light_rows=rows[:20]
         for i,r in enumerate(light_rows,1):
             r['light_rank']=i

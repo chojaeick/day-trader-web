@@ -283,8 +283,9 @@ class CleanEngine:
             if db is None:
                 return {
                     'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
-                    'vol_accel':1.0,'break_3m_high':False,'fresh_score':0.0,
-                    'fresh_mover':False,'bars':0,'score':0.0
+                    'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,
+                    'break_3m_high':False,'fresh_score':0.0,
+                    'fresh_mover':False,'fresh_mode':'WATCH','bars':0,'score':0.0
                 }
             try:
                 ticks=db.ticks(sym,2500)
@@ -292,8 +293,9 @@ class CleanEngine:
                 if len(b)<6:
                     return {
                         'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
-                        'vol_accel':1.0,'break_3m_high':False,'fresh_score':0.0,
-                        'fresh_mover':False,'bars':len(b),'score':0.0
+                        'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,
+                        'break_3m_high':False,'fresh_score':0.0,
+                        'fresh_mover':False,'fresh_mode':'WATCH','bars':len(b),'score':0.0
                     }
                 b=b.tail(25).copy()
                 close=pd.to_numeric(b['close'],errors='coerce')
@@ -309,46 +311,77 @@ class CleanEngine:
                 r15=(last/p15-1)*100 if p15>0 else 0.0
 
                 recent_vol=_f(volume.tail(3).mean(),0)
-                prior_vol=_f(volume.iloc[-13:-3].mean(),0) if len(volume)>=13 else _f(volume.iloc[:-3].mean(),0)
+                if len(volume)>=13:
+                    prior_slice=volume.iloc[-13:-3]
+                else:
+                    prior_slice=volume.iloc[:-3]
+                prior_vol=_f(prior_slice.median(),0) if len(prior_slice) else 0
                 vacc=recent_vol/max(prior_vol,1.0)
+
+                # Do not let a near-empty historical baseline create an absurd ratio.
+                # Keep this diagnostic ratio bounded; it is used for ranking, not as a probability.
+                vacc=_clip(vacc,0,12)
 
                 highs=pd.to_numeric(b['high'],errors='coerce')
                 prev3_high=_f(highs.iloc[-4:-1].max(),0) if len(highs)>=4 else 0
                 break3=bool(prev3_high>0 and last>prev3_high)
 
-                # V4.4.4 Fresh Breakout Detector:
-                # reward acceleration that started in the last few minutes, before
-                # it becomes a large daily mover. Diagnostic score, not probability.
+                # V4.4.5 Fresh Momentum V2
+                # Two valid paths:
+                # A) CONTINUATION: 3m + 5m acceleration with participation.
+                # B) BREAKOUT:    1m impulse + local high breakout with participation.
+                # break3 is no longer mandatory for a steady 3m/5m acceleration.
                 fresh=0.0
-                if r1>=0.40: fresh+=10
-                elif r1>=0.20: fresh+=7
-                elif r1>=0.10: fresh+=4
+
+                if r1>=0.35: fresh+=9
+                elif r1>=0.18: fresh+=6
+                elif r1>=0.08: fresh+=3
                 elif r1<=-0.20: fresh-=6
 
-                if r3>=1.20: fresh+=12
-                elif r3>=0.60: fresh+=9
-                elif r3>=0.30: fresh+=6
-                elif r3<=-0.60: fresh-=8
+                if r3>=1.00: fresh+=12
+                elif r3>=0.55: fresh+=9
+                elif r3>=0.25: fresh+=6
+                elif r3<=-0.55: fresh-=8
+                elif r3<0: fresh-=3
 
-                if r5>=1.50: fresh+=8
-                elif r5>=0.75: fresh+=6
-                elif r5>=0.35: fresh+=3
+                if r5>=1.25: fresh+=9
+                elif r5>=0.65: fresh+=6
+                elif r5>=0.30: fresh+=4
+                elif r5<0: fresh-=3
 
-                if break3: fresh+=8
+                if break3:
+                    fresh+=6
+
                 if vacc>=3.0: fresh+=8
                 elif vacc>=2.0: fresh+=6
                 elif vacc>=1.5: fresh+=4
-                elif vacc>=1.2: fresh+=2
+                elif vacc>=1.15: fresh+=2
+                elif vacc<0.55: fresh-=2
 
-                if r1>0 and r3>0 and r5>0: fresh+=3
-                fresh=_clip(fresh,-12,36)
+                if r1>0 and r3>0 and r5>0:
+                    fresh+=3
 
-                fresh_mover=bool(
-                    r1>=0.10 and
-                    r3>=0.30 and
+                fresh=_clip(fresh,-15,40)
+
+                continuation_path=bool(
+                    r3>=0.25 and
+                    r5>=0.30 and
+                    vacc>=1.10 and
+                    fresh>=15
+                )
+                breakout_path=bool(
+                    r1>=0.12 and
+                    r3>=0.18 and
                     break3 and
-                    vacc>=1.20 and
-                    fresh>=18
+                    vacc>=1.15 and
+                    fresh>=15
+                )
+
+                fresh_mover=bool(continuation_path or breakout_path)
+                fresh_mode=(
+                    'CONTINUATION' if continuation_path
+                    else 'BREAKOUT' if breakout_path
+                    else 'WATCH'
                 )
 
                 lead=0.0
@@ -375,15 +408,21 @@ class CleanEngine:
                 return {
                     'ret_1m':round(r1,3),'ret_3m':round(r3,3),
                     'ret_5m':round(r5,3),'ret_15m':round(r15,3),
-                    'vol_accel':round(vacc,2),'break_3m_high':break3,
-                    'fresh_score':round(fresh,1),'fresh_mover':fresh_mover,
+                    'vol_accel':round(vacc,2),
+                    'recent_vol_3m':round(recent_vol,2),
+                    'prior_vol_median_10m':round(prior_vol,2),
+                    'break_3m_high':break3,
+                    'fresh_score':round(fresh,1),
+                    'fresh_mover':fresh_mover,
+                    'fresh_mode':fresh_mode,
                     'bars':len(b),'score':round(_clip(lead,-35,40),1)
                 }
             except Exception:
                 return {
                     'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
-                    'vol_accel':1.0,'break_3m_high':False,'fresh_score':0.0,
-                    'fresh_mover':False,'bars':0,'score':0.0
+                    'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,
+                    'break_3m_high':False,'fresh_score':0.0,
+                    'fresh_mover':False,'fresh_mode':'WATCH','bars':0,'score':0.0
                 }
 
         for c in candidates or []:
@@ -443,7 +482,7 @@ class CleanEngine:
 
             reason=f"live {live_score:.0f} + quality/liquidity {base:.0f} + recent {recent['score']:+.0f}"
             if fresh_bonus:
-                reason+=f" + fresh {fresh_bonus:.0f}"
+                reason+=f" + fresh {fresh_bonus:.0f}/{recent.get('fresh_mode','WATCH')}"
             if recent.get('bars',0)>=6:
                 reason+=(
                     f" (1m {recent['ret_1m']:+.2f}% / 3m {recent['ret_3m']:+.2f}%"
@@ -483,7 +522,11 @@ class CleanEngine:
                 'ret_5m':recent.get('ret_5m'),'ret_15m':recent.get('ret_15m'),
                 'volume_accel':recent.get('vol_accel'),'recent_score':recent.get('score'),
                 'break_3m_high':recent.get('break_3m_high'),
-                'fresh_score':recent.get('fresh_score'),'fresh_mover':recent.get('fresh_mover'),
+                'fresh_score':recent.get('fresh_score'),
+                'fresh_mover':recent.get('fresh_mover'),
+                'fresh_mode':recent.get('fresh_mode'),
+                'recent_vol_3m':recent.get('recent_vol_3m'),
+                'prior_vol_median_10m':recent.get('prior_vol_median_10m'),
                 'observed_power':observed_power,'fade_penalty':round(fade_penalty,1),
                 'extreme_continue':extreme_continue,
                 'extreme_watch':quality=='C_HIGH_RISK',

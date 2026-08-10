@@ -315,7 +315,7 @@ class KiwoomClient:
             tp=tm[8:14] if len(tm)>=14 and tm[:8]==bus[:8] else (('000000'+tm)[-6:] if tm else '000000')
             try:
                 hh,mm,ss=int(tp[:2]),int(tp[2:4]),int(tp[4:6])
-                base=datetime.strptime(bus[:8],'%Y%m%d').replace(tzinfo=ZoneInfo('Asia/Seoul'))
+                base=datetime.strptime(bus[:8],'%Y%m%d').replace(tzinfo=ZoneInfo('America/New_York'))
                 local=base+timedelta(hours=hh,minutes=mm,seconds=ss)
                 ts=local.astimezone(timezone.utc)
             except Exception:

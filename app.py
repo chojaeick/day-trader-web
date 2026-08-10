@@ -1,3 +1,4 @@
+import altair as alt
 import os, time, requests, pandas as pd, streamlit as st
 try: API_URL=st.secrets.get('DAYTRADER_API_URL','')
 except Exception: API_URL=os.getenv('DAYTRADER_API_URL','')
@@ -54,6 +55,74 @@ def _chart_frame(rows):
         return df[[tcol,'Price','VWAP','EMA9','EMA20']].rename(columns={tcol:'time'}).set_index('time')
     except Exception:
         return None
+
+def _price_volume_chart(rows, title, height=250):
+    """Focused intraday price chart with tight Y scale + separate volume bars."""
+    if not rows:
+        st.info('차트 데이터 준비 중')
+        return
+    try:
+        df=pd.DataFrame(rows)
+        tcol='time' if 'time' in df.columns else ('ts' if 'ts' in df.columns else None)
+        if not tcol or 'close' not in df.columns:
+            st.info('차트 데이터 준비 중')
+            return
+        df[tcol]=pd.to_datetime(df[tcol],utc=True,errors='coerce')
+        df=df.dropna(subset=[tcol]).sort_values(tcol)
+        if df.empty:
+            st.info('차트 데이터 준비 중')
+            return
+
+        close=pd.to_numeric(df['close'],errors='coerce')
+        high=pd.to_numeric(df.get('high',close),errors='coerce').fillna(close)
+        low=pd.to_numeric(df.get('low',close),errors='coerce').fillna(close)
+        vol=pd.to_numeric(df.get('volume',0),errors='coerce').fillna(0)
+
+        tp=(high+low+close)/3
+        cv=vol.cumsum()
+        df['VWAP']=(tp*vol).cumsum()/cv.replace(0,pd.NA)
+        df['EMA9']=close.ewm(span=9,adjust=False).mean()
+        df['EMA20']=close.ewm(span=20,adjust=False).mean()
+        df['Price']=close
+        df['Volume']=vol
+
+        vals=pd.concat([df['Price'],df['VWAP'],df['EMA9'],df['EMA20']]).dropna()
+        if vals.empty:
+            st.info('차트 데이터 준비 중')
+            return
+        ymin=float(vals.min()); ymax=float(vals.max())
+        span=max(ymax-ymin, max(abs(ymax),1)*0.002)
+        pad=span*0.12
+        domain=[ymin-pad,ymax+pad]
+
+        long=df[[tcol,'Price','VWAP','EMA9','EMA20']].melt(
+            id_vars=[tcol],var_name='Series',value_name='Value'
+        ).dropna()
+
+        line=alt.Chart(long).mark_line(strokeWidth=2).encode(
+            x=alt.X(f'{tcol}:T',title=None,axis=alt.Axis(format='%H:%M',labelAngle=0)),
+            y=alt.Y('Value:Q',title='가격',scale=alt.Scale(domain=domain,zero=False)),
+            color=alt.Color('Series:N',title=None),
+            tooltip=[
+                alt.Tooltip(f'{tcol}:T',title='시간'),
+                alt.Tooltip('Series:N',title='지표'),
+                alt.Tooltip('Value:Q',title='값',format='.2f'),
+            ],
+        ).properties(height=height)
+
+        volume=alt.Chart(df).mark_bar(opacity=0.45).encode(
+            x=alt.X(f'{tcol}:T',title=None,axis=alt.Axis(format='%H:%M',labelAngle=0)),
+            y=alt.Y('Volume:Q',title='거래량'),
+            tooltip=[
+                alt.Tooltip(f'{tcol}:T',title='시간'),
+                alt.Tooltip('Volume:Q',title='거래량',format=',.0f'),
+            ],
+        ).properties(height=90)
+
+        st.caption(title)
+        st.altair_chart(alt.vconcat(line,volume).resolve_scale(x='shared'),use_container_width=True)
+    except Exception as e:
+        st.warning(f'차트 표시 오류: {e}')
 
 def px(v,m):
     if v in (None,''):return '-'
@@ -113,15 +182,9 @@ with t[0]:
             b5=api(f'/api/bars/{sel}?minutes=5&limit=240').get('data') or []
             b1f=_focus_bars(b1,60); b5f=_focus_bars(b5,180); c1,c2=st.columns(2)
             with c1:
-                st.caption('1분봉 · Trigger · 최근 60분')
-                cf1=_chart_frame(b1f)
-                if cf1 is not None and len(cf1):st.line_chart(cf1,height=260)
-                else:st.info('1분봉 데이터 준비 중')
+                _price_volume_chart(b1f,'1분봉 · Trigger · 최근 60분',250)
             with c2:
-                st.caption('5분봉 · Setup · 최근 3시간')
-                cf5=_chart_frame(b5f)
-                if cf5 is not None and len(cf5):st.line_chart(cf5,height=260)
-                else:st.info('5분봉 데이터 준비 중')
+                _price_volume_chart(b5f,'5분봉 · Setup · 최근 3시간',250)
         controls(m,r)
     else:st.warning('Tracker 데이터가 아직 없습니다. 서버 시작 직후라면 수 초 후 자동 생성됩니다.')
     st.markdown('### 🎯 Finder TOP5 · 오늘 볼 종목'); st.caption('Finder는 종목 선정용입니다. 위 Power 순위는 진입 준비도를 실시간으로 다시 정렬합니다. TOP5 진입 = 즉시 매수가 아닙니다.')

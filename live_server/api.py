@@ -686,6 +686,74 @@ def v4_coverage_audit(market:str='USA'):
             stale.append({'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price')})
     stale.sort(key=lambda x:x['age_sec'],reverse=True)
 
+    # V4.6.1: explain Light -> Finder cutline without changing selection logic.
+    finder_cut=min([float(r.get('finder_score') or 0) for r in finder_rows],default=0.0)
+    light_audit=[]
+    for r in light_rows:
+        sym=str(r.get('symbol') or '').upper()
+        score=float(r.get('finder_score') or 0)
+        selected=sym in fs
+        gap=round(score-finder_cut,1) if finder_cut else None
+        why=[]
+        if selected:
+            why.append('Finder TOP5')
+        else:
+            if r.get('quality')=='C_HIGH_RISK' and not r.get('extreme_continue'):
+                why.append('Extreme continuation 미충족')
+            if gap is not None and gap<0:
+                why.append(f'Finder 컷 대비 {gap:+.1f}')
+            if str(r.get('fresh_mode') or 'WATCH')=='WATCH':
+                why.append('Fresh WATCH')
+            if not r.get('break_3m_high'):
+                why.append('3분 고가돌파 없음')
+            if float(r.get('ret_5m') or 0)<=0:
+                why.append('5분 모멘텀 비양수')
+            if float(r.get('volume_accel') or 0)<1.10:
+                why.append('거래량 가속 <1.10x')
+            if float(r.get('fade_penalty') or 0)>0:
+                why.append(f"fade -{float(r.get('fade_penalty') or 0):.1f}")
+        light_audit.append({
+            'light_rank':r.get('light_rank'),
+            'symbol':sym,
+            'name':r.get('name'),
+            'finder_score':score,
+            'finder_cut':round(finder_cut,1) if finder_cut else None,
+            'gap_to_cut':gap,
+            'selected':selected,
+            'quality':r.get('quality'),
+            'fresh':r.get('fresh_mode'),
+            'fresh_score':r.get('fresh_score'),
+            'ret_1m':r.get('ret_1m'),'ret_3m':r.get('ret_3m'),
+            'ret_5m':r.get('ret_5m'),'ret_15m':r.get('ret_15m'),
+            'volume_accel':r.get('volume_accel'),
+            'break_3m_high':r.get('break_3m_high'),
+            'fade_penalty':r.get('fade_penalty'),
+            'extreme_continue':r.get('extreme_continue'),
+            'reason':' · '.join(why) if why else '컷라인 경쟁'
+        })
+
+    # Screener names that are absent from current Discovery/Extreme/Risk snapshots.
+    # We can identify the mismatch, but do not invent a missing upstream TR reason.
+    discovery_miss=[]
+    for r in screen_rows:
+        sym=str(r.get('symbol') or '').upper()
+        if sym in ds or sym in es or sym in qrs:
+            continue
+        penalties=r.get('penalties') or []
+        discovery_miss.append({
+            'symbol':sym,
+            'score':r.get('score'),
+            'change_pct':r.get('change_pct'),
+            'eligible':r.get('eligible'),
+            'extreme':r.get('extreme'),
+            'rvol':r.get('rvol'),
+            'atr_pct':r.get('atr_pct'),
+            'dollar_volume':r.get('dollar_volume'),
+            'penalties':' / '.join(str(x) for x in penalties),
+            'diagnosis':'Screener에는 존재하지만 현재 Discovery/Extreme/Risk snapshot에는 없음 · upstream source/ranking/eligibility 원인은 현재 데이터만으로 확정 불가'
+        })
+    discovery_miss.sort(key=lambda r:abs(float(r.get('change_pct') or 0)),reverse=True)
+
     return {
         'market':'USA',
         'supported':True,
@@ -705,6 +773,9 @@ def v4_coverage_audit(market:str='USA'):
         'inverse':inverse,
         'top_abs_movers':movers[:25],
         'stale_rows':stale[:30],
+        'finder_cut':round(finder_cut,1) if finder_cut else None,
+        'light_audit':light_audit,
+        'discovery_miss':discovery_miss[:30],
         'finder_symbols':sorted(fs),
         'light_symbols':sorted(ls),
         'heavy_symbols':sorted(hs),

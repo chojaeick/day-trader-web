@@ -549,6 +549,23 @@ with t[2]:
             else:
                 st.caption('현재 mover 데이터가 없습니다.')
 
+            st.markdown('##### ✂️ Light → Finder 컷라인')
+            la=pd.DataFrame(cov.get('light_audit') or [])
+            if len(la):
+                cut=cov.get('finder_cut')
+                st.caption(f'현재 Finder 5위 컷 · {cut}' if cut is not None else '현재 Finder 컷 계산 불가')
+                cols=[c for c in ['light_rank','symbol','finder_score','finder_cut','gap_to_cut','selected','quality','fresh','fresh_score','ret_1m','ret_3m','ret_5m','ret_15m','volume_accel','break_3m_high','fade_penalty','extreme_continue','reason'] if c in la.columns]
+                st.dataframe(la[cols],use_container_width=True,hide_index=True)
+
+            st.markdown('##### 🕳️ Discovery Miss Audit')
+            dm=pd.DataFrame(cov.get('discovery_miss') or [])
+            if len(dm):
+                st.warning(f'Screener에는 있으나 현재 Discovery/Extreme/Risk snapshot에는 없는 종목 {len(dm)}개')
+                st.dataframe(dm,use_container_width=True,hide_index=True)
+                st.caption('이 표는 “누락 위치”만 확정합니다. upstream Kiwoom ranking/source에서 왜 빠졌는지는 현재 저장 snapshot만으로 추정하지 않습니다.')
+            else:
+                st.success('현재 Screener 종목 중 Discovery 계층 완전 누락은 감지되지 않았습니다.')
+
             st.markdown('##### 🔄 Inverse / Leveraged ETF 파이프라인')
             inv=pd.DataFrame(cov.get('inverse') or [])
             if len(inv):
@@ -989,7 +1006,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.6.0.1 · COVERAGE AUDIT CORRECTNESS FIX · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.6.1 · LIGHT→FINDER CUTLINE + DISCOVERY MISS AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

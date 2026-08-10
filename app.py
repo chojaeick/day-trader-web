@@ -519,6 +519,59 @@ with t[2]:
                     power_rows.append(r)
                 st.dataframe(pd.DataFrame(power_rows),use_container_width=True,hide_index=True)
 
+        st.markdown('#### 🔎 Scanner / Coverage Audit')
+        st.caption('Broad Discovery → Light Tracker → Finder → Heavy5의 현재 파이프라인을 점검합니다. 추천식은 바꾸지 않고 “어디에서 놓쳤는지”만 보여줍니다.')
+        cov=api(f'/api/v4/coverage-audit?market={m}') or {}
+        if cov.get('supported'):
+            cnt=cov.get('counts') or {}
+            c1,c2,c3,c4,c5,c6=st.columns(6)
+            c1.metric('Quotes',cnt.get('quotes',0))
+            c2.metric('Screener40',cnt.get('screener40',0))
+            c3.metric('Discovery',cnt.get('discovery',0))
+            c4.metric('Light',cnt.get('light',0))
+            c5.metric('Finder',cnt.get('finder',0))
+            c6.metric('Heavy5',cnt.get('heavy',0))
+
+            q1,q2,q3=st.columns(3)
+            q1.metric('Extreme',cnt.get('extreme',0))
+            q2.metric('Quality Risk',cnt.get('quality_risk',0))
+            q3.metric('Quality Reject',cnt.get('quality_reject',0))
+
+            src=cov.get('source_counts') or {}
+            if src:
+                st.caption('Discovery source coverage · '+ ' · '.join(f'{k}:{v}' for k,v in sorted(src.items())))
+
+            st.markdown('##### ↕️ 현재 강한 변동 종목 · 어느 단계까지 왔나')
+            movers=pd.DataFrame(cov.get('top_abs_movers') or [])
+            if len(movers):
+                cols=[c for c in ['symbol','name','change_pct','price','stage','reason','quality','origin','fresh','finder_score','power','data_age_sec'] if c in movers.columns]
+                st.dataframe(movers[cols],use_container_width=True,hide_index=True)
+            else:
+                st.caption('현재 mover 데이터가 없습니다.')
+
+            st.markdown('##### 🔄 Inverse / Leveraged ETF 파이프라인')
+            inv=pd.DataFrame(cov.get('inverse') or [])
+            if len(inv):
+                st.dataframe(inv,use_container_width=True,hide_index=True)
+                for _,rr in inv.iterrows():
+                    if rr.get('symbol') in ('SOXS','SQQQ') and rr.get('stage') not in ('FINDER','HEAVY5'):
+                        st.write(f"• {rr.get('symbol')} · {rr.get('stage')} · {rr.get('reason')}")
+
+            stale=pd.DataFrame(cov.get('stale_rows') or [])
+            if len(stale):
+                st.warning(f"3분 초과 stale quote {len(stale)}개가 감지되었습니다. 아래 표는 최대 30개입니다.")
+                st.dataframe(stale,use_container_width=True,hide_index=True)
+            else:
+                st.success('현재 저장 quote 기준 3분 초과 stale 데이터가 감지되지 않았습니다.')
+
+            with st.expander('현재 파이프라인 심볼'):
+                st.write('Light · '+', '.join(cov.get('light_symbols') or []))
+                st.write('Finder · '+', '.join(cov.get('finder_symbols') or []))
+                st.write('Heavy · '+', '.join(cov.get('heavy_symbols') or []))
+        else:
+            st.info(cov.get('note') or 'Coverage Audit은 현재 USA만 지원합니다.')
+
+
         st.markdown('#### 🧩 Episode Validation')
         st.caption('분당 스냅샷을 그대로 세지 않고 SETUP→READY→ENTRY→EXIT 계열의 연속 신호를 하나의 Episode로 묶어 봅니다. 짧은 WATCH 흔들림은 5분까지 같은 Episode로 합칩니다.')
         eps=api(f'/api/v4/validation/episodes?market={m}&limit=5000&bridge_minutes=5').get('data') or []
@@ -936,7 +989,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.5.5 · MULTI-SESSION SHADOW STABILITY + SAMPLE SHRINKAGE · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.6.0 · SCANNER COVERAGE AUDIT + V4.5.5 VALIDATION · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

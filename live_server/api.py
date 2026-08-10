@@ -528,6 +528,167 @@ def v4_trades(market:str|None=None,limit:int=Query(200,ge=1,le=1000)): return {'
 @app.get('/api/v4/validation/snapshots')
 def v4_validation_snapshots(market:str|None=None,limit:int=Query(500,ge=1,le=5000)): return {'data':v4.store.snapshots(market,limit),'note':'Baseline V4 feature snapshots for Historical/Shadow calibration.'}
 
+
+@app.get('/api/v4/coverage-audit')
+def v4_coverage_audit(market:str='USA'):
+    market=str(market or 'USA').upper()
+    if market!='USA':
+        return {'market':market,'supported':False,'note':'V4.6.0 coverage audit is USA-first until verified Korea minute/discovery coverage is available.'}
+
+    def _rows(x,key='rows'):
+        return (x or {}).get(key) or []
+
+    def _symset(rows):
+        return {str(r.get('symbol') or '').upper() for r in (rows or []) if r.get('symbol')}
+
+    def _age_seconds(row):
+        raw=row.get('updated_at') or row.get('ts') or row.get('last_ts')
+        if not raw:return None
+        try:
+            t=datetime.fromisoformat(str(raw).replace('Z','+00:00'))
+            if t.tzinfo is None:t=t.replace(tzinfo=timezone.utc)
+            return round(max(0,(datetime.now(timezone.utc)-t).total_seconds()),1)
+        except Exception:return None
+
+    discovery=k.discovery if isinstance(getattr(k,'discovery',None),dict) else {}
+    discovery_rows=_rows(discovery)
+    extreme_rows=_rows(discovery,'extreme_rows')
+    quality_risk_rows=_rows(discovery,'quality_risk_rows')
+    quality_reject_rows=_rows(discovery,'quality_reject_rows')
+
+    screen_rows=screener_rows(db.quotes(),db.daily_metrics(),40)
+    finder_obj=(getattr(v4,'finder',{}) or {}).get('USA') or {}
+    finder_rows=_rows(finder_obj)
+    light_rows=_rows(finder_obj,'light_rows')
+    tracker_obj=(getattr(v4,'tracker',{}) or {}).get('USA') or {}
+    tracker_rows=_rows(tracker_obj)
+
+    ds=_symset(discovery_rows)
+    ss=_symset(screen_rows)
+    ls=_symset(light_rows)
+    fs=_symset(finder_rows)
+    hs=_symset(tracker_rows)
+
+    dmap={str(r.get('symbol') or '').upper():r for r in discovery_rows}
+    smap={str(r.get('symbol') or '').upper():r for r in screen_rows}
+    lmap={str(r.get('symbol') or '').upper():r for r in light_rows}
+    fmap={str(r.get('symbol') or '').upper():r for r in finder_rows}
+    hmap={str(r.get('symbol') or '').upper():r for r in tracker_rows}
+
+    quote_rows=db.quotes()
+    qmap={str(r.get('symbol') or '').upper():r for r in quote_rows}
+
+    def stage(sym):
+        if sym in hs:return 'HEAVY5'
+        if sym in fs:return 'FINDER'
+        if sym in ls:return 'LIGHT'
+        if sym in ds:return 'DISCOVERY'
+        if sym in ss:return 'SCREENER'
+        return 'NOT_SEEN'
+
+    def reason(sym):
+        if sym in hs:return 'Heavy Tracker active'
+        if sym in fs:return 'Finder TOP5 selected'
+        if sym in ls:
+            r=lmap.get(sym) or {}
+            return f"Light only · score={r.get('finder_score',r.get('score'))} · fresh={r.get('fresh_mode')}"
+        if sym in ds:
+            r=dmap.get(sym) or {}
+            grade=r.get('quality_grade')
+            origin=r.get('origin')
+            risk=r.get('chase_risk')
+            return f"Discovery only · origin={origin} · quality={grade} · risk={risk}"
+        if sym in ss:
+            r=smap.get(sym) or {}
+            return f"Screener only · score={r.get('score')} · eligible={r.get('eligible')}"
+        return 'Not present in current discovery/screener snapshots'
+
+    # Current discovery-source coverage.
+    source_counts={}
+    for r in discovery_rows:
+        src=str(r.get('sources') or '')
+        for s0 in [x.strip() for x in src.split(',') if x.strip()]:
+            source_counts[s0]=source_counts.get(s0,0)+1
+
+    # Best current positive/negative movers among rows we actually know about.
+    union={}
+    for rows in (screen_rows,discovery_rows,extreme_rows,light_rows,finder_rows,tracker_rows):
+        for r in rows or []:
+            sym=str(r.get('symbol') or '').upper()
+            if not sym:continue
+            cur=union.setdefault(sym,{})
+            cur.update({k:v for k,v in r.items() if v is not None})
+            cur['symbol']=sym
+
+    movers=[]
+    for sym,r in union.items():
+        try:chg=float(r.get('change_pct') or 0)
+        except Exception:chg=0.0
+        try:price=float(r.get('price') or (qmap.get(sym) or {}).get('price') or 0)
+        except Exception:price=0.0
+        movers.append({
+            'symbol':sym,
+            'name':r.get('name') or (qmap.get(sym) or {}).get('name') or '',
+            'change_pct':round(chg,3),
+            'price':price,
+            'stage':stage(sym),
+            'reason':reason(sym),
+            'quality':r.get('quality_grade'),
+            'origin':r.get('origin'),
+            'fresh':r.get('fresh_mode'),
+            'finder_score':r.get('finder_score'),
+            'power':(hmap.get(sym) or {}).get('power'),
+            'data_age_sec':_age_seconds(qmap.get(sym) or r),
+        })
+    movers.sort(key=lambda r:abs(r['change_pct']),reverse=True)
+
+    inverse=[]
+    for sym in ('SOXS','SQQQ','SOXL','TQQQ'):
+        r=dmap.get(sym) or smap.get(sym) or lmap.get(sym) or fmap.get(sym) or hmap.get(sym) or qmap.get(sym) or {}
+        inverse.append({
+            'symbol':sym,
+            'stage':stage(sym),
+            'change_pct':r.get('change_pct'),
+            'price':r.get('price'),
+            'finder_score':r.get('finder_score'),
+            'fresh':r.get('fresh_mode'),
+            'power':(hmap.get(sym) or {}).get('power'),
+            'reason':reason(sym),
+        })
+
+    stale=[]
+    for sym,q in qmap.items():
+        age=_age_seconds(q)
+        if age is not None and age>180:
+            stale.append({'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price')})
+    stale.sort(key=lambda x:x['age_sec'],reverse=True)
+
+    return {
+        'market':'USA',
+        'supported':True,
+        'updated_at':datetime.now(timezone.utc).isoformat(),
+        'counts':{
+            'quotes':len(quote_rows),
+            'screener40':len(screen_rows),
+            'discovery':len(discovery_rows),
+            'extreme':len(extreme_rows),
+            'quality_risk':len(quality_risk_rows),
+            'quality_reject':len(quality_reject_rows),
+            'light':len(light_rows),
+            'finder':len(finder_rows),
+            'heavy':len(tracker_rows),
+        },
+        'source_counts':source_counts,
+        'inverse':inverse,
+        'top_abs_movers':movers[:25],
+        'stale_rows':stale[:30],
+        'finder_symbols':sorted(fs),
+        'light_symbols':sorted(ls),
+        'heavy_symbols':sorted(hs),
+        'note':'Coverage diagnostic only. It does not change Finder/Power/ENTRY logic or place orders.'
+    }
+
+
 @app.get('/api/v4/validation/marks')
 def v4_validation_marks(market:str|None=None,limit:int=Query(1000,ge=1,le=5000)):
     return {'data':v4.store.validation_marks(market,limit),'note':'Forward-return marks: +5/+15/+30/+60m and MFE/MAE. Heuristic diagnostics, not probabilities.'}

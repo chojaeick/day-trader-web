@@ -261,16 +261,34 @@ class KiwoomClient:
 
     def minute_chart(self, symbol: str, exchange: str, minutes: int = 1, start_date: str | None = None):
         if start_date is None:
+            # usa06011 is date-scoped: request the current New York trading date.
             et = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
-            start_date = (et.date() - timedelta(days=7)).strftime('%Y%m%d')
-        r = requests.post(self.s.rest_base + '/api/us/chart', headers=self.headers('usa06011'), json={
-            'stex_tp': exchange, 'stk_cd': symbol, 'strt_dt': start_date,
-            'tic_scope': str(minutes), 'upd_stkpc_tp': '0', 'exrt_appl_tp': '1'
-        }, timeout=20)
-        d = r.json()
+            start_date = et.date().strftime('%Y%m%d')
+        def _request(date_str:str):
+            r = requests.post(self.s.rest_base + '/api/us/chart', headers=self.headers('usa06011'), json={
+                'stex_tp': exchange, 'stk_cd': symbol, 'strt_dt': date_str,
+                'tic_scope': str(minutes), 'upd_stkpc_tp': '0', 'exrt_appl_tp': '1'
+            }, timeout=20)
+            return r.json()
+
+        d = _request(start_date)
         if d.get('return_code') != 0:
             raise RuntimeError(f"minute {symbol}/{exchange}: {d.get('return_code')} {d.get('return_msg')}")
-        rows = d.get('result_list') or []; parsed=[]
+
+        rows = d.get('result_list') or []
+        if not rows and start_date:
+            base = datetime.strptime(start_date, '%Y%m%d').date()
+            for delta_days in range(1, 8):
+                candidate = base - timedelta(days=delta_days)
+                if candidate.weekday() >= 5:
+                    continue
+                d2 = _request(candidate.strftime('%Y%m%d'))
+                if d2.get('return_code') == 0 and (d2.get('result_list') or []):
+                    d = d2
+                    rows = d2.get('result_list') or []
+                    break
+
+        parsed=[]
         for x in rows:
             close=abs(num(x.get('cur_prc'))); op=abs(num(x.get('open_pric'))); hi=abs(num(x.get('high_pric'))); lo=abs(num(x.get('low_pric')))
             vol=abs(num(x.get('trde_qty')))

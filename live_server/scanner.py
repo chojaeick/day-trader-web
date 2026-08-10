@@ -10,7 +10,7 @@ def num(v, default=0.0):
 
 def exchange_code(v: str) -> str:
     s=str(v or '').strip().upper()
-    return {'1':'NY','2':'ND','3':'AM','NYSE':'NY','NASDAQ':'ND','AMEX':'AM','NY':'NY','ND':'ND','AM':'AM'}.get(s,'ND')
+    return {'1':'NY','2':'ND','3':'NA','NYSE':'NY','NASDAQ':'ND','AMEX':'NA','NY':'NY','ND':'ND','NA':'NA','AM':'NA'}.get(s,'ND')
 
 def asset_type(name: str) -> str:
     n=str(name or '').upper()
@@ -19,17 +19,6 @@ def asset_type(name: str) -> str:
             return 'LEVERAGED_ETF'
         return 'ETF'
     return 'STOCK'
-
-
-CORE_DISPLAY_NAMES = {
-    'SOXL':'Direxion Daily Semiconductor Bull 3X Shares',
-    'SOXS':'Direxion Daily Semiconductor Bear 3X Shares',
-    'TQQQ':'ProShares UltraPro QQQ',
-    'SQQQ':'ProShares UltraPro Short QQQ',
-    'QQQ':'Invesco QQQ Trust',
-    'SPY':'SPDR S&P 500 ETF Trust',
-    'SMH':'VanEck Semiconductor ETF',
-}
 
 @dataclass
 class DiscoveryResult:
@@ -154,7 +143,7 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
     for sym in reversed(core):
         if sym not in [r['symbol'] for r in picked]:
             picked.insert(0,{
-                'symbol':sym,'exchange':'','name':CORE_DISPLAY_NAMES.get(sym,sym),'price':0,'change_pct':0,
+                'symbol':sym,'exchange':'','name':'CORE','price':0,'change_pct':0,
                 'volume':0,'dollar_volume':0,'volume_rank':9999,'dollar_rank':9999,
                 'gainer_rank':9999,'loser_rank':9999,'surge_rank':9999,'surge_pct':0.0,
                 'sources':{'core'},'chase_risk':'NORMAL','discovery_score':999,

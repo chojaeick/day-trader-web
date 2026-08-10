@@ -1,0 +1,36 @@
+from pathlib import Path
+import sys
+root=Path(sys.argv[1] if len(sys.argv)>1 else '.')
+api_path=root/'live_server'/'api.py'
+app_path=root/'app.py'
+api=api_path.read_text(encoding='utf-8')
+app=app_path.read_text(encoding='utf-8')
+
+if 'critical_stale_rows' in api:
+    raise SystemExit('PATCH ABORTED: V4.6.2.2 API already present; no files changed.')
+if 'Inactive cache stale' in app:
+    raise SystemExit('PATCH ABORTED: V4.6.2.2 UI already present; no files changed.')
+
+for old,new in [
+("    inverse=[]\n    for sym in ('SOXS','SQQQ','SOXL','TQQQ'):\n        r=hmap.get(sym) or fmap.get(sym) or lmap.get(sym) or dmap.get(sym) or emap.get(sym) or qrmap.get(sym) or smap.get(sym) or qmap.get(sym) or {}\n        inverse.append({\n            'symbol':sym,\n            'stage':stage(sym),\n            'change_pct':r.get('change_pct'),\n            'price':r.get('price'),\n            'finder_score':r.get('finder_score'),\n            'fresh':r.get('fresh_mode'),\n            'power':(hmap.get(sym) or {}).get('power'),\n            'reason':reason(sym),\n        })\n\n    stale=[]\n    for sym,q in qmap.items():\n        age=_age_seconds(q)\n        if age is not None and age>180:\n            stale.append({'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price')})\n    stale.sort(key=lambda x:x['age_sec'],reverse=True)\n","    inverse=[]\n    core_etfs={'SOXS','SQQQ','SOXL','TQQQ'}\n    for sym in ('SOXS','SQQQ','SOXL','TQQQ'):\n        meta=hmap.get(sym) or fmap.get(sym) or lmap.get(sym) or dmap.get(sym) or emap.get(sym) or qrmap.get(sym) or smap.get(sym) or {}\n        q=qmap.get(sym) or {}\n\n        # V4.6.2.2: metadata determines pipeline stage, but latest quote wins for\n        # market fields when Discovery carries placeholder 0/None values.\n        def _live_num(key):\n            try:\n                qv=float(q.get(key) or 0)\n            except Exception:\n                qv=0.0\n            if qv!=0:\n                return qv\n            try:\n                return float(meta.get(key) or 0)\n            except Exception:\n                return 0.0\n\n        inverse.append({\n            'symbol':sym,\n            'stage':stage(sym),\n            'change_pct':_live_num('change_pct'),\n            'price':_live_num('price'),\n            'finder_score':(fmap.get(sym) or lmap.get(sym) or {}).get('finder_score'),\n            'fresh':(fmap.get(sym) or lmap.get(sym) or {}).get('fresh_mode'),\n            'power':(hmap.get(sym) or {}).get('power'),\n            'quote_age_sec':_age_seconds(q) if q else None,\n            'reason':reason(sym),\n        })\n\n    # Stale severity:\n    # Critical = current live decision universe OR current Bridge warm targets OR core ETFs.\n    # Inactive cache = old DB quote outside the decision universe.\n    bridge_candidates=[]\n    for r in screen_rows:\n        sym=str(r.get('symbol') or '').upper()\n        if not sym or not r.get('eligible') or sym in ds or sym in es or sym in qrs:\n            continue\n        bridge_candidates.append(r)\n    bridge_candidates.sort(\n        key=lambda r:(float(r.get('score') or 0),abs(float(r.get('change_pct') or 0))),\n        reverse=True\n    )\n    bridge_syms={str(r.get('symbol') or '').upper() for r in bridge_candidates[:8]}\n    critical_syms=set(fs)|set(hs)|bridge_syms|core_etfs\n\n    critical_stale=[]\n    inactive_stale=[]\n    for sym,q in qmap.items():\n        age=_age_seconds(q)\n        if age is None or age<=180:\n            continue\n        row={\n            'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price'),\n            'severity':'CRITICAL' if sym in critical_syms else 'INACTIVE_CACHE'\n        }\n        if sym in critical_syms:\n            critical_stale.append(row)\n        else:\n            inactive_stale.append(row)\n    critical_stale.sort(key=lambda x:x['age_sec'],reverse=True)\n    inactive_stale.sort(key=lambda x:x['age_sec'],reverse=True)\n"),
+("        'inverse':inverse,\n        'top_abs_movers':movers[:25],\n        'stale_rows':stale[:30],\n        'finder_cut':round(finder_cut,1) if finder_cut else None,\n","        'inverse':inverse,\n        'top_abs_movers':movers[:25],\n        'critical_stale_rows':critical_stale[:30],\n        'inactive_stale_rows':inactive_stale[:30],\n        'critical_stale_count':len(critical_stale),\n        'inactive_stale_count':len(inactive_stale),\n        'bridge_warm_symbols':sorted(bridge_syms),\n        'finder_cut':round(finder_cut,1) if finder_cut else None,\n"),
+]:
+    if old not in api:
+        raise SystemExit('PATCH ABORTED: API anchor missing; no files changed.')
+    api=api.replace(old,new,1)
+
+for old,new in [
+('            stale=pd.DataFrame(cov.get(\'stale_rows\') or [])\n            if len(stale):\n                st.warning(f"3분 초과 stale quote {len(stale)}개가 감지되었습니다. 아래 표는 최대 30개입니다.")\n                st.dataframe(stale,use_container_width=True,hide_index=True)\n            else:\n                st.success(\'현재 저장 quote 기준 3분 초과 stale 데이터가 감지되지 않았습니다.\')\n','            critical_stale=pd.DataFrame(cov.get(\'critical_stale_rows\') or [])\n            inactive_stale=pd.DataFrame(cov.get(\'inactive_stale_rows\') or [])\n            if len(critical_stale):\n                st.error(\n                    f"⚠️ 현재 의사결정 대상에서 3분 초과 stale quote "\n                    f"{cov.get(\'critical_stale_count\',len(critical_stale))}개가 감지되었습니다."\n                )\n                st.dataframe(critical_stale,use_container_width=True,hide_index=True)\n            else:\n                st.success(\'현재 Finder/Heavy/Bridge warm/핵심 ETF에서 3분 초과 stale quote가 없습니다.\')\n\n            if len(inactive_stale):\n                with st.expander(f"Inactive cache stale · {cov.get(\'inactive_stale_count\',len(inactive_stale))}개"):\n                    st.caption(\'현재 의사결정 대상이 아닌 과거 DB quote입니다. 실시간 장애 경고에는 포함하지 않습니다.\')\n                    st.dataframe(inactive_stale,use_container_width=True,hide_index=True)\n'),
+("                st.caption('Fair Guard: SHADOW_UNKNOWN은 recent_bars≥6 + price>0일 때만 Shadow Finder에 들어갈 수 있습니다. 품질정보 누락 종목에는 Quality 보너스를 주지 않습니다.')\n","                ready_n=int(bridge.get('data_ready_misses',0) or 0)\n                poor_n=int(bridge.get('insufficient_data_misses',0) or 0)\n                if poor_n:\n                    st.warning(f'Fair Bridge 데이터 준비 상태 · READY {ready_n} / INSUFFICIENT {poor_n}')\n                else:\n                    st.success(f'Fair Bridge 데이터 준비 완료 · READY {ready_n} / INSUFFICIENT 0')\n                st.caption('Fair Guard: SHADOW_UNKNOWN은 recent_bars≥6 + price>0일 때만 Shadow Finder에 들어갈 수 있습니다. 품질정보 누락 종목에는 Quality 보너스를 주지 않습니다.')\n"),
+]:
+    if old not in app:
+        raise SystemExit('PATCH ABORTED: app anchor missing; no files changed.')
+    app=app.replace(old,new,1)
+
+if "st.caption('V4.6.2.1 · CANDIDATE DATA WARM + FAIR BRIDGE AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')" in app:
+    app=app.replace("st.caption('V4.6.2.1 · CANDIDATE DATA WARM + FAIR BRIDGE AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')","st.caption('V4.6.2.2 · DATA CONSISTENCY FIX · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')",1)
+
+api_path.write_text(api,encoding='utf-8')
+app_path.write_text(app,encoding='utf-8')
+print('PATCHED:',api_path)
+print('PATCHED:',app_path)

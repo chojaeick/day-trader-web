@@ -283,7 +283,7 @@ class CleanEngine:
             if db is None:
                 return {
                     'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
-                    'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,
+                    'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,'volume_coverage_10m':0.0,
                     'break_3m_high':False,'fresh_score':0.0,
                     'fresh_mover':False,'fresh_mode':'WATCH','bars':0,'score':0.0
                 }
@@ -293,7 +293,7 @@ class CleanEngine:
                 if len(b)<6:
                     return {
                         'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
-                        'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,
+                        'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,'volume_coverage_10m':0.0,
                         'break_3m_high':False,'fresh_score':0.0,
                         'fresh_mover':False,'fresh_mode':'WATCH','bars':len(b),'score':0.0
                     }
@@ -315,12 +315,25 @@ class CleanEngine:
                     prior_slice=volume.iloc[-13:-3]
                 else:
                     prior_slice=volume.iloc[:-3]
-                prior_vol=_f(prior_slice.median(),0) if len(prior_slice) else 0
-                vacc=recent_vol/max(prior_vol,1.0)
 
-                # Do not let a near-empty historical baseline create an absurd ratio.
-                # Keep this diagnostic ratio bounded; it is used for ranking, not as a probability.
-                vacc=_clip(vacc,0,12)
+                prior_pos=prior_slice[prior_slice>0]
+                coverage=(len(prior_pos)/max(len(prior_slice),1)) if len(prior_slice) else 0.0
+
+                if len(prior_pos)>=4:
+                    prior_med=_f(prior_pos.median(),0)
+                    prior_mean=_f(prior_pos.mean(),0)
+                    # Median is robust, mean*0.40 prevents a tiny median after sparse synthetic bars.
+                    prior_vol=max(prior_med,prior_mean*0.40,1.0)
+                    vacc=recent_vol/prior_vol
+                else:
+                    prior_vol=0.0
+                    vacc=1.0
+
+                # Sparse volume history is not trustworthy enough for a "burst" claim.
+                if coverage<0.50:
+                    vacc=min(vacc,1.25)
+
+                vacc=_clip(vacc,0,6)
 
                 highs=pd.to_numeric(b['high'],errors='coerce')
                 prev3_high=_f(highs.iloc[-4:-1].max(),0) if len(highs)>=4 else 0
@@ -364,12 +377,14 @@ class CleanEngine:
                 fresh=_clip(fresh,-15,40)
 
                 continuation_path=bool(
+                    coverage>=0.50 and
                     r3>=0.25 and
                     r5>=0.30 and
                     vacc>=1.10 and
                     fresh>=15
                 )
                 breakout_path=bool(
+                    coverage>=0.50 and
                     r1>=0.12 and
                     r3>=0.18 and
                     break3 and
@@ -411,6 +426,7 @@ class CleanEngine:
                     'vol_accel':round(vacc,2),
                     'recent_vol_3m':round(recent_vol,2),
                     'prior_vol_median_10m':round(prior_vol,2),
+                    'volume_coverage_10m':round(coverage,2),
                     'break_3m_high':break3,
                     'fresh_score':round(fresh,1),
                     'fresh_mover':fresh_mover,
@@ -420,7 +436,7 @@ class CleanEngine:
             except Exception:
                 return {
                     'ret_1m':0.0,'ret_3m':0.0,'ret_5m':0.0,'ret_15m':0.0,
-                    'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,
+                    'vol_accel':1.0,'recent_vol_3m':0.0,'prior_vol_median_10m':0.0,'volume_coverage_10m':0.0,
                     'break_3m_high':False,'fresh_score':0.0,
                     'fresh_mover':False,'fresh_mode':'WATCH','bars':0,'score':0.0
                 }
@@ -452,7 +468,12 @@ class CleanEngine:
             # Fresh movement is intentionally separate from daily momentum.
             # This lets a +1~3% stock that just accelerated compete with an
             # earlier +10% winner that is now flat/fading.
-            fresh_bonus=max(0.0,_f(recent.get('fresh_score')))
+            raw_fresh=max(0.0,_f(recent.get('fresh_score')))
+            if recent.get('fresh_mover'):
+                fresh_bonus=raw_fresh
+            else:
+                # WATCH diagnostics should not dominate Finder ranking.
+                fresh_bonus=min(4.0,raw_fresh*0.20)
             score+=fresh_bonus
 
             # We do not auto-short common stocks. A negative common-stock move should not
@@ -527,6 +548,7 @@ class CleanEngine:
                 'fresh_mode':recent.get('fresh_mode'),
                 'recent_vol_3m':recent.get('recent_vol_3m'),
                 'prior_vol_median_10m':recent.get('prior_vol_median_10m'),
+                'volume_coverage_10m':recent.get('volume_coverage_10m'),
                 'observed_power':observed_power,'fade_penalty':round(fade_penalty,1),
                 'extreme_continue':extreme_continue,
                 'extreme_watch':quality=='C_HIGH_RISK',

@@ -18,6 +18,43 @@ def f(v,d=0):
 def sko(s):return {'REGULAR':'정규장 거래중','PREMARKET':'프리마켓','AFTER':'애프터마켓','PREOPEN':'장 시작 전','CLOSED':'장 마감'}.get(str(s),str(s or '-'))
 def stko(s):return {'WATCH':'관찰','SETUP':'준비','READY':'진입 준비','ENTRY':'진입 신호','HOLD':'보유 유지','TAKE_PROFIT':'일부 익절 검토','REDUCE':'비중 축소','EXIT':'청산','STOP':'손절','DATA_INVALID':'데이터 오류'}.get(str(s),str(s or '-'))
 def rko(s):return {'NORMAL':'정상','CHASE':'추격주의','HIGH':'고위험','PENDING':'대기'}.get(str(s),str(s or '-'))
+def _focus_bars(rows, minutes_back):
+    if not rows:return []
+    try:
+        df=pd.DataFrame(rows)
+        tcol='time' if 'time' in df.columns else ('ts' if 'ts' in df.columns else None)
+        if not tcol:return rows[-120:]
+        df[tcol]=pd.to_datetime(df[tcol],utc=True,errors='coerce')
+        df=df.dropna(subset=[tcol]).sort_values(tcol)
+        if df.empty:return rows[-120:]
+        cut=df[tcol].iloc[-1]-pd.Timedelta(minutes=minutes_back)
+        return df[df[tcol]>=cut].to_dict('records')
+    except Exception:
+        return rows[-120:]
+
+def _chart_frame(rows):
+    if not rows:return None
+    try:
+        df=pd.DataFrame(rows)
+        tcol='time' if 'time' in df.columns else ('ts' if 'ts' in df.columns else None)
+        if not tcol or 'close' not in df.columns:return None
+        df[tcol]=pd.to_datetime(df[tcol],utc=True,errors='coerce')
+        df=df.dropna(subset=[tcol]).sort_values(tcol)
+        if df.empty:return None
+        close=pd.to_numeric(df['close'],errors='coerce')
+        vol=pd.to_numeric(df.get('volume',0),errors='coerce').fillna(0)
+        high=pd.to_numeric(df.get('high',close),errors='coerce').fillna(close)
+        low=pd.to_numeric(df.get('low',close),errors='coerce').fillna(close)
+        tp=(high+low+close)/3
+        cv=vol.cumsum()
+        df['VWAP']=(tp*vol).cumsum()/cv.replace(0,pd.NA)
+        df['EMA9']=close.ewm(span=9,adjust=False).mean()
+        df['EMA20']=close.ewm(span=20,adjust=False).mean()
+        df['Price']=close
+        return df[[tcol,'Price','VWAP','EMA9','EMA20']].rename(columns={tcol:'time'}).set_index('time')
+    except Exception:
+        return None
+
 def px(v,m):
     if v in (None,''):return '-'
     try:return f'${float(v):,.2f}' if m=='USA' else f'{float(v):,.0f}원'
@@ -72,14 +109,18 @@ with t[0]:
                 for k,v in (gate.get('setup_checks') or {}).items(): checks.append(('✅' if v else '⬜')+' '+labels.get(k,k))
                 for k,v in (gate.get('trigger_checks') or {}).items(): checks.append(('✅' if v else '⬜')+' '+labels.get(k,k))
                 st.caption(' · '.join(checks))
-            b1=api(f'/api/bars/{sel}?minutes=1&limit=120').get('data') or []; b5=api(f'/api/bars/{sel}?minutes=5&limit=120').get('data') or []; c1,c2=st.columns(2)
+            b1=api(f'/api/bars/{sel}?minutes=1&limit=240').get('data') or []
+            b5=api(f'/api/bars/{sel}?minutes=5&limit=240').get('data') or []
+            b1f=_focus_bars(b1,60); b5f=_focus_bars(b5,180); c1,c2=st.columns(2)
             with c1:
-                st.caption('1분봉 · Trigger');
-                if b1:df=pd.DataFrame(b1); df['time']=pd.to_datetime(df['time']); st.line_chart(df.set_index('time')['close'],height=250)
+                st.caption('1분봉 · Trigger · 최근 60분')
+                cf1=_chart_frame(b1f)
+                if cf1 is not None and len(cf1):st.line_chart(cf1,height=260)
                 else:st.info('1분봉 데이터 준비 중')
             with c2:
-                st.caption('5분봉 · Setup');
-                if b5:df=pd.DataFrame(b5); df['time']=pd.to_datetime(df['time']); st.line_chart(df.set_index('time')['close'],height=250)
+                st.caption('5분봉 · Setup · 최근 3시간')
+                cf5=_chart_frame(b5f)
+                if cf5 is not None and len(cf5):st.line_chart(cf5,height=260)
                 else:st.info('5분봉 데이터 준비 중')
         controls(m,r)
     else:st.warning('Tracker 데이터가 아직 없습니다. 서버 시작 직후라면 수 초 후 자동 생성됩니다.')

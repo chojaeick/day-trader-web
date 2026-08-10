@@ -404,14 +404,56 @@ class KiwoomClient:
         return inserted, len(rows)
 
     async def backfill_forever_once(self):
+        """V4.3.3 periodic live-bar recovery for USA regular session."""
         await asyncio.sleep(1.0)
-        for symbol in self.s.symbols:
+        last_regular_run=0.0
+        closed_bootstrap_done=False
+
+        while True:
             try:
-                inserted,bars=self.backfill_symbol(symbol,self.active_exchange(symbol),80)
-                log.info('minute backfill %s: bars=%s inserted=%s',symbol,bars,inserted)
+                et=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+                regular=(et.weekday()<5 and (et.hour,et.minute)>=(9,30) and (et.hour,et.minute)<(16,0))
+
+                if not regular:
+                    if not closed_bootstrap_done:
+                        for symbol in tuple(self.s.symbols)[:8]:
+                            try:
+                                inserted,bars=await asyncio.to_thread(
+                                    self.backfill_symbol,symbol,self.active_exchange(symbol),80
+                                )
+                                log.info('minute backfill %s: bars=%s inserted=%s',symbol,bars,inserted)
+                            except Exception as e:
+                                log.warning('minute backfill %s: %s',symbol,e)
+                            await asyncio.sleep(0.35)
+                        closed_bootstrap_done=True
+                    await asyncio.sleep(30)
+                    continue
+
+                closed_bootstrap_done=False
+                now_ts=asyncio.get_running_loop().time()
+                if last_regular_run and now_ts-last_regular_run < 55:
+                    await asyncio.sleep(5)
+                    continue
+
+                # Keep the fallback intentionally small to limit REST load.
+                for symbol in tuple(self.s.symbols)[:8]:
+                    try:
+                        inserted,bars=await asyncio.to_thread(
+                            self.backfill_symbol,symbol,self.active_exchange(symbol),40
+                        )
+                        log.info('live minute recovery %s: bars=%s inserted=%s',symbol,bars,inserted)
+                    except Exception as e:
+                        log.warning('live minute recovery %s: %s',symbol,e)
+                    await asyncio.sleep(0.25)
+
+                last_regular_run=now_ts
+
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                log.warning('minute backfill %s: %s',symbol,e)
-            await asyncio.sleep(0.35)
+                log.exception('live minute recovery loop error: %s',e)
+
+            await asyncio.sleep(5)
 
     def _extract_f5(self, msg: dict):
         for row in msg.get('data') or []:

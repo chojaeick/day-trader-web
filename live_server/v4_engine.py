@@ -330,7 +330,7 @@ class CleanEngine:
 
         for c in candidates or []:
             sym=str(c.get('symbol') or '').upper(); q=qmap.get(sym) or {}; quality=q.get('quality_grade')
-            if quality not in ('A','B_EVENT'):continue
+            if quality not in ('A','B_EVENT','C_HIGH_RISK'):continue
             price=_f(c.get('price')); dv=_f(c.get('dollar_volume')); rvol=_f(c.get('rvol')); atr=abs(_f(c.get('atr_pct'))); chg=_f(c.get('change_pct'))
             if price<5 or dv<20_000_000 or atr<=0 or atr>12:continue
 
@@ -338,8 +338,8 @@ class CleanEngine:
             act=_clip((rvol-.5)/2.5*25,0,25)
             vol=20 if 2<=atr<=7 else 14 if 1<=atr<=10 else 7
             directional=_clip(abs(chg)/8*15,0,15)
-            qp=15 if quality=='A' else 9
-            chase=12 if abs(chg)>=15 else 6 if abs(chg)>=10 else 0
+            qp=15 if quality=='A' else 9 if quality=='B_EVENT' else 0
+            chase=18 if quality=='C_HIGH_RISK' else 12 if abs(chg)>=15 else 6 if abs(chg)>=10 else 0
             base=_clip(liq+act+vol+directional+qp-chase,0,100)
 
             # Make Finder responsive to the current tape instead of mostly static
@@ -387,16 +387,29 @@ class CleanEngine:
             if inverse_bonus:
                 reason+=f" + {regime} inverse {inverse_bonus:.0f}"
 
+            extreme_continue=True
+            if quality=='C_HIGH_RISK':
+                # Extreme movers are visible in Light20, but Heavy5 requires evidence
+                # that the move is still alive NOW. Thresholds are hypotheses for validation.
+                extreme_continue=bool(
+                    recent.get('bars',0)>=6 and
+                    _f(recent.get('ret_5m'))>=0.25 and
+                    _f(recent.get('vol_accel'),1)>=1.10 and
+                    fade_penalty<=3
+                )
+                reason+=(" + extreme continuing" if extreme_continue else " + extreme watch-only")
+
             rows.append({
                 'market':'USA','symbol':sym,'name':q.get('name') or c.get('name') or sym,
                 'quality':quality,'finder_score':round(_clip(score,0,100),1),
                 'direction':'UP' if chg>=0 else 'DOWN','price':price,'change_pct':chg,
                 'dollar_volume':dv,'rvol':rvol,'atr_pct':atr,
-                'risk':'CHASE' if chase else 'NORMAL',
+                'risk':'EXTREME' if quality=='C_HIGH_RISK' else 'CHASE' if chase else 'NORMAL',
                 'market_regime':regime,'finder_reason':reason,
                 'ret_5m':recent.get('ret_5m'),'ret_15m':recent.get('ret_15m'),
                 'volume_accel':recent.get('vol_accel'),'recent_score':recent.get('score'),
                 'observed_power':observed_power,'fade_penalty':round(fade_penalty,1),
+                'extreme_continue':extreme_continue,
                 'inverse_candidate':sym in inverse_syms
             })
 
@@ -407,8 +420,14 @@ class CleanEngine:
         for i,r in enumerate(light_rows,1):
             r['light_rank']=i
 
-        # Heavy Tracker receives only the best 5 from Light20.
-        selected=light_rows[:limit]
+        # Heavy Tracker receives the best 5 actionable names from Light20.
+        # C_HIGH_RISK names remain visible in Light20; they can enter Heavy5 only
+        # while the strict continuation test is true.
+        heavy_pool=[
+            r for r in light_rows
+            if r.get('quality')!='C_HIGH_RISK' or r.get('extreme_continue')
+        ]
+        selected=heavy_pool[:limit]
 
         # A bearish regime must not silently hide a qualified inverse ETF.
         if regime in ('BEAR','STRONG_BEAR'):

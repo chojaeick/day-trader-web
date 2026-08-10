@@ -138,15 +138,39 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
 
     eligible=q_eligible
     eligible.sort(key=lambda r:(r['discovery_score'],r['dollar_volume'],r['volume']), reverse=True)
+    # V4.4: market-first discovery.
+    # Keep the strongest AUTO candidates first. Core instruments remain guaranteed
+    # in the universe, but they no longer occupy the front of the list merely
+    # because they were hard-coded. This prevents a watchlist-biased Finder.
     picked=eligible[:limit]
 
-    for sym in reversed(core):
+    # V4.4.2: do not hide verified extreme movers.
+    # They remain C_HIGH_RISK / EXTREME and are NOT converted to normal-quality names.
+    # A small capped set is inserted into the active universe so the live engine can
+    # collect quotes/minute bars and decide whether momentum is continuing or fading.
+    extreme_watch=[]
+    for r in extreme_rows[:10]:
+        d=dict(r)
+        d['sources']=','.join(sorted(d.get('sources') or [])) if isinstance(d.get('sources'),set) else d.get('sources')
+        d['origin']='EXTREME_WATCH'
+        d['quality_grade']='C_HIGH_RISK'
+        d['quality_reasons']='EXTREME_MOVE'
+        d['chase_risk']='EXTREME'
+        extreme_watch.append(d)
+
+    existing={r['symbol'] for r in picked}
+    for r in extreme_watch:
+        if r.get('symbol') and r['symbol'] not in existing:
+            picked.append(r)
+            existing.add(r['symbol'])
+
+    for sym in core:
         if sym not in [r['symbol'] for r in picked]:
-            picked.insert(0,{
+            picked.append({
                 'symbol':sym,'exchange':'','name':'CORE','price':0,'change_pct':0,
                 'volume':0,'dollar_volume':0,'volume_rank':9999,'dollar_rank':9999,
                 'gainer_rank':9999,'loser_rank':9999,'surge_rank':9999,'surge_pct':0.0,
-                'sources':{'core'},'chase_risk':'NORMAL','discovery_score':999,
+                'sources':{'core'},'chase_risk':'NORMAL','discovery_score':0,
                 'asset_type':'LEVERAGED_ETF' if sym in ('SOXL','SOXS','TQQQ','SQQQ') else 'ETF',
                 'quality_grade':'B_EVENT' if sym in ('SOXL','SOXS','TQQQ','SQQQ') else 'A',
                 'quality_reasons':'LEVERAGED_ETF' if sym in ('SOXL','SOXS','TQQQ','SQQQ') else 'CORE_LIQUID_ETF',

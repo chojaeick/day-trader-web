@@ -107,9 +107,9 @@ def _price_volume_chart(rows, title, height=250):
                     format='%H:%M',
                     labelAngle=0,
                     grid=True,
-                    gridOpacity=0.14,
-                    domainOpacity=0.25,
-                    tickOpacity=0.25
+                    gridOpacity=0.08,
+                    domainOpacity=0.18,
+                    tickOpacity=0.18
                 )
             ),
             y=alt.Y(
@@ -118,9 +118,9 @@ def _price_volume_chart(rows, title, height=250):
                 scale=alt.Scale(domain=domain,zero=False),
                 axis=alt.Axis(
                     grid=True,
-                    gridOpacity=0.14,
-                    domainOpacity=0.25,
-                    tickOpacity=0.25
+                    gridOpacity=0.08,
+                    domainOpacity=0.18,
+                    tickOpacity=0.18
                 )
             ),
             color=alt.Color('Series:N',title=None),
@@ -128,7 +128,7 @@ def _price_volume_chart(rows, title, height=250):
                 'Series:N',
                 scale=alt.Scale(
                     domain=['Price','VWAP','EMA9','EMA20'],
-                    range=[3.0,2.4,1.35,1.1]
+                    range=[3.2,2.4,0.9,0.7]
                 ),
                 legend=None
             ),
@@ -136,7 +136,7 @@ def _price_volume_chart(rows, title, height=250):
                 'Series:N',
                 scale=alt.Scale(
                     domain=['Price','VWAP','EMA9','EMA20'],
-                    range=[1.0,0.95,0.78,0.68]
+                    range=[1.0,0.95,0.55,0.42]
                 ),
                 legend=None
             ),
@@ -155,8 +155,8 @@ def _price_volume_chart(rows, title, height=250):
                     format='%H:%M',
                     labelAngle=0,
                     grid=False,
-                    domainOpacity=0.22,
-                    tickOpacity=0.22
+                    domainOpacity=0.16,
+                    tickOpacity=0.16
                 )
             ),
             y=alt.Y(
@@ -164,9 +164,9 @@ def _price_volume_chart(rows, title, height=250):
                 title='거래량',
                 axis=alt.Axis(
                     grid=True,
-                    gridOpacity=0.10,
-                    domainOpacity=0.22,
-                    tickOpacity=0.22
+                    gridOpacity=0.06,
+                    domainOpacity=0.16,
+                    tickOpacity=0.16
                 )
             ),
             tooltip=[

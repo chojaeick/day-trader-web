@@ -539,6 +539,13 @@ def v4_validation_episodes(market:str|None=None,limit:int=Query(5000,ge=1,le=100
         'note':'Signal episodes derived from minute validation snapshots. Brief inactive flickers are bridged; episode count is closer to independent signal cycles than raw snapshot count.'
     }
 
+@app.get('/api/v4/validation/stage-anchors')
+def v4_validation_stage_anchors(market:str|None=None,limit:int=Query(5000,ge=1,le=10000),bridge_minutes:int=Query(5,ge=1,le=15)):
+    return {
+        'data':v4.store.validation_stage_anchors(market,limit,bridge_minutes),
+        'note':'First SETUP / READY / ENTRY marks within each signal Episode, with their own forward returns and MFE/MAE.'
+    }
+
 @app.get('/health')
 def health():
     qs=db.quotes()

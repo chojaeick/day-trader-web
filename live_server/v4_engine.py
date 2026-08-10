@@ -338,6 +338,70 @@ class V4Store:
         for i,e in enumerate(episodes,1):e['episode_id']=i
         return episodes
 
+    def validation_stage_anchors(self,market=None,limit=5000,bridge_minutes=5):
+        # First SETUP / READY / ENTRY mark inside each derived Episode.
+        marks=self.validation_marks(market,limit)
+        episodes=self.validation_episodes(market,limit,bridge_minutes)
+        if not marks or not episodes:return []
+
+        def dt(v):
+            try:
+                x=datetime.fromisoformat(str(v).replace('Z','+00:00'))
+                return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+            except Exception:return None
+
+        by_symbol={}
+        for r in marks:
+            sym=str(r.get('symbol') or '').upper()
+            if sym:by_symbol.setdefault(sym,[]).append(r)
+        for sym in by_symbol:
+            by_symbol[sym].sort(key=lambda r:str(r.get('ts') or ''))
+
+        out=[]
+        targets=('SETUP','READY','ENTRY')
+        for ep in episodes:
+            sym=str(ep.get('symbol') or '').upper()
+            start=dt(ep.get('start_ts')); end=dt(ep.get('end_ts'))
+            if not sym or not start or not end:continue
+            window=[]
+            for r in by_symbol.get(sym,[]):
+                t=dt(r.get('ts'))
+                if t and start<=t<=end:window.append(r)
+            if not window:continue
+
+            for stage in targets:
+                hit=next((r for r in window if str(r.get('state') or '').upper()==stage),None)
+                if not hit:continue
+                ht=dt(hit.get('ts'))
+                delay=((ht-start).total_seconds()/60) if ht else 0.0
+                out.append({
+                    'episode_id':ep.get('episode_id'),
+                    'market':hit.get('market'),
+                    'symbol':sym,
+                    'stage':stage,
+                    'stage_ts':hit.get('ts'),
+                    'minutes_from_episode_start':round(max(0.0,delay),1),
+                    'anchor_price':hit.get('anchor_price'),
+                    'power':hit.get('power'),
+                    'power_delta':hit.get('power_delta'),
+                    'finder_rank':hit.get('finder_rank'),
+                    'setup_count':hit.get('setup_count'),
+                    'trigger_count':hit.get('trigger_count'),
+                    'rvol':hit.get('rvol'),
+                    'volume_ratio':hit.get('volume_ratio'),
+                    'ret_5m':hit.get('ret_5m'),
+                    'ret_15m':hit.get('ret_15m'),
+                    'ret_30m':hit.get('ret_30m'),
+                    'ret_60m':hit.get('ret_60m'),
+                    'mfe_pct':hit.get('mfe_pct'),
+                    'mae_pct':hit.get('mae_pct'),
+                    'settled_at':hit.get('settled_at'),
+                    'settled':hit.get('ret_60m') is not None,
+                })
+
+        out.sort(key=lambda r:str(r.get('stage_ts') or ''),reverse=True)
+        return out
+
     def validation_marks(self,market=None,limit=1000):
         sql='SELECT id,ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,setup_count,trigger_count,rvol,volume_ratio,hard_floor,warning_floor,floor_mode,ret_5m,ret_15m,ret_30m,ret_60m,mfe_pct,mae_pct,settled_at FROM v4_validation_marks'; args=[]
         if market:sql+=' WHERE market=?'; args=[market.upper()]

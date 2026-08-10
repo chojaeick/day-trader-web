@@ -171,6 +171,8 @@ class V4Store:
             migrations=[('initial_floor','REAL'),('current_floor','REAL'),('warning_floor','REAL'),('high_watermark','REAL'),('floor_mode','TEXT'),('entry_power','REAL'),('partial_exit_done','INTEGER NOT NULL DEFAULT 0')]
             for name,ctype in migrations:
                 if name not in cols:c.execute(f"ALTER TABLE v4_positions ADD COLUMN {name} {ctype}")
+            # V4.3.1: remove closed-session validation contamination from V4.3.
+            c.execute("DELETE FROM v4_validation_marks WHERE floor_mode='REFERENCE_ONLY'")
     def positions(self,market=None):
         sql="SELECT * FROM v4_positions WHERE status='OPEN'"; args=[]
         if market: sql+=' AND market=?'; args=[market.upper()]
@@ -444,8 +446,12 @@ class CleanEngine:
             elif pr is not None and abs(pr-trank)>=RANK_ALERT_DELTA:self.store.event(market,sym,'TRACKER_RANK_MOVE',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} 실시간 순위 {pr}→{trank}',payload=r)
             self._last[(market,sym)]={'state':state,'power':power}; self._last[('POWER',market,sym)]={'power':power}; self._rank[(market,sym)]=trank; minute=r['updated_at'][:16]
             if self._snap.get((market,sym))!=minute:
-                self.store.snapshot(r); self.store.add_validation_mark(r); self._snap[(market,sym)]=minute
-            self.store.update_validation_outcomes(market,sym,_f(r.get('price')))
+                self.store.snapshot(r)
+                if market=='USA' and r.get('session')=='REGULAR' and (r.get('data_integrity') or {}).get('valid'):
+                    self.store.add_validation_mark(r)
+                self._snap[(market,sym)]=minute
+            if market=='USA' and r.get('session')=='REGULAR' and (r.get('data_integrity') or {}).get('valid'):
+                self.store.update_validation_outcomes(market,sym,_f(r.get('price')))
         sess=_session(market)
         self.tracker[market]={'rows':rows,'updated_at':_now(),'session':sess,'tracked_count':len(rows),'max_tracked':TRACK_LIMIT,'is_live':sess=='REGULAR','power_basis':'LIVE_REGULAR' if sess=='REGULAR' else 'LAST_AVAILABLE_REFERENCE','policy':'OPEN POSITIONS first; remaining slots use live readiness/power, then Finder rank. Maximum 5 heavy-tracked symbols.'}
     def status(self,market):

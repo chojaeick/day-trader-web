@@ -17,7 +17,7 @@ def f(v,d=0):
     try:return float(v)
     except Exception:return d
 def sko(s):return {'REGULAR':'정규장 거래중','PREMARKET':'프리마켓','AFTER':'애프터마켓','PREOPEN':'장 시작 전','CLOSED':'장 마감'}.get(str(s),str(s or '-'))
-def stko(s):return {'WATCH':'관찰','SETUP':'준비','READY':'진입 준비','ENTRY':'진입 신호','HOLD':'보유 유지','TAKE_PROFIT':'일부 익절 검토','REDUCE':'비중 축소','EXIT':'청산','STOP':'손절','DATA_INVALID':'데이터 오류'}.get(str(s),str(s or '-'))
+def stko(s):return {'WATCH':'관찰','SETUP':'준비','READY':'진입 준비','ENTRY':'진입 신호','HOLD':'보유 유지','PARTIAL_EXIT':'부분익절','EXIT_READY':'청산 준비','HARD_EXIT':'즉시 청산','DATA_INVALID':'데이터 오류'}.get(str(s),str(s or '-'))
 def rko(s):return {'NORMAL':'정상','CHASE':'추격주의','HIGH':'고위험','PENDING':'대기'}.get(str(s),str(s or '-'))
 def _focus_bars(rows, minutes_back):
     if not rows:return []
@@ -128,17 +128,17 @@ def _price_volume_chart(rows, title, height=250):
                 'Series:N',
                 scale=alt.Scale(
                     domain=['Price','VWAP','EMA9','EMA20'],
-                    range=[3.2,2.4,0.9,0.7]
+                    range=[3.2,2.4,0.75,0.55]
                 ),
                 legend=None
             ),
             opacity=alt.Opacity(
                 'Series:N',
-                scale=alt.Scale(
-                    domain=['Price','VWAP','EMA9','EMA20'],
-                    range=[1.0,0.95,0.55,0.42]
-                ),
-                legend=None
+                scale=alt.Scale(domain=['Price','VWAP','EMA9','EMA20'],range=[1.0,0.95,0.48,0.36]),legend=None
+            ),
+            strokeDash=alt.StrokeDash(
+                'Series:N',
+                scale=alt.Scale(domain=['Price','VWAP','EMA9','EMA20'],range=[[1,0],[1,0],[6,4],[2,4]]),legend=None
             ),
             tooltip=[
                 alt.Tooltip(f'{tcol}:T',title='시간'),
@@ -210,8 +210,14 @@ with t[0]:
     if not live_now: st.caption('현재 장중 실시간 값이 아니라 마지막 사용 가능한 시장 데이터 기준 참고값입니다.')
     if rows:
         st.dataframe(pd.DataFrame([{'실시간순위':r.get('tracker_rank') or '-','Finder순위':r.get('finder_rank') or '-','종목':r.get('symbol'),'종목명':r.get('name'),'상태':stko(r.get('state')),'방향':r.get('direction'),'힘':r.get('power_label') or '-','Power':r.get('power'),'ΔPower':r.get('power_delta'),'위험':rko(r.get('risk')),'데이터':('정상' if (r.get('data_integrity') or {}).get('valid',True) else 'INVALID'),'현재가':r.get('price'),'보유':'YES' if r.get('position_open') else '','핵심 이유':r.get('reason')} for r in rows]),use_container_width=True,hide_index=True)
-        pri={'STOP':0,'EXIT':1,'REDUCE':2,'TAKE_PROFIT':3,'ENTRY':4,'READY':5,'SETUP':6,'HOLD':7,'WATCH':8,'DATA_INVALID':99}; lead=sorted(rows,key=lambda r:(pri.get(r.get('state'),99),-abs(f(r.get('power')))))[0]; st.markdown('### 🚨 지금 가장 중요한 행동' if live_now else '### 📌 마지막 상태 요약'); st.info(f"{'장 마감 참고 · ' if not live_now else ''}{lead.get('name')} ({lead.get('symbol')}) · **{stko(lead.get('state'))}** · {lead.get('power_label') or ''} Power {f(lead.get('power')):+.0f} ({f(lead.get('power_delta')):+.0f}) · {lead.get('reason')}")
+        pri={'HARD_EXIT':0,'EXIT_READY':1,'PARTIAL_EXIT':2,'ENTRY':3,'READY':4,'SETUP':5,'HOLD':6,'WATCH':7,'DATA_INVALID':99}; lead=sorted(rows,key=lambda r:(pri.get(r.get('state'),99),-abs(f(r.get('power')))))[0]; st.markdown('### 🚨 지금 가장 중요한 행동' if live_now else '### 📌 마지막 상태 요약'); st.info(f"{'장 마감 참고 · ' if not live_now else ''}{lead.get('name')} ({lead.get('symbol')}) · **{stko(lead.get('state'))}** · {lead.get('power_label') or ''} Power {f(lead.get('power')):+.0f} ({f(lead.get('power_delta')):+.0f}) · {lead.get('reason')}")
         sel=st.selectbox('종목 상세',[r['symbol'] for r in rows],format_func=lambda x:next((f"{r.get('name')} ({x})" for r in rows if r['symbol']==x),x)); r=next(x for x in rows if x['symbol']==sel); q1,q2,q3,q4,q5=st.columns(5); q1.metric('상태',stko(r.get('state'))); q2.metric(r.get('power_label') or 'Power',f"{f(r.get('power')):+.0f}",delta=f"{f(r.get('power_delta')):+.0f}"); q3.metric('현재가',px(r.get('price'),m)); q4.metric('Floor 모드',r.get('floor_mode') or '-'); q5.metric('위험',rko(r.get('risk')))
+        pg=r.get('position_gate') or {}
+        if r.get('position_open') and pg:
+            st.markdown('#### 🛡️ Position Manager')
+            p1,p2,p3,p4,p5=st.columns(5); p1.metric('포지션 상태',stko(pg.get('state'))); p2.metric('현재 R',f"{f(pg.get('profit_r')):.2f}R"); p3.metric('초기 Floor',px(pg.get('initial_floor'),m)); p4.metric('현재 Hard Floor',px(pg.get('hard_floor'),m)); p5.metric('Floor 단계',pg.get('floor_mode') or '-')
+            if pg.get('suggested_exit_pct'):st.warning(f"수동 대응 제안: {int(f(pg.get('suggested_exit_pct')))}% 정리 검토 · {pg.get('reason')}")
+            else:st.caption(pg.get('reason') or '보유 관리 중')
         if m=='USA':
             di=r.get('data_integrity') or {}
             if not di.get('valid',True):
@@ -264,10 +270,15 @@ with t[1]:
         if rr:st.info(f"장전 후보 분위기 {f(meta.get('market_long_power'),50):.0f}% · 상위 관찰 후보: {', '.join([str(x.get('name') or x.get('symbol')) for x in rr[:3]])}"); st.dataframe(pd.DataFrame(rr[:10]),use_container_width=True,hide_index=True)
         else:st.info('저장된 한국장 PREOPEN 리포트가 없습니다.')
 with t[2]:
-    st.subheader('🧪 Validation Lab'); st.caption('V4의 숫자는 정답이 아니라 초기 가설입니다. 모든 feature snapshot을 Historical/Shadow 보정에 사용합니다.'); ss=api(f'/api/v4/validation/snapshots?market={m}&limit=500').get('data') or []
-    if ss:
-        df=pd.DataFrame(ss); st.metric('최근 Feature Snapshot',len(df)); keep=[x for x in ['ts','symbol','finder_rank','power','power_delta','state','risk','price'] if x in df.columns]; st.dataframe(df[keep],use_container_width=True,hide_index=True)
-    else:st.info('V4 Tracker가 동작하면 분당 feature snapshot이 자동 저장됩니다.')
+    st.subheader('🧪 Validation Lab')
+    st.caption('현재 숫자는 확률이 아니라 초기 가설입니다. +5/+15/+30/+60분, MFE/MAE로 Entry/Exit/Floor 기준을 보정합니다.')
+    marks=api(f'/api/v4/validation/marks?market={m}&limit=1000').get('data') or []
+    if marks:
+        df=pd.DataFrame(marks); settled=df[df['ret_60m'].notna()] if 'ret_60m' in df.columns else pd.DataFrame(); c1,c2,c3,c4=st.columns(4); c1.metric('검증 표본',len(df)); c2.metric('60분 완료',len(settled))
+        if len(settled):c3.metric('60분 평균',f"{settled['ret_60m'].mean():+.2f}%"); c4.metric('60분 상승 비율',f"{(settled['ret_60m']>0).mean()*100:.1f}%")
+        else:c3.metric('60분 평균','-'); c4.metric('60분 상승 비율','-')
+        show=[c for c in ['ts','symbol','state','power','power_delta','setup_count','trigger_count','rvol','ret_5m','ret_15m','ret_30m','ret_60m','mfe_pct','mae_pct','floor_mode'] if c in df.columns]; st.dataframe(df[show],use_container_width=True,hide_index=True)
+    else:st.info('정상 데이터로 Tracker가 동작하면 분당 검증 표본이 자동 저장됩니다.')
     st.markdown('1. Finder 조건별 15/30/60분 성과  \n2. Power 구성요소별 MFE/MAE  \n3. READY/ENTRY 이후 실제 움직임  \n4. Floor 폭별 stop-out/재상승 비율  \n5. Shadow 검증 후 통과한 값만 CURRENT 승격')
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')

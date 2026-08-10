@@ -484,6 +484,10 @@ def v4_trades(market:str|None=None,limit:int=Query(200,ge=1,le=1000)): return {'
 @app.get('/api/v4/validation/snapshots')
 def v4_validation_snapshots(market:str|None=None,limit:int=Query(500,ge=1,le=5000)): return {'data':v4.store.snapshots(market,limit),'note':'Baseline V4 feature snapshots for Historical/Shadow calibration.'}
 
+@app.get('/api/v4/validation/marks')
+def v4_validation_marks(market:str|None=None,limit:int=Query(1000,ge=1,le=5000)):
+    return {'data':v4.store.validation_marks(market,limit),'note':'Forward-return marks: +5/+15/+30/+60m and MFE/MAE. Heuristic diagnostics, not probabilities.'}
+
 @app.get('/health')
 def health():
     qs=db.quotes()

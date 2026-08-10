@@ -9,7 +9,7 @@ SEMI={'SOXL','SOXS','SMH','NVDA','AMD','AVGO','MU','ARM','TSM','ASML','INTC','QC
 TRACK_LIMIT=5
 POWER_ALERT_DELTA=12
 RANK_ALERT_DELTA=2
-STATE_PRIORITY={'STOP':0,'EXIT':1,'REDUCE':2,'TAKE_PROFIT':3,'ENTRY':4,'READY':5,'SETUP':6,'HOLD':7,'WATCH':8,'DATA_INVALID':99}
+STATE_PRIORITY={'HARD_EXIT':0,'EXIT_READY':1,'PARTIAL_EXIT':2,'ENTRY':3,'READY':4,'SETUP':5,'HOLD':6,'WATCH':7,'DATA_INVALID':99}
 def _tracker_sort_key(r):
     return (0 if r.get('position_open') else 1,STATE_PRIORITY.get(str(r.get('state')),99),-abs(_f(r.get('power'))),-abs(_f(r.get('power_delta'))),r.get('finder_rank') or 99)
 
@@ -144,11 +144,33 @@ class V4Store:
     def _init(self):
         with self._c() as c:
             c.executescript("""
-            CREATE TABLE IF NOT EXISTS v4_positions(market TEXT NOT NULL,symbol TEXT NOT NULL,qty REAL NOT NULL DEFAULT 0,avg_entry REAL NOT NULL DEFAULT 0,realized_pnl REAL NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'OPEN',opened_at TEXT,updated_at TEXT,closed_at TEXT,PRIMARY KEY(market,symbol));
+            CREATE TABLE IF NOT EXISTS v4_positions(
+                market TEXT NOT NULL,symbol TEXT NOT NULL,qty REAL NOT NULL DEFAULT 0,
+                avg_entry REAL NOT NULL DEFAULT 0,realized_pnl REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'OPEN',opened_at TEXT,updated_at TEXT,closed_at TEXT,
+                initial_floor REAL,current_floor REAL,warning_floor REAL,high_watermark REAL,
+                floor_mode TEXT,entry_power REAL,partial_exit_done INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(market,symbol)
+            );
             CREATE TABLE IF NOT EXISTS v4_trade_log(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT NOT NULL,market TEXT NOT NULL,symbol TEXT NOT NULL,side TEXT NOT NULL,qty REAL NOT NULL,price REAL NOT NULL,realized_pnl REAL NOT NULL DEFAULT 0,note TEXT);
             CREATE TABLE IF NOT EXISTS v4_signal_events(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT NOT NULL,market TEXT NOT NULL,symbol TEXT,event_type TEXT NOT NULL,state_from TEXT,state_to TEXT,power REAL,rank_from INTEGER,rank_to INTEGER,message TEXT,payload_json TEXT);
             CREATE TABLE IF NOT EXISTS v4_tracker_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT NOT NULL,market TEXT NOT NULL,symbol TEXT NOT NULL,finder_rank INTEGER,power REAL,power_delta REAL,state TEXT,risk TEXT,price REAL,payload_json TEXT);
+            CREATE TABLE IF NOT EXISTS v4_validation_marks(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,market TEXT NOT NULL,symbol TEXT NOT NULL,state TEXT,
+                anchor_price REAL,power REAL,power_delta REAL,finder_rank INTEGER,
+                setup_count INTEGER,trigger_count INTEGER,rvol REAL,volume_ratio REAL,
+                hard_floor REAL,warning_floor REAL,floor_mode TEXT,
+                ret_5m REAL,ret_15m REAL,ret_30m REAL,ret_60m REAL,
+                mfe_pct REAL NOT NULL DEFAULT 0,mae_pct REAL NOT NULL DEFAULT 0,
+                settled_at TEXT,feature_json TEXT,
+                UNIQUE(market,symbol,ts)
+            );
             """)
+            cols={r[1] for r in c.execute("PRAGMA table_info(v4_positions)").fetchall()}
+            migrations=[('initial_floor','REAL'),('current_floor','REAL'),('warning_floor','REAL'),('high_watermark','REAL'),('floor_mode','TEXT'),('entry_power','REAL'),('partial_exit_done','INTEGER NOT NULL DEFAULT 0')]
+            for name,ctype in migrations:
+                if name not in cols:c.execute(f"ALTER TABLE v4_positions ADD COLUMN {name} {ctype}")
     def positions(self,market=None):
         sql="SELECT * FROM v4_positions WHERE status='OPEN'"; args=[]
         if market: sql+=' AND market=?'; args=[market.upper()]
@@ -198,6 +220,46 @@ class V4Store:
         with self._c() as c:c.execute('INSERT INTO v4_tracker_snapshots(ts,market,symbol,finder_rank,power,power_delta,state,risk,price,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?)',(_now(),row.get('market'),row.get('symbol'),row.get('finder_rank'),row.get('power'),row.get('power_delta'),row.get('state'),row.get('risk'),row.get('price'),json.dumps(row,ensure_ascii=False,default=str)))
     def snapshots(self,market=None,limit=500):
         sql='SELECT id,ts,market,symbol,finder_rank,power,power_delta,state,risk,price FROM v4_tracker_snapshots'; args=[]
+        if market:sql+=' WHERE market=?'; args=[market.upper()]
+        sql+=' ORDER BY id DESC LIMIT ?'; args.append(int(limit))
+        with self._c() as c:return [dict(r) for r in c.execute(sql,args).fetchall()]
+
+    def update_position_risk(self,market,symbol,initial_floor,current_floor,warning_floor,high_watermark,floor_mode,entry_power=None,partial_exit_done=None):
+        fields=['initial_floor=?','current_floor=?','warning_floor=?','high_watermark=?','floor_mode=?','updated_at=?']; vals=[initial_floor,current_floor,warning_floor,high_watermark,floor_mode,_now()]
+        if entry_power is not None: fields.append('entry_power=?'); vals.append(entry_power)
+        if partial_exit_done is not None: fields.append('partial_exit_done=?'); vals.append(int(bool(partial_exit_done)))
+        vals.extend([market.upper(),symbol.upper()])
+        with self._c() as c:c.execute(f"UPDATE v4_positions SET {','.join(fields)} WHERE market=? AND symbol=?",vals)
+
+    def add_validation_mark(self,row):
+        if row.get('market')!='USA' or not row.get('price'):return
+        if not (row.get('data_integrity') or {}).get('valid'):return
+        minute=str(row.get('updated_at') or _now())[:16]+':00+00:00'; gate=row.get('entry_gate') or {}; comp=row.get('components') or {}
+        with self._c() as c:
+            c.execute("""INSERT OR IGNORE INTO v4_validation_marks(ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,setup_count,trigger_count,rvol,volume_ratio,hard_floor,warning_floor,floor_mode,mfe_pct,mae_pct,feature_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (minute,'USA',row.get('symbol'),row.get('state'),row.get('price'),row.get('power'),row.get('power_delta'),row.get('finder_rank'),gate.get('setup_count'),gate.get('trigger_count'),comp.get('rvol'),comp.get('volume_ratio'),row.get('hard_floor'),row.get('warning_floor'),row.get('floor_mode'),0.0,0.0,json.dumps(row,ensure_ascii=False,default=str)))
+
+    def update_validation_outcomes(self,market,symbol,current_price):
+        if not current_price:return
+        now_dt=datetime.now(timezone.utc)
+        with self._c() as c:
+            rows=c.execute("SELECT * FROM v4_validation_marks WHERE market=? AND symbol=? AND (ret_60m IS NULL OR settled_at IS NULL) ORDER BY id DESC LIMIT 240",(market.upper(),symbol.upper())).fetchall()
+            for r in rows:
+                try:
+                    ts=datetime.fromisoformat(str(r['ts']).replace('Z','+00:00')); ts=ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                except Exception:continue
+                anchor=_f(r['anchor_price'])
+                if not anchor:continue
+                mins=max(0,(now_dt-ts).total_seconds()/60); ret=(current_price/anchor-1)*100
+                vals={'mfe_pct':max(_f(r['mfe_pct']),ret),'mae_pct':min(_f(r['mae_pct']),ret)}
+                if mins>=5 and r['ret_5m'] is None:vals['ret_5m']=ret
+                if mins>=15 and r['ret_15m'] is None:vals['ret_15m']=ret
+                if mins>=30 and r['ret_30m'] is None:vals['ret_30m']=ret
+                if mins>=60 and r['ret_60m'] is None:vals['ret_60m']=ret; vals['settled_at']=_now()
+                c.execute(f"UPDATE v4_validation_marks SET {','.join(f'{k}=?' for k in vals)} WHERE id=?",list(vals.values())+[r['id']])
+
+    def validation_marks(self,market=None,limit=1000):
+        sql='SELECT id,ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,setup_count,trigger_count,rvol,volume_ratio,hard_floor,warning_floor,floor_mode,ret_5m,ret_15m,ret_30m,ret_60m,mfe_pct,mae_pct,settled_at FROM v4_validation_marks'; args=[]
         if market:sql+=' WHERE market=?'; args=[market.upper()]
         sql+=' ORDER BY id DESC LIMIT ?'; args.append(int(limit))
         with self._c() as c:return [dict(r) for r in c.execute(sql,args).fetchall()]
@@ -278,14 +340,18 @@ class CleanEngine:
         if not integrity.get('valid'):power=0.0; delta=0.0
         regular=sess=='REGULAR'
         entry_gate=_usa_entry_trigger(price,vwap,ema9,ema20,rsi,over,vol_ratio,power,delta,b1,b5,risk)
+        position_gate=None
         if not integrity.get('valid'):state='DATA_INVALID'
-        elif pos:state=self._position_state(power,delta,price,pos)
+        elif pos:
+            position_gate=self._position_manager(power,delta,price,pos,vwap,ema9,ema20,b1,b5); state=position_gate.get('state') or 'HOLD'
         elif not regular:state='WATCH'
         elif entry_gate.get('entry'):state='ENTRY'
         elif entry_gate.get('ready'):state='READY'
         elif entry_gate.get('setup_ok'):state='SETUP'
         else:state='WATCH'
-        if integrity.get('valid') and regular:hard,warn,t1,t2,mode=self._levels(price,pos,power,delta,vwap,ema20,b1,b5)
+        if pos and position_gate:
+            hard=position_gate.get('hard_floor'); warn=position_gate.get('warning_floor'); mode=position_gate.get('floor_mode'); risk_per_share=max(_f(pos.get('avg_entry'))-_f(position_gate.get('initial_floor')),_f(pos.get('avg_entry'))*.004); t1=_f(pos.get('avg_entry'))+2*risk_per_share; t2=_f(pos.get('avg_entry'))+3*risk_per_share
+        elif integrity.get('valid') and regular:hard,warn,t1,t2,mode=self._levels(price,pos,power,delta,vwap,ema20,b1,b5)
         else:hard=warn=t1=t2=None; mode='DATA_INVALID' if not integrity.get('valid') else 'REFERENCE_ONLY'
         reason=[]
         if structure>=15:reason.append('가격구조 상승')
@@ -294,6 +360,8 @@ class CleanEngine:
         if abs(momentum)>=7:reason.append('모멘텀 상승' if momentum>0 else '모멘텀 하락')
         if not integrity.get('valid'):
             final_reason='DATA INVALID · '+' / '.join(integrity.get('reasons') or [])
+        elif pos and position_gate:
+            final_reason=position_gate.get('reason') or state
         elif state=='ENTRY':
             final_reason=f"ENTRY · 5분 Setup {entry_gate['setup_count']}/{entry_gate['setup_total']} · 1분 Trigger {entry_gate['trigger_count']}/{entry_gate['trigger_total']}"
         elif state=='READY':
@@ -302,20 +370,50 @@ class CleanEngine:
             final_reason=f"SETUP · 5분 조건 {entry_gate['setup_count']}/{entry_gate['setup_total']} · 1분 파동 대기"
         else:
             final_reason=' · '.join(reason[:3]) or '뚜렷한 실시간 힘 없음'
-        return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'entry_gate':entry_gate,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
+        return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'entry_gate':entry_gate,'position_gate':position_gate,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
     def refresh_korea_tracker(self,korea):
         syms=self.tracked_symbols('KOREA'); fmap={r['symbol']:r for r in self.finder['KOREA']['rows']}; pmap={p['symbol']:p for p in self.store.positions('KOREA')}; pulse={str(r.get('symbol') or ''):r for r in (korea.intraday_pulse.get('rows') or [])}; rows=[]
         for sym in syms:
             f=fmap.get(sym) or {}; p=pulse.get(sym) or {}; strength=p.get('strength_composite'); score=_f(p.get('live_score',f.get('finder_score'))); bias=str(p.get('bias') or f.get('direction') or 'NEUTRAL').upper(); sc=_clip((_f(strength)-100)/35,-1,1)*45 if strength is not None else 0; ss=_clip((score-50)/50,-1,1)*40; sign=1 if bias in ('LONG','UP') else -1 if bias in ('SHORT','DOWN') else 0; power=round(_clip(sign*abs(ss)+sc,-100,100),1); prev=self._last.get(('POWER','KOREA',sym)); delta=round(power-_f(prev.get('power')),1) if prev else 0; vi=bool(p.get('vi_triggered')); risk='HIGH' if vi else str(f.get('risk') or 'NORMAL'); state='HOLD' if pmap.get(sym) else ('SETUP' if abs(power)>=55 and _session('KOREA')=='REGULAR' else 'WATCH')
             rows.append({'market':'KOREA','symbol':sym,'name':f.get('name') or sym,'finder_rank':f.get('rank'),'finder_score':f.get('finder_score'),'position_open':bool(pmap.get(sym)),'qty':_f((pmap.get(sym) or {}).get('qty')),'avg_entry':_f((pmap.get(sym) or {}).get('avg_entry')),'price':_f(p.get('price',f.get('price'))),'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'components':{'execution_strength':strength,'live_score':score,'minute_chart_gate':False},'warning_floor':None,'hard_floor':None,'target1':None,'target2':None,'floor_mode':'PENDING','reason':'체결강도/후보점수 기반 · 국내 1/5분봉 Gate 연결 전','session':_session('KOREA'),'updated_at':_now()})
         rows.sort(key=_tracker_sort_key); self._finalize('KOREA',rows); return self.tracker['KOREA']
-    def _position_state(self,power,delta,price,pos):
-        entry=_f(pos.get('avg_entry')); pnl=(price/entry-1)*100 if entry and price else 0
-        if pnl<=-4:return 'STOP'
-        if power<=5:return 'EXIT'
-        if power<28 or delta<=-18:return 'REDUCE'
-        if pnl>=2 and delta<=-10:return 'TAKE_PROFIT'
-        return 'HOLD'
+    def _position_manager(self,power,delta,price,pos,vwap,ema9,ema20,b1,b5):
+        entry=_f(pos.get('avg_entry'))
+        if not entry or not price:return {'state':'HOLD','floor_mode':'INITIAL','reason':'포지션 데이터 부족'}
+        rp=.35
+        if len(b1)>=8:
+            x=b1.tail(20); rng=((pd.to_numeric(x['high'])-pd.to_numeric(x['low']))/pd.to_numeric(x['close']).replace(0,pd.NA)*100).dropna()
+            if len(rng):rp=max(.15,min(2.5,_f(rng.median(),.35)))
+        buf_pct=max(.15,.65*rp); buf_abs=entry*buf_pct/100
+        recent1=_f(pd.to_numeric(b1.tail(6)['low'],errors='coerce').min()) if len(b1)>=2 else 0
+        recent5=_f(pd.to_numeric(b5.tail(4)['low'],errors='coerce').min()) if len(b5)>=2 else 0
+        supports=[x for x in (recent5,ema20,vwap) if x and x<entry]; structural=max(supports) if supports else entry-2*buf_abs
+        initial=_f(pos.get('initial_floor'))
+        if not initial:initial=max(min(entry-entry*.004,structural-buf_abs),entry-entry*.04)
+        high=max(_f(pos.get('high_watermark'),entry),price); R=max(entry-initial,entry*.004); profit_r=(price-entry)/R; pnl=(price/entry-1)*100
+        prev_floor=_f(pos.get('current_floor'),initial); mode='INITIAL'; floor=initial
+        if profit_r>=.8:mode='PROTECT'; floor=max(floor,entry-.10*R)
+        if profit_r>=1.5:
+            mode='TRAILING'; refs=[]
+            if recent1 and recent1<price:refs.append(recent1-buf_abs*.35)
+            if recent5 and recent5<price:refs.append(recent5-buf_abs*.25)
+            if ema9 and ema9<price:refs.append(ema9-buf_abs*.25)
+            if refs:floor=max(floor,max(refs))
+        floor=max(prev_floor,floor); floor=min(floor,price-buf_abs*.15); warning=floor+.25*R
+        one_break=bool(len(b1)>=3 and _f(b1.iloc[-1]['close'])<_f(b1.iloc[-2]['low']))
+        five_break=False; five_rising=False
+        if len(b5)>=3:
+            c0=_f(b5.iloc[-1]['close']); c1=_f(b5.iloc[-2]['close']); l0=_f(b5.iloc[-1]['low']); l1=_f(b5.iloc[-2]['low'])
+            five_break=bool(c0<c1 and l0<l1); five_rising=bool(c0>=c1 and l0>=l1)
+        below_vwap=bool(vwap and price<vwap); ema_bear=bool(ema9 and ema20 and ema9<ema20); partial_done=bool(_f(pos.get('partial_exit_done')))
+        state='HOLD'; reason='5분 추세/포지션 구조 유지'; pct=0
+        if price<=floor:state='HARD_EXIT'; reason='Hard Floor 이탈'; pct=100
+        elif five_break and below_vwap and power<=10:state='HARD_EXIT'; reason='5분 구조 붕괴 + VWAP 이탈 + Power 약화'; pct=100
+        elif (five_break and (below_vwap or ema_bear)) or (power<20 and delta<=-12):state='EXIT_READY'; reason='5분 구조/추세 약화 · 잔여물량 정리 준비'; pct=100
+        elif not partial_done and profit_r>=.8 and five_rising and (one_break or delta<=-12 or power<35):state='PARTIAL_EXIT'; reason='수익구간에서 1분 힘 약화 · 30~50% 축소 검토'; pct=50
+        self.store.update_position_risk('USA',pos.get('symbol') or '',initial,floor,warning,high,mode,entry_power=pos.get('entry_power') if pos.get('entry_power') is not None else power,partial_exit_done=partial_done)
+        return {'state':state,'reason':reason,'suggested_exit_pct':pct,'initial_floor':round(initial,4),'hard_floor':round(floor,4),'warning_floor':round(warning,4),'floor_mode':mode,'high_watermark':round(high,4),'R':round(R,4),'profit_r':round(profit_r,3),'pnl_pct':round(pnl,3),'one_min_break':one_break,'five_min_break':five_break,'below_vwap':below_vwap,'ema_bear':ema_bear}
+
     def _levels(self,price,pos,power,delta,vwap,ema20,b1,b5):
         if not price:return None,None,None,None,'NORMAL'
         rp=.35
@@ -345,7 +443,9 @@ class CleanEngine:
             elif prev and abs(power-pp)>=POWER_ALERT_DELTA:self.store.event(market,sym,'POWER_JUMP',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} Power {pp:.0f}→{power:.0f}',payload=r)
             elif pr is not None and abs(pr-trank)>=RANK_ALERT_DELTA:self.store.event(market,sym,'TRACKER_RANK_MOVE',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} 실시간 순위 {pr}→{trank}',payload=r)
             self._last[(market,sym)]={'state':state,'power':power}; self._last[('POWER',market,sym)]={'power':power}; self._rank[(market,sym)]=trank; minute=r['updated_at'][:16]
-            if self._snap.get((market,sym))!=minute:self.store.snapshot(r); self._snap[(market,sym)]=minute
+            if self._snap.get((market,sym))!=minute:
+                self.store.snapshot(r); self.store.add_validation_mark(r); self._snap[(market,sym)]=minute
+            self.store.update_validation_outcomes(market,sym,_f(r.get('price')))
         sess=_session(market)
         self.tracker[market]={'rows':rows,'updated_at':_now(),'session':sess,'tracked_count':len(rows),'max_tracked':TRACK_LIMIT,'is_live':sess=='REGULAR','power_basis':'LIVE_REGULAR' if sess=='REGULAR' else 'LAST_AVAILABLE_REFERENCE','policy':'OPEN POSITIONS first; remaining slots use live readiness/power, then Finder rank. Maximum 5 heavy-tracked symbols.'}
     def status(self,market):

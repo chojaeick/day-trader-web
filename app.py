@@ -625,15 +625,42 @@ with t[2]:
                         st.write(f"• {rr.get('symbol')} · {rr.get('stage')} · {rr.get('reason')}")
 
             critical_stale=pd.DataFrame(cov.get('critical_stale_rows') or [])
+            reference_stale=pd.DataFrame(cov.get('reference_stale_rows') or [])
             inactive_stale=pd.DataFrame(cov.get('inactive_stale_rows') or [])
-            if len(critical_stale):
-                st.error(
-                    f"⚠️ 현재 의사결정 대상에서 3분 초과 stale quote "
-                    f"{cov.get('critical_stale_count',len(critical_stale))}개가 감지되었습니다."
-                )
-                st.dataframe(critical_stale,use_container_width=True,hide_index=True)
+            session_mode=cov.get('session_mode') or 'UNKNOWN'
+
+            st.markdown('##### 🩺 Session-aware Data Health')
+            if session_mode=='REGULAR':
+                if len(critical_stale):
+                    st.error(
+                        f"⚠️ 정규장 의사결정 대상에서 3분 초과 stale quote "
+                        f"{cov.get('critical_stale_count',len(critical_stale))}개"
+                    )
+                    st.dataframe(critical_stale,use_container_width=True,hide_index=True)
+                else:
+                    st.success('정규장 현재 Finder/Heavy/Bridge warm/핵심 ETF quote freshness 정상')
             else:
-                st.success('현재 Finder/Heavy/Bridge warm/핵심 ETF에서 3분 초과 stale quote가 없습니다.')
+                st.info('미국 정규장 밖입니다 · stale quote는 장애가 아닌 REFERENCE 상태로 분리합니다.')
+                if len(reference_stale):
+                    with st.expander(f"Market closed reference stale · {cov.get('reference_stale_count',len(reference_stale))}개"):
+                        st.dataframe(reference_stale,use_container_width=True,hide_index=True)
+
+            warm=pd.DataFrame(cov.get('bridge_warm_status') or [])
+            if len(warm):
+                st.markdown('##### ♨️ Bridge Warm Diagnostics')
+                wcols=[c for c in [
+                    'symbol','status','last_attempt','exchange','quote_ok','daily_ok',
+                    'minute_bars','inserted','price','quote_age_sec','ready_now','error'
+                ] if c in warm.columns]
+                st.dataframe(warm[wcols],use_container_width=True,hide_index=True)
+                failed=warm[warm['status'].isin(['FAILED','PARTIAL'])] if 'status' in warm.columns else pd.DataFrame()
+                pending=warm[warm['status'].isin(['PENDING','RUNNING'])] if 'status' in warm.columns else pd.DataFrame()
+                if len(failed):
+                    st.warning(f'Bridge warm 실패/부분완료 {len(failed)}개 · error 열 확인')
+                elif len(pending):
+                    st.info(f'Bridge warm 대기/진행 {len(pending)}개')
+                else:
+                    st.success('현재 표시된 Bridge/Core warm 대상은 준비상태 정상')
 
             if len(inactive_stale):
                 with st.expander(f"Inactive cache stale · {cov.get('inactive_stale_count',len(inactive_stale))}개"):
@@ -1065,7 +1092,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.6.2.2 · DATA CONSISTENCY FIX · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.6.2.3 · SESSION-AWARE FRESHNESS + WARM DIAGNOSTICS · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

@@ -27,6 +27,10 @@ s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValida
 manual_scan_state={'last_started_monotonic':0.0,'last_result':None}
 v4=CleanEngine(s.db_path)
 
+# V4.6.2.3 warm diagnostics: in-memory operational state only.
+# This is intentionally not persisted and does not affect Finder scoring.
+bridge_warm_status={}
+
 # V2.2.1: manual briefing generation is asynchronous so the browser never
 # has to hold a multi-minute HTTP request open. Scheduled PREOPEN generation
 # remains server-side and is not limited by browser timeouts.
@@ -347,11 +351,27 @@ async def v4_engine_forever():
         if not new_syms:return
 
         for sym in new_syms[:12]:
+            started=datetime.now(timezone.utc).isoformat()
+            bridge_warm_status[sym]={
+                'symbol':sym,'status':'RUNNING','last_attempt':started,
+                'exchange':None,'quote_ok':False,'daily_ok':False,
+                'minute_bars':None,'inserted':None,'error':None
+            }
             try:
                 ex=k.active_exchange(sym)
+                bridge_warm_status[sym]['exchange']=ex
+
                 await asyncio.to_thread(k.quote,sym,ex)
+                bridge_warm_status[sym]['quote_ok']=True
+
                 await asyncio.to_thread(k.daily_metrics,sym,ex)
+                bridge_warm_status[sym]['daily_ok']=True
+
                 inserted,bars=await asyncio.to_thread(k.backfill_symbol,sym,ex,80)
+                bridge_warm_status[sym]['minute_bars']=bars
+                bridge_warm_status[sym]['inserted']=inserted
+                bridge_warm_status[sym]['status']='READY' if int(bars or 0)>=6 else 'PARTIAL'
+                bridge_warm_status[sym]['finished_at']=datetime.now(timezone.utc).isoformat()
                 bridge_warmed.add(sym)
                 logging.info(
                     'V4 bridge warmup %s/%s: bars=%s inserted=%s',
@@ -359,6 +379,9 @@ async def v4_engine_forever():
                 )
             except Exception as e:
                 # Do not mark failed symbols as warmed; retry on a later cycle.
+                bridge_warm_status[sym]['status']='FAILED'
+                bridge_warm_status[sym]['error']=str(e)
+                bridge_warm_status[sym]['finished_at']=datetime.now(timezone.utc).isoformat()
                 logging.warning('V4 bridge warmup %s failed: %s',sym,e)
             await asyncio.sleep(0.12)
 
@@ -609,6 +632,15 @@ def v4_coverage_audit(market:str='USA'):
             return round(max(0,(datetime.now(timezone.utc)-t).total_seconds()),1)
         except Exception:return None
 
+    # Session-aware freshness semantics.
+    et_now=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+    et_min=et_now.hour*60+et_now.minute
+    market_open=bool(
+        et_now.weekday()<5
+        and (9*60+30) <= et_min < (16*60)
+    )
+    session_mode='REGULAR' if market_open else 'MARKET_CLOSED_REFERENCE'
+
     discovery=k.discovery if isinstance(getattr(k,'discovery',None),dict) else {}
     discovery_rows=_rows(discovery)
     extreme_rows=_rows(discovery,'extreme_rows')
@@ -773,21 +805,51 @@ def v4_coverage_audit(market:str='USA'):
     critical_syms=set(fs)|set(hs)|bridge_syms|core_etfs
 
     critical_stale=[]
+    reference_stale=[]
     inactive_stale=[]
     for sym,q in qmap.items():
         age=_age_seconds(q)
         if age is None or age<=180:
             continue
-        row={
-            'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price'),
-            'severity':'CRITICAL' if sym in critical_syms else 'INACTIVE_CACHE'
-        }
         if sym in critical_syms:
-            critical_stale.append(row)
+            row={
+                'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price'),
+                'severity':'CRITICAL' if market_open else 'REFERENCE',
+                'session_mode':session_mode
+            }
+            if market_open:
+                critical_stale.append(row)
+            else:
+                reference_stale.append(row)
         else:
-            inactive_stale.append(row)
+            inactive_stale.append({
+                'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price'),
+                'severity':'INACTIVE_CACHE','session_mode':session_mode
+            })
     critical_stale.sort(key=lambda x:x['age_sec'],reverse=True)
+    reference_stale.sort(key=lambda x:x['age_sec'],reverse=True)
     inactive_stale.sort(key=lambda x:x['age_sec'],reverse=True)
+
+    warm_rows=[]
+    for sym in sorted(bridge_syms|core_etfs):
+        st=dict(bridge_warm_status.get(sym) or {})
+        q=qmap.get(sym) or {}
+        bars=len(ticks_to_bars(db.ticks(sym,2500),1))
+        price=float(q.get('price') or 0)
+        if not st:
+            st={
+                'symbol':sym,'status':'PENDING' if sym in bridge_syms else 'OBSERVED',
+                'last_attempt':None,'exchange':None,'quote_ok':bool(price>0),
+                'daily_ok':bool((db.daily_metrics(sym) or {})),
+                'minute_bars':bars,'inserted':None,'error':None
+            }
+        else:
+            st['minute_bars']=bars
+            st['quote_ok']=bool(price>0) or bool(st.get('quote_ok'))
+        st['price']=price
+        st['quote_age_sec']=_age_seconds(q) if q else None
+        st['ready_now']=bool(price>0 and bars>=6)
+        warm_rows.append(st)
 
     # V4.6.1: explain Light -> Finder cutline without changing selection logic.
     finder_cut=min([float(r.get('finder_score') or 0) for r in finder_rows],default=0.0)
@@ -875,11 +937,16 @@ def v4_coverage_audit(market:str='USA'):
         'source_counts':source_counts,
         'inverse':inverse,
         'top_abs_movers':movers[:25],
+        'session_mode':session_mode,
+        'market_open':market_open,
         'critical_stale_rows':critical_stale[:30],
+        'reference_stale_rows':reference_stale[:30],
         'inactive_stale_rows':inactive_stale[:30],
         'critical_stale_count':len(critical_stale),
+        'reference_stale_count':len(reference_stale),
         'inactive_stale_count':len(inactive_stale),
         'bridge_warm_symbols':sorted(bridge_syms),
+        'bridge_warm_status':warm_rows,
         'finder_cut':round(finder_cut,1) if finder_cut else None,
         'light_audit':light_audit,
         'discovery_miss':discovery_miss[:30],

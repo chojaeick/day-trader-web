@@ -535,11 +535,30 @@ with t[2]:
             for col in ['start_power','max_power','start_setup','max_setup','start_trigger','max_trigger','ret_5m','ret_15m','ret_30m','ret_60m','mfe_pct','mae_pct','duration_min']:
                 if col in e.columns:e[col]=pd.to_numeric(e[col],errors='coerce')
 
+            # V4.5.2: count only states that were actually observed in marks.
+            # Do not infer ENTRY from downstream position/exit states.
+            reach_anchors=api(f'/api/v4/validation/stage-anchors?market={m}&limit=5000&bridge_minutes=5').get('data') or []
+            reach_df=pd.DataFrame(reach_anchors) if reach_anchors else pd.DataFrame()
+            if len(reach_df):
+                reach_df['stage_dt']=pd.to_datetime(reach_df['stage_ts'],utc=True,errors='coerce')
+                if m=='USA':
+                    try:reach_df['reach_date']=reach_df['stage_dt'].dt.tz_convert('America/New_York').dt.date.astype(str)
+                    except Exception:reach_df['reach_date']=reach_df['stage_dt'].dt.date.astype(str)
+                else:
+                    try:reach_df['reach_date']=reach_df['stage_dt'].dt.tz_convert('Asia/Seoul').dt.date.astype(str)
+                    except Exception:reach_df['reach_date']=reach_df['stage_dt'].dt.date.astype(str)
+                reach_day=reach_df[reach_df['reach_date']==report_date].copy() if report_date else reach_df.copy()
+            else:
+                reach_day=pd.DataFrame()
+
+            observed_ready=int((reach_day['stage']=='READY').sum()) if len(reach_day) and 'stage' in reach_day.columns else 0
+            observed_entry=int((reach_day['stage']=='ENTRY').sum()) if len(reach_day) and 'stage' in reach_day.columns else 0
+
             ec1,ec2,ec3,ec4=st.columns(4)
             ec1.metric('Episode 수',len(e))
             ec2.metric('60분 완료',int(e['ret_60m'].notna().sum()) if 'ret_60m' in e.columns else 0)
-            ec3.metric('READY 이상',int(e['max_state'].isin(['READY','ENTRY','HOLD','PARTIAL_EXIT','EXIT_READY','HARD_EXIT']).sum()) if 'max_state' in e.columns else 0)
-            ec4.metric('ENTRY 도달',int(e['max_state'].isin(['ENTRY','HOLD','PARTIAL_EXIT','EXIT_READY','HARD_EXIT']).sum()) if 'max_state' in e.columns else 0)
+            ec3.metric('READY 실제 관측',observed_ready)
+            ec4.metric('ENTRY 실제 관측',observed_entry)
 
             if len(e):
                 state_perf=[]
@@ -610,6 +629,44 @@ with t[2]:
                     summary.append(r)
                 st.markdown('##### SETUP vs READY vs ENTRY')
                 st.dataframe(pd.DataFrame(summary),use_container_width=True,hide_index=True)
+
+                # V4.5.2 Stage Funnel: actual observed reach semantics.
+                setup_ids=set(a.loc[a['stage']=='SETUP','episode_id'].dropna().astype(int).tolist()) if 'episode_id' in a.columns else set()
+                ready_ids=set(a.loc[a['stage']=='READY','episode_id'].dropna().astype(int).tolist()) if 'episode_id' in a.columns else set()
+                entry_ids=set(a.loc[a['stage']=='ENTRY','episode_id'].dropna().astype(int).tolist()) if 'episode_id' in a.columns else set()
+
+                total_eps=len(e) if 'e' in locals() else len(setup_ids | ready_ids | entry_ids)
+                setup_reach=len(setup_ids)
+                ready_reach=len(ready_ids)
+                entry_reach=len(entry_ids)
+
+                st.markdown('##### 🪜 실제 관측 Stage Funnel')
+                f1,f2,f3,f4=st.columns(4)
+                f1.metric('Episode',total_eps)
+                f2.metric('SETUP 관측',setup_reach)
+                f3.metric('READY 관측',ready_reach)
+                f4.metric('ENTRY 관측',entry_reach)
+
+                ready_rate=(ready_reach/setup_reach*100) if setup_reach else 0.0
+                entry_from_ready=(entry_reach/ready_reach*100) if ready_reach else 0.0
+                entry_from_setup=(entry_reach/setup_reach*100) if setup_reach else 0.0
+
+                q1,q2,q3=st.columns(3)
+                q1.metric('SETUP → READY',f'{ready_rate:.1f}%')
+                q2.metric('READY → ENTRY',f'{entry_from_ready:.1f}%')
+                q3.metric('SETUP → ENTRY',f'{entry_from_setup:.1f}%')
+
+                # Average delay is calculated only from actually observed anchors.
+                ready_delay=a.loc[a['stage']=='READY','minutes_from_episode_start'].dropna()
+                entry_delay=a.loc[a['stage']=='ENTRY','minutes_from_episode_start'].dropna()
+                d1,d2=st.columns(2)
+                d1.metric('READY 평균 도달시간',f'{ready_delay.mean():.1f}분' if len(ready_delay) else '-')
+                d2.metric('ENTRY 평균 도달시간',f'{entry_delay.mean():.1f}분' if len(entry_delay) else '-')
+
+                if entry_reach==0:
+                    st.info('오늘 데이터에는 실제 ENTRY 상태가 관측되지 않았습니다. HOLD/EXIT 계열 상태가 있더라도 ENTRY 도달로 추정하지 않습니다.')
+                elif entry_reach<5:
+                    st.warning(f'ENTRY 실제 관측은 {entry_reach}건뿐입니다. 진입 임계값 보정에는 아직 표본이 부족합니다.')
 
                 ready=a[a['stage']=='READY'].copy()
                 if len(ready):
@@ -682,7 +739,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.5.1 · STAGE-ANCHOR + EPISODE VALIDATION · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.5.2 · STAGE FUNNEL + OBSERVED REACH SEMANTICS · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

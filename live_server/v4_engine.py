@@ -410,6 +410,8 @@ class CleanEngine:
                 'volume_accel':recent.get('vol_accel'),'recent_score':recent.get('score'),
                 'observed_power':observed_power,'fade_penalty':round(fade_penalty,1),
                 'extreme_continue':extreme_continue,
+                'extreme_watch':quality=='C_HIGH_RISK',
+                'source_origin':q.get('origin'),
                 'inverse_candidate':sym in inverse_syms
             })
 

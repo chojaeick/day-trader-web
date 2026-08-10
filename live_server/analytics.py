@@ -111,11 +111,20 @@ def _score_row(q:dict,m:dict,index_strength:float,semi_strength:float,progress:f
 
     score=max(0,min(100,round(score)))
     bias='LONG' if day>=0 and price>=ma5 else ('SHORT' if day<0 and slope<0 else 'NEUTRAL')
-    # Extreme movers are visible in discovery, but excluded from the regular TOP10.
+    # Regular eligibility stays conservative.
     eligible=(price>=5 and dollar>=20_000_000 and ma5>0 and price>ma5 and not extreme)
+
+    # V4.4.3 bridge: verified extreme movers may pass to the Light Tracker pipeline
+    # without being reclassified as normal candidates.
+    extreme_watch_eligible=bool(
+        extreme and price>=5 and dollar>=20_000_000 and ma5>0 and day>0
+    )
+
     return {'symbol':sym,'score':score,'bias':bias,'price':price,'change_pct':day,'volume':vol,'dollar_volume':dollar,
             'exchange':q.get('exchange'),'ma5':ma5,'ma5_slope_pct':slope,'rvol':rvol,'atr_pct':atr,
-            'avg5_dollar_volume':avg5dv,'eligible':eligible,'parts':parts,'penalties':penalties,'extreme':extreme}
+            'avg5_dollar_volume':avg5dv,'eligible':eligible,
+            'extreme_watch_eligible':extreme_watch_eligible,
+            'parts':parts,'penalties':penalties,'extreme':extreme}
 
 def screener_rows(quotes: list[dict], metrics: list[dict], top_n: int=10) -> list[dict]:
     mm={m['symbol']:m for m in metrics}; qmap={q['symbol']:q for q in quotes}
@@ -172,19 +181,49 @@ def screener_rows(quotes: list[dict], metrics: list[dict], top_n: int=10) -> lis
     rows=[r for r in out if r['eligible']]
     rows.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
 
+    # V4.4.3: bridge positive extreme movers into the candidate pool.
+    # They remain extreme/high-risk and only receive candidate visibility here.
+    extreme_rows=[r for r in out if r.get('extreme_watch_eligible')]
+    for r in extreme_rows:
+        day=max(0.0,float(r.get('change_pct') or 0))
+        rv=max(0.0,float(r.get('rvol') or 0))
+        dv=max(0.0,float(r.get('dollar_volume') or 0))
+        bridge=18 + min(22,day*.35) + min(12,rv*3)
+        if dv>=100_000_000: bridge+=8
+        elif dv>=50_000_000: bridge+=5
+        r['score']=max(float(r.get('score') or 0), min(70,round(bridge)))
+        r['parts']['Extreme bridge']=round(bridge,1)
+
+    extreme_rows.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
+
+    reserve=min(10,max(2,int(top_n*.25))) if top_n>=8 else min(2,top_n)
+    selected=rows[:max(0,top_n-reserve)]
+    existing={r['symbol'] for r in selected}
+
+    for r in extreme_rows[:reserve]:
+        if r['symbol'] not in existing:
+            selected.append(r)
+            existing.add(r['symbol'])
+
+    if len(selected)<top_n:
+        for r in rows:
+            if r['symbol'] not in existing:
+                selected.append(r)
+                existing.add(r['symbol'])
+            if len(selected)>=top_n:
+                break
+
     # In BEAR regimes reserve visibility for the best qualified inverse ETF.
     if regime in ('BEAR','STRONG_BEAR'):
         inverse=sorted(
             [r for r in rows if r['symbol'] in INVERSE],
             key=lambda r:(r['score'],r['dollar_volume']),reverse=True
         )
-        selected=rows[:top_n]
         if inverse and inverse[0]['symbol'] not in {r['symbol'] for r in selected}:
-            selected=(selected[:max(0,top_n-1)]+[inverse[0]])
-            selected.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
-        return selected[:top_n]
+            selected=selected[:max(0,top_n-1)]+[inverse[0]]
 
-    return rows[:top_n]
+    selected.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
+    return selected[:top_n]
 
 def context_for(symbol:str, quotes:list[dict]):
     qmap={q['symbol']:q for q in quotes}; qqq=float((qmap.get('QQQ') or {}).get('change_pct') or 0); smh=float((qmap.get('SMH') or {}).get('change_pct') or 0)

@@ -76,6 +76,67 @@ def _data_integrity_usa(price,b1,b5,session):
             'last_1m_time':t1.isoformat() if t1 else None,'last_5m_time':t5.isoformat() if t5 else None,
             'last_1m_close':last1 or None,'last_5m_close':last5 or None}
 
+def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta,b1,b5,risk):
+    """V1 long-entry gate.
+
+    5m = setup/trend.
+    1m = actual trigger.
+    The score is diagnostic only, not a probability.
+    """
+    setup_checks={}
+    trigger_checks={}
+    if len(b5)>=3:
+        c0=_f(b5.iloc[-1]['close']); c1=_f(b5.iloc[-2]['close']); c2=_f(b5.iloc[-3]['close'])
+        l0=_f(b5.iloc[-1]['low']); l1=_f(b5.iloc[-2]['low'])
+        setup_checks={
+            'price_above_vwap': bool(price and vwap and price>vwap),
+            'ema9_above_ema20': bool(ema9 and ema20 and ema9>ema20),
+            'five_min_rising': bool(c0>c1),
+            'five_min_structure': bool((c0>c1>c2) or (l0>l1 and c0>=c1)),
+        }
+    else:
+        setup_checks={'price_above_vwap':False,'ema9_above_ema20':False,'five_min_rising':False,'five_min_structure':False}
+
+    if len(b1)>=3:
+        last=b1.iloc[-1]; prev=b1.iloc[-2]
+        lc=_f(last['close']); lo=_f(last['open']); ph=_f(prev['high']); pc=_f(prev['close'])
+        one_ret=((lc/pc-1)*100) if pc else 0
+        trigger_checks={
+            'green_1m': bool(lc>lo),
+            'break_prev_high': bool(lc>ph),
+            'volume_expansion': bool(vol_ratio>=1.5),
+            'one_min_impulse': bool(one_ret>=0.15),
+            'power_acceleration': bool(power>=60 and delta>=4),
+        }
+    else:
+        one_ret=0.0
+        trigger_checks={'green_1m':False,'break_prev_high':False,'volume_expansion':False,'one_min_impulse':False,'power_acceleration':False}
+
+    setup_count=sum(1 for v in setup_checks.values() if v)
+    trigger_count=sum(1 for v in trigger_checks.values() if v)
+    setup_ok=setup_count>=3
+    # ENTRY requires a real 1m breakout + participation + accelerating Power.
+    trigger_core=bool(trigger_checks.get('green_1m') and trigger_checks.get('break_prev_high')
+                      and trigger_checks.get('volume_expansion') and trigger_checks.get('power_acceleration'))
+    chase_ok=bool(risk=='NORMAL' and rsi<74 and over_vwap<2.5)
+    ready=bool(setup_ok and trigger_count>=3 and power>=55 and chase_ok)
+    entry=bool(setup_ok and trigger_core and power>=68 and delta>=4 and chase_ok)
+
+    return {
+        'setup_ok':setup_ok,
+        'ready':ready,
+        'entry':entry,
+        'setup_count':setup_count,
+        'setup_total':len(setup_checks),
+        'trigger_count':trigger_count,
+        'trigger_total':len(trigger_checks),
+        'setup_checks':setup_checks,
+        'trigger_checks':trigger_checks,
+        'one_min_return_pct':round(one_ret,3),
+        'chase_ok':chase_ok,
+        'rule':'5m Setup + 1m breakout/volume + Power acceleration + chase guard',
+    }
+
 class V4Store:
     def __init__(self,path): self.path=path; self._init()
     def _c(self):
@@ -215,13 +276,14 @@ class CleanEngine:
         prev=self._last.get(('POWER','USA',sym)); delta=round(power-_f(prev.get('power')),1) if prev else 0
         raw_power=power
         if not integrity.get('valid'):power=0.0; delta=0.0
-        five=bool(len(b5)>=2 and ((power>0 and _f(b5.iloc[-1]['close'])>=_f(b5.iloc[-2]['close'])) or (power<0 and _f(b5.iloc[-1]['close'])<=_f(b5.iloc[-2]['close'])))); regular=sess=='REGULAR'
+        regular=sess=='REGULAR'
+        entry_gate=_usa_entry_trigger(price,vwap,ema9,ema20,rsi,over,vol_ratio,power,delta,b1,b5,risk)
         if not integrity.get('valid'):state='DATA_INVALID'
         elif pos:state=self._position_state(power,delta,price,pos)
         elif not regular:state='WATCH'
-        elif abs(power)>=78 and five and risk=='NORMAL' and abs(delta)>=6:state='ENTRY'
-        elif abs(power)>=64 and five and risk!='HIGH':state='READY'
-        elif abs(power)>=46:state='SETUP'
+        elif entry_gate.get('entry'):state='ENTRY'
+        elif entry_gate.get('ready'):state='READY'
+        elif entry_gate.get('setup_ok'):state='SETUP'
         else:state='WATCH'
         if integrity.get('valid') and regular:hard,warn,t1,t2,mode=self._levels(price,pos,power,delta,vwap,ema20,b1,b5)
         else:hard=warn=t1=t2=None; mode='DATA_INVALID' if not integrity.get('valid') else 'REFERENCE_ONLY'
@@ -230,8 +292,17 @@ class CleanEngine:
         elif structure<=-15:reason.append('가격구조 하락')
         if abs(volume)>=8:reason.append('거래량 유입' if volume>0 else '매도 거래량')
         if abs(momentum)>=7:reason.append('모멘텀 상승' if momentum>0 else '모멘텀 하락')
-        final_reason=('DATA INVALID · '+' / '.join(integrity.get('reasons') or [])) if not integrity.get('valid') else (' · '.join(reason[:3]) or '뚜렷한 실시간 힘 없음')
-        return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
+        if not integrity.get('valid'):
+            final_reason='DATA INVALID · '+' / '.join(integrity.get('reasons') or [])
+        elif state=='ENTRY':
+            final_reason=f"ENTRY · 5분 Setup {entry_gate['setup_count']}/{entry_gate['setup_total']} · 1분 Trigger {entry_gate['trigger_count']}/{entry_gate['trigger_total']}"
+        elif state=='READY':
+            final_reason=f"READY · 5분 Setup 완료 · 1분 Trigger {entry_gate['trigger_count']}/{entry_gate['trigger_total']}"
+        elif state=='SETUP':
+            final_reason=f"SETUP · 5분 조건 {entry_gate['setup_count']}/{entry_gate['setup_total']} · 1분 파동 대기"
+        else:
+            final_reason=' · '.join(reason[:3]) or '뚜렷한 실시간 힘 없음'
+        return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'entry_gate':entry_gate,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
     def refresh_korea_tracker(self,korea):
         syms=self.tracked_symbols('KOREA'); fmap={r['symbol']:r for r in self.finder['KOREA']['rows']}; pmap={p['symbol']:p for p in self.store.positions('KOREA')}; pulse={str(r.get('symbol') or ''):r for r in (korea.intraday_pulse.get('rows') or [])}; rows=[]
         for sym in syms:

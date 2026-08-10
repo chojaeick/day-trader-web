@@ -33,7 +33,7 @@ def controls(m,row):
             held=f(row.get('qty')); st.caption(f'현재 보유 {held:g}주 · 평균단가 {px(row.get("avg_entry"),m)}'); a,b,c=st.columns(3); q=a.number_input('매도 수량',min_value=0.0,max_value=max(held,0.0),step=1.0,key=f'sq{m}{sym}'); p=b.number_input('실제 매도가',min_value=0.0,step=.01 if m=='USA' else 10.0,key=f'sp{m}{sym}')
             if c.button('매도 등록',key=f'sell{m}{sym}',use_container_width=True):
                 rr=post('/api/v4/position/sell',{'market':m,'symbol':sym,'qty':q,'price':p}); st.success('매도 등록 완료') if rr.get('ok') else st.error(rr.get('error')); st.rerun() if rr.get('ok') else None
-st.title('📈 DAY TRADER V4'); st.caption('CLEAN ENGINE · Finder → 최대 5종목 Tracker → Data Integrity Gate → Entry / Position / Exit → Validation · NO AUTO ORDER')
+st.title('📈 DAY TRADER V4'); st.caption('CLEAN ENGINE · Finder → 최대 5종목 Tracker → Data Integrity Gate → 5m Setup + 1m Trigger → Position / Exit → Validation · NO AUTO ORDER')
 ml=st.radio('시장',['🇺🇸 USA','🇰🇷 KOREA'],horizontal=True,label_visibility='collapsed'); m='USA' if 'USA' in ml else 'KOREA'; t=st.tabs(['📈 Trading','🗞️ Briefing','🧪 Validation','📚 Archive'])
 # Real-time display option: backend always refreshes every 5s.
 # UI auto-refresh is opt-in so manual order-entry fields are not unexpectedly reset.
@@ -60,6 +60,18 @@ with t[0]:
             else:
                 a,b,c,d=st.columns(4); a.metric('경고 Floor',px(r.get('warning_floor'),m)); b.metric('Hard Floor',px(r.get('hard_floor'),m)); c.metric('T1',px(r.get('target1'),m)); d.metric('T2',px(r.get('target2'),m))
             comp=r.get('components') or {}; st.caption(f"Power 구성 · 가격구조 {f(comp.get('structure')):+.0f} / 거래량 {f(comp.get('volume')):+.0f} / 모멘텀 {f(comp.get('momentum')):+.0f} / 시장·섹터 {f(comp.get('market_sector')):+.0f} / 위험감점 {f(comp.get('risk_penalty')):.0f}")
+            gate=r.get('entry_gate') or {}
+            if gate:
+                g1,g2,g3=st.columns(3)
+                g1.metric('5분 Setup',f"{gate.get('setup_count',0)}/{gate.get('setup_total',4)}",delta='완료' if gate.get('setup_ok') else '대기')
+                g2.metric('1분 Trigger',f"{gate.get('trigger_count',0)}/{gate.get('trigger_total',5)}",delta='진입' if gate.get('entry') else '준비' if gate.get('ready') else '대기')
+                g3.metric('추격 방지','통과' if gate.get('chase_ok') else '차단')
+                labels={'price_above_vwap':'가격 > VWAP','ema9_above_ema20':'EMA9 > EMA20','five_min_rising':'5분 상승','five_min_structure':'5분 구조',
+                        'green_1m':'1분 양봉','break_prev_high':'직전 1분 고가 돌파','volume_expansion':'거래량 ≥1.5x','one_min_impulse':'1분 +0.15%','power_acceleration':'Power ≥60 & Δ≥4'}
+                checks=[]
+                for k,v in (gate.get('setup_checks') or {}).items(): checks.append(('✅' if v else '⬜')+' '+labels.get(k,k))
+                for k,v in (gate.get('trigger_checks') or {}).items(): checks.append(('✅' if v else '⬜')+' '+labels.get(k,k))
+                st.caption(' · '.join(checks))
             b1=api(f'/api/bars/{sel}?minutes=1&limit=120').get('data') or []; b5=api(f'/api/bars/{sel}?minutes=5&limit=120').get('data') or []; c1,c2=st.columns(2)
             with c1:
                 st.caption('1분봉 · Trigger');

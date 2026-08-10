@@ -783,6 +783,119 @@ def v4_coverage_audit(market:str='USA'):
     }
 
 
+
+@app.get('/api/v4/discovery-bridge-shadow')
+def v4_discovery_bridge_shadow(market:str='USA'):
+    market=str(market or 'USA').upper()
+    if market!='USA':
+        return {
+            'market':market,'supported':False,
+            'note':'Discovery Bridge Shadow is USA-first until verified Korea discovery/minute coverage is available.'
+        }
+
+    candidates=screener_rows(db.quotes(),db.daily_metrics(),40)
+    discovery=k.discovery if isinstance(getattr(k,'discovery',None),dict) else {}
+    live=(getattr(v4,'finder',{}) or {}).get('USA') or {}
+
+    # Same Finder formula, no state mutation / no TOP5 events.
+    shadow=v4.build_usa_finder(
+        candidates,discovery,5,db=db,
+        commit=False,shadow_allow_unknown_quality=True
+    )
+
+    live_rows=live.get('rows') or []
+    live_light=live.get('light_rows') or []
+    shadow_rows=shadow.get('rows') or []
+    shadow_light=shadow.get('light_rows') or []
+
+    live_f={str(r.get('symbol') or '').upper():r for r in live_rows}
+    live_l={str(r.get('symbol') or '').upper():r for r in live_light}
+    sh_f={str(r.get('symbol') or '').upper():r for r in shadow_rows}
+    sh_l={str(r.get('symbol') or '').upper():r for r in shadow_light}
+
+    dset={str(r.get('symbol') or '').upper() for r in (discovery.get('rows') or []) if r.get('symbol')}
+    eset={str(r.get('symbol') or '').upper() for r in (discovery.get('extreme_rows') or []) if r.get('symbol')}
+    qrset={str(r.get('symbol') or '').upper() for r in (discovery.get('quality_risk_rows') or []) if r.get('symbol')}
+
+    misses=[]
+    for c in candidates:
+        sym=str(c.get('symbol') or '').upper()
+        if not sym or sym in dset or sym in eset or sym in qrset:
+            continue
+        srow=sh_l.get(sym) or sh_f.get(sym)
+        misses.append({
+            'symbol':sym,
+            'screener_score':c.get('score'),
+            'change_pct':c.get('change_pct'),
+            'eligible':c.get('eligible'),
+            'rvol':c.get('rvol'),
+            'atr_pct':c.get('atr_pct'),
+            'dollar_volume':c.get('dollar_volume'),
+            'shadow_light_rank':(srow or {}).get('light_rank'),
+            'shadow_finder_rank':(sh_f.get(sym) or {}).get('rank'),
+            'shadow_finder_score':(srow or {}).get('finder_score'),
+            'shadow_quality':(srow or {}).get('quality'),
+            'recent_bars':(srow or {}).get('recent_bars'),
+            'fresh':(srow or {}).get('fresh_mode'),
+            'fresh_score':(srow or {}).get('fresh_score'),
+            'ret_1m':(srow or {}).get('ret_1m'),
+            'ret_3m':(srow or {}).get('ret_3m'),
+            'ret_5m':(srow or {}).get('ret_5m'),
+            'ret_15m':(srow or {}).get('ret_15m'),
+            'volume_accel':(srow or {}).get('volume_accel'),
+            'break_3m_high':(srow or {}).get('break_3m_high'),
+            'would_reach_light':sym in sh_l,
+            'would_reach_finder':sym in sh_f,
+            'note':(
+                'Finder Shadow TOP5' if sym in sh_f else
+                'Light Shadow only' if sym in sh_l else
+                'Shadow에서도 Light20 미진입'
+            )
+        })
+
+    misses.sort(
+        key=lambda r:(
+            1 if r.get('would_reach_finder') else 0,
+            1 if r.get('would_reach_light') else 0,
+            float(r.get('shadow_finder_score') or -1),
+            float(r.get('screener_score') or 0)
+        ),
+        reverse=True
+    )
+
+    live_syms=[str(r.get('symbol') or '').upper() for r in live_rows]
+    shadow_syms=[str(r.get('symbol') or '').upper() for r in shadow_rows]
+    new_shadow=[s for s in shadow_syms if s not in live_syms]
+    displaced=[s for s in live_syms if s not in shadow_syms]
+
+    comparison=[]
+    for i in range(max(len(live_rows),len(shadow_rows))):
+        lr=live_rows[i] if i<len(live_rows) else {}
+        sr=shadow_rows[i] if i<len(shadow_rows) else {}
+        comparison.append({
+            'rank':i+1,
+            'live_symbol':lr.get('symbol'),
+            'live_score':lr.get('finder_score'),
+            'shadow_symbol':sr.get('symbol'),
+            'shadow_score':sr.get('finder_score'),
+            'shadow_unknown_quality':sr.get('shadow_quality_unknown'),
+        })
+
+    return {
+        'market':'USA','supported':True,
+        'updated_at':datetime.now(timezone.utc).isoformat(),
+        'live_finder':live_syms,
+        'shadow_finder':shadow_syms,
+        'new_shadow_entrants':new_shadow,
+        'displaced_live':displaced,
+        'comparison':comparison,
+        'miss_rows':misses,
+        'shadow_light_count':len(shadow_light),
+        'unknown_quality_policy':'Screener eligible + missing verified discovery quality => SHADOW_UNKNOWN, quality bonus 0',
+        'note':'Shadow only. Same Finder scoring path, commit=False. No live Finder state/event/order is changed.'
+    }
+
+
 @app.get('/api/v4/validation/marks')
 def v4_validation_marks(market:str|None=None,limit:int=Query(1000,ge=1,le=5000)):
     return {'data':v4.store.validation_marks(market,limit),'note':'Forward-return marks: +5/+15/+30/+60m and MFE/MAE. Heuristic diagnostics, not probabilities.'}

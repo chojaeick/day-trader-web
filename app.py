@@ -566,6 +566,45 @@ with t[2]:
             else:
                 st.success('현재 Screener 종목 중 Discovery 계층 완전 누락은 감지되지 않았습니다.')
 
+            st.markdown('##### 🌉 Discovery Bridge Shadow Audit')
+            st.caption('Discovery 누락 종목을 실제 Finder에 넣지 않고, 동일 Finder 점수식으로 가상 재평가합니다. 품질정보가 없는 Screener eligible 종목은 SHADOW_UNKNOWN으로 두고 Quality 보너스 0점으로 계산합니다.')
+            bridge=api(f'/api/v4/discovery-bridge-shadow?market={m}') or {}
+            if bridge.get('supported'):
+                b1,b2,b3=st.columns(3)
+                b1.metric('가상 Finder 신규',len(bridge.get('new_shadow_entrants') or []))
+                b2.metric('가상으로 밀려난 기존',len(bridge.get('displaced_live') or []))
+                b3.metric('Shadow Light',bridge.get('shadow_light_count',0))
+
+                comp=pd.DataFrame(bridge.get('comparison') or [])
+                if len(comp):
+                    st.markdown('###### Live Finder vs Bridge Shadow Finder')
+                    st.dataframe(comp,use_container_width=True,hide_index=True)
+
+                miss_shadow=pd.DataFrame(bridge.get('miss_rows') or [])
+                if len(miss_shadow):
+                    st.markdown('###### Discovery Miss를 가상으로 넣었을 때')
+                    cols=[c for c in [
+                        'symbol','screener_score','change_pct','eligible',
+                        'shadow_light_rank','shadow_finder_rank','shadow_finder_score',
+                        'shadow_quality','recent_bars','fresh','fresh_score',
+                        'ret_1m','ret_3m','ret_5m','ret_15m','volume_accel',
+                        'break_3m_high','would_reach_light','would_reach_finder','note'
+                    ] if c in miss_shadow.columns]
+                    st.dataframe(miss_shadow[cols],use_container_width=True,hide_index=True)
+
+                entrants=bridge.get('new_shadow_entrants') or []
+                displaced=bridge.get('displaced_live') or []
+                if entrants:
+                    st.warning('Bridge Shadow에서 Finder TOP5에 새로 들어오는 누락 종목 · '+', '.join(entrants))
+                    if displaced:
+                        st.write('가상으로 밀려나는 기존 Finder · '+', '.join(displaced))
+                else:
+                    st.success('현재 Discovery 누락 종목을 보수적으로 가상 연결해도 Finder TOP5 변화는 없습니다.')
+
+                st.caption('주의: 이 Shadow는 품질정보 누락 종목에 Quality 보너스를 주지 않습니다. minute bars가 부족하면 recent/Fresh가 0에 가깝게 평가될 수 있으므로 recent_bars도 함께 봐야 합니다.')
+            else:
+                st.info(bridge.get('note') or 'Bridge Shadow는 현재 USA만 지원합니다.')
+
             st.markdown('##### 🔄 Inverse / Leveraged ETF 파이프라인')
             inv=pd.DataFrame(cov.get('inverse') or [])
             if len(inv):
@@ -1006,7 +1045,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.6.1 · LIGHT→FINDER CUTLINE + DISCOVERY MISS AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.6.2 · DISCOVERY BRIDGE SHADOW AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

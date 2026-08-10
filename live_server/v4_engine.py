@@ -571,7 +571,7 @@ class V4Store:
 class CleanEngine:
     def __init__(self,db_path):
         self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._lock=threading.RLock()
-    def build_usa_finder(self,candidates,discovery,limit=5,db=None):
+    def build_usa_finder(self,candidates,discovery,limit=5,db=None,commit=True,shadow_allow_unknown_quality=False):
         qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}
         rows=[]
         inverse_syms={'SOXS','SQQQ'}
@@ -745,7 +745,17 @@ class CleanEngine:
 
         for c in candidates or []:
             sym=str(c.get('symbol') or '').upper(); q=qmap.get(sym) or {}; quality=q.get('quality_grade')
-            if quality not in ('A','B_EVENT','C_HIGH_RISK'):continue
+            shadow_quality_unknown=False
+            if quality not in ('A','B_EVENT','C_HIGH_RISK'):
+                # V4.6.2 Discovery Bridge Shadow:
+                # production still rejects rows without verified discovery quality.
+                # Shadow may evaluate Screener-eligible misses conservatively with
+                # zero quality bonus. This never mutates live Finder when commit=False.
+                if shadow_allow_unknown_quality and bool(c.get('eligible')):
+                    quality='SHADOW_UNKNOWN'
+                    shadow_quality_unknown=True
+                else:
+                    continue
             price=_f(c.get('price')); dv=_f(c.get('dollar_volume')); rvol=_f(c.get('rvol')); atr=abs(_f(c.get('atr_pct'))); chg=_f(c.get('change_pct'))
             if price<5 or dv<20_000_000 or atr<=0 or atr>12:continue
 
@@ -877,8 +887,10 @@ class CleanEngine:
                 'prior_vol_median_10m':recent.get('prior_vol_median_10m'),
                 'volume_coverage_10m':recent.get('volume_coverage_10m'),
                 'observed_power':observed_power,'fade_penalty':round(fade_penalty,1),
+                'recent_bars':recent.get('bars'),
                 'extreme_continue':extreme_continue,
                 'extreme_watch':quality=='C_HIGH_RISK',
+                'shadow_quality_unknown':shadow_quality_unknown,
                 'source_origin':q.get('origin'),
                 'inverse_candidate':sym in inverse_syms
             })
@@ -918,6 +930,21 @@ class CleanEngine:
 
         selected=selected[:limit]
         for i,r in enumerate(selected,1):r['rank']=i
+
+        result={
+            'rows':selected,
+            'updated_at':_now(),
+            'session':_session('USA'),
+            'light_rows':light_rows,
+            'light_count':len(light_rows),
+            'rotation_seconds':30,
+            'market_regime':regime,
+            'preferred_direction':'INVERSE' if regime in ('BEAR','STRONG_BEAR') else 'LONG',
+            'shadow':not commit,
+        }
+        if not commit:
+            return result
+
         self._update_finder('USA',selected)
         self.finder['USA']['light_rows']=light_rows
         self.finder['USA']['light_count']=len(light_rows)

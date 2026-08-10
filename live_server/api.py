@@ -725,25 +725,69 @@ def v4_coverage_audit(market:str='USA'):
     movers.sort(key=lambda r:abs(r['change_pct']),reverse=True)
 
     inverse=[]
+    core_etfs={'SOXS','SQQQ','SOXL','TQQQ'}
     for sym in ('SOXS','SQQQ','SOXL','TQQQ'):
-        r=hmap.get(sym) or fmap.get(sym) or lmap.get(sym) or dmap.get(sym) or emap.get(sym) or qrmap.get(sym) or smap.get(sym) or qmap.get(sym) or {}
+        meta=hmap.get(sym) or fmap.get(sym) or lmap.get(sym) or dmap.get(sym) or emap.get(sym) or qrmap.get(sym) or smap.get(sym) or {}
+        q=qmap.get(sym) or {}
+
+        # V4.6.2.2: metadata determines pipeline stage, but latest quote wins for
+        # market fields when Discovery carries placeholder 0/None values.
+        def _live_num(key):
+            try:
+                qv=float(q.get(key) or 0)
+            except Exception:
+                qv=0.0
+            if qv!=0:
+                return qv
+            try:
+                return float(meta.get(key) or 0)
+            except Exception:
+                return 0.0
+
         inverse.append({
             'symbol':sym,
             'stage':stage(sym),
-            'change_pct':r.get('change_pct'),
-            'price':r.get('price'),
-            'finder_score':r.get('finder_score'),
-            'fresh':r.get('fresh_mode'),
+            'change_pct':_live_num('change_pct'),
+            'price':_live_num('price'),
+            'finder_score':(fmap.get(sym) or lmap.get(sym) or {}).get('finder_score'),
+            'fresh':(fmap.get(sym) or lmap.get(sym) or {}).get('fresh_mode'),
             'power':(hmap.get(sym) or {}).get('power'),
+            'quote_age_sec':_age_seconds(q) if q else None,
             'reason':reason(sym),
         })
 
-    stale=[]
+    # Stale severity:
+    # Critical = current live decision universe OR current Bridge warm targets OR core ETFs.
+    # Inactive cache = old DB quote outside the decision universe.
+    bridge_candidates=[]
+    for r in screen_rows:
+        sym=str(r.get('symbol') or '').upper()
+        if not sym or not r.get('eligible') or sym in ds or sym in es or sym in qrs:
+            continue
+        bridge_candidates.append(r)
+    bridge_candidates.sort(
+        key=lambda r:(float(r.get('score') or 0),abs(float(r.get('change_pct') or 0))),
+        reverse=True
+    )
+    bridge_syms={str(r.get('symbol') or '').upper() for r in bridge_candidates[:8]}
+    critical_syms=set(fs)|set(hs)|bridge_syms|core_etfs
+
+    critical_stale=[]
+    inactive_stale=[]
     for sym,q in qmap.items():
         age=_age_seconds(q)
-        if age is not None and age>180:
-            stale.append({'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price')})
-    stale.sort(key=lambda x:x['age_sec'],reverse=True)
+        if age is None or age<=180:
+            continue
+        row={
+            'symbol':sym,'age_sec':age,'stage':stage(sym),'price':q.get('price'),
+            'severity':'CRITICAL' if sym in critical_syms else 'INACTIVE_CACHE'
+        }
+        if sym in critical_syms:
+            critical_stale.append(row)
+        else:
+            inactive_stale.append(row)
+    critical_stale.sort(key=lambda x:x['age_sec'],reverse=True)
+    inactive_stale.sort(key=lambda x:x['age_sec'],reverse=True)
 
     # V4.6.1: explain Light -> Finder cutline without changing selection logic.
     finder_cut=min([float(r.get('finder_score') or 0) for r in finder_rows],default=0.0)
@@ -831,7 +875,11 @@ def v4_coverage_audit(market:str='USA'):
         'source_counts':source_counts,
         'inverse':inverse,
         'top_abs_movers':movers[:25],
-        'stale_rows':stale[:30],
+        'critical_stale_rows':critical_stale[:30],
+        'inactive_stale_rows':inactive_stale[:30],
+        'critical_stale_count':len(critical_stale),
+        'inactive_stale_count':len(inactive_stale),
+        'bridge_warm_symbols':sorted(bridge_syms),
         'finder_cut':round(finder_cut,1) if finder_cut else None,
         'light_audit':light_audit,
         'discovery_miss':discovery_miss[:30],

@@ -606,6 +606,12 @@ with t[2]:
                 if len(etf):
                     st.markdown('###### 핵심 Leveraged / Inverse ETF 데이터 준비')
                     st.dataframe(etf,use_container_width=True,hide_index=True)
+                ready_n=int(bridge.get('data_ready_misses',0) or 0)
+                poor_n=int(bridge.get('insufficient_data_misses',0) or 0)
+                if poor_n:
+                    st.warning(f'Fair Bridge 데이터 준비 상태 · READY {ready_n} / INSUFFICIENT {poor_n}')
+                else:
+                    st.success(f'Fair Bridge 데이터 준비 완료 · READY {ready_n} / INSUFFICIENT 0')
                 st.caption('Fair Guard: SHADOW_UNKNOWN은 recent_bars≥6 + price>0일 때만 Shadow Finder에 들어갈 수 있습니다. 품질정보 누락 종목에는 Quality 보너스를 주지 않습니다.')
             else:
                 st.info(bridge.get('note') or 'Bridge Shadow는 현재 USA만 지원합니다.')
@@ -618,12 +624,21 @@ with t[2]:
                     if rr.get('symbol') in ('SOXS','SQQQ') and rr.get('stage') not in ('FINDER','HEAVY5'):
                         st.write(f"• {rr.get('symbol')} · {rr.get('stage')} · {rr.get('reason')}")
 
-            stale=pd.DataFrame(cov.get('stale_rows') or [])
-            if len(stale):
-                st.warning(f"3분 초과 stale quote {len(stale)}개가 감지되었습니다. 아래 표는 최대 30개입니다.")
-                st.dataframe(stale,use_container_width=True,hide_index=True)
+            critical_stale=pd.DataFrame(cov.get('critical_stale_rows') or [])
+            inactive_stale=pd.DataFrame(cov.get('inactive_stale_rows') or [])
+            if len(critical_stale):
+                st.error(
+                    f"⚠️ 현재 의사결정 대상에서 3분 초과 stale quote "
+                    f"{cov.get('critical_stale_count',len(critical_stale))}개가 감지되었습니다."
+                )
+                st.dataframe(critical_stale,use_container_width=True,hide_index=True)
             else:
-                st.success('현재 저장 quote 기준 3분 초과 stale 데이터가 감지되지 않았습니다.')
+                st.success('현재 Finder/Heavy/Bridge warm/핵심 ETF에서 3분 초과 stale quote가 없습니다.')
+
+            if len(inactive_stale):
+                with st.expander(f"Inactive cache stale · {cov.get('inactive_stale_count',len(inactive_stale))}개"):
+                    st.caption('현재 의사결정 대상이 아닌 과거 DB quote입니다. 실시간 장애 경고에는 포함하지 않습니다.')
+                    st.dataframe(inactive_stale,use_container_width=True,hide_index=True)
 
             with st.expander('현재 파이프라인 심볼'):
                 st.write('Light · '+', '.join(cov.get('light_symbols') or []))
@@ -1050,7 +1065,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.6.2.1 · CANDIDATE DATA WARM + FAIR BRIDGE AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.6.2.2 · DATA CONSISTENCY FIX · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

@@ -153,6 +153,22 @@ def screener_rows(quotes: list[dict], metrics: list[dict], top_n: int=10) -> lis
                 r['eligible']=True
                 r['parts']['Bear inverse rotation']=round(boost,1)
 
+    # This app is manual long-entry only. A falling common stock is useful context,
+    # but should not outrank a rising long/inverse candidate simply because |change| is large.
+    for r in out:
+        sym=str(r.get('symbol') or '').upper()
+        chg=float(r.get('change_pct') or 0)
+        if sym not in INVERSE and chg < -0.30:
+            penalty=min(30.0, abs(chg)*3.5)
+            r['score']=max(0, round(float(r.get('score') or 0)-penalty))
+            r['parts']['Long-only down penalty']=-round(penalty,1)
+
+        # Mild leadership reward: positive movers with actual RVOL get preference over flat names.
+        if chg > 0.50 and float(r.get('rvol') or 0) >= 1.0:
+            leadership=min(10.0, chg*0.7 + min(float(r.get('rvol') or 0),4)*1.2)
+            r['score']=min(100, round(float(r.get('score') or 0)+leadership))
+            r['parts']['Live leadership']=round(leadership,1)
+
     rows=[r for r in out if r['eligible']]
     rows.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)
 

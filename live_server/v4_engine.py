@@ -296,14 +296,25 @@ class CleanEngine:
             # Make Finder responsive to the current tape instead of mostly static
             # liquidity/ATR characteristics.
             live_score=_f(c.get('score'),base)
-            score=.58*live_score+.42*base
+
+            # V2: current tape matters more than static quality/ATR characteristics.
+            score=.72*live_score+.28*base
+
+            # We do not auto-short common stocks. A negative common-stock move should not
+            # dominate the actionable TOP5 merely because its absolute move is large.
+            down_penalty=0.0
+            if sym not in inverse_syms and chg < -0.30:
+                down_penalty=min(28.0,abs(chg)*3.0)
+                score-=down_penalty
 
             inverse_bonus=0.0
             if regime in ('BEAR','STRONG_BEAR') and sym in inverse_syms and chg>0:
-                inverse_bonus=8 if regime=='BEAR' else 14
+                inverse_bonus=10 if regime=='BEAR' else 16
                 score+=inverse_bonus
 
             reason=f"live {live_score:.0f} + quality/liquidity {base:.0f}"
+            if down_penalty:
+                reason+=f" - long-only down {down_penalty:.0f}"
             if inverse_bonus:
                 reason+=f" + {regime} inverse {inverse_bonus:.0f}"
 
@@ -332,6 +343,7 @@ class CleanEngine:
         for i,r in enumerate(selected,1):r['rank']=i
         self._update_finder('USA',selected)
         self.finder['USA']['market_regime']=regime
+        self.finder['USA']['preferred_direction']='INVERSE' if regime in ('BEAR','STRONG_BEAR') else 'LONG'
         return self.finder['USA']
     def build_korea_finder(self,discovery,limit=5):
         rows=[]

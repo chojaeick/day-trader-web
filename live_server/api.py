@@ -290,7 +290,7 @@ async def v4_engine_forever():
     while True:
         try:
             now=time.monotonic()
-            if now-last['USA']>=300:
+            if now-last['USA']>=60:
                 v4.build_usa_finder(screener_rows(db.quotes(),db.daily_metrics(),30),k.discovery,5); last['USA']=now
             if now-last['KOREA']>=300:
                 v4.build_korea_finder(korea.discovery,5); last['KOREA']=now

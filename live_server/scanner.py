@@ -182,8 +182,24 @@ def merge_rankings(volume_rows:list[dict], dollar_rows:list[dict], core:list[str
     for r in picked:
         if r['symbol'] not in seen:
             symbols.append(r['symbol']); seen.add(r['symbol'])
-        r['sources']=','.join(sorted(r['sources']))
-        r['origin']='CORE' if r['symbol'] in core else 'AUTO'
+
+        # V4.6.0.1: sources may already be a normalized comma-separated string
+        # (notably EXTREME_WATCH). Never join a string character-by-character.
+        src=r.get('sources')
+        if isinstance(src,(set,list,tuple)):
+            r['sources']=','.join(sorted(str(x) for x in src if x))
+        elif isinstance(src,str):
+            r['sources']=src
+        else:
+            r['sources']=''
+
+        # Preserve EXTREME_WATCH provenance instead of overwriting it as AUTO.
+        if r['symbol'] in core:
+            r['origin']='CORE'
+        elif str(r.get('origin') or '').startswith('EXTREME'):
+            r['origin']='EXTREME_WATCH'
+        else:
+            r['origin']='AUTO'
 
     extreme_rows.sort(key=lambda r:(abs(r['change_pct']),r['volume']),reverse=True)
     q_extreme=[]

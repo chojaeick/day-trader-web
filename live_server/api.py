@@ -564,12 +564,16 @@ def v4_coverage_audit(market:str='USA'):
     tracker_rows=_rows(tracker_obj)
 
     ds=_symset(discovery_rows)
+    es=_symset(extreme_rows)
+    qrs=_symset(quality_risk_rows)
     ss=_symset(screen_rows)
     ls=_symset(light_rows)
     fs=_symset(finder_rows)
     hs=_symset(tracker_rows)
 
     dmap={str(r.get('symbol') or '').upper():r for r in discovery_rows}
+    emap={str(r.get('symbol') or '').upper():r for r in extreme_rows}
+    qrmap={str(r.get('symbol') or '').upper():r for r in quality_risk_rows}
     smap={str(r.get('symbol') or '').upper():r for r in screen_rows}
     lmap={str(r.get('symbol') or '').upper():r for r in light_rows}
     fmap={str(r.get('symbol') or '').upper():r for r in finder_rows}
@@ -582,7 +586,10 @@ def v4_coverage_audit(market:str='USA'):
         if sym in hs:return 'HEAVY5'
         if sym in fs:return 'FINDER'
         if sym in ls:return 'LIGHT'
+        if sym in es and sym in ds:return 'EXTREME_WATCH'
+        if sym in es:return 'EXTREME'
         if sym in ds:return 'DISCOVERY'
+        if sym in qrs:return 'QUALITY_RISK'
         if sym in ss:return 'SCREENER'
         return 'NOT_SEEN'
 
@@ -592,22 +599,38 @@ def v4_coverage_audit(market:str='USA'):
         if sym in ls:
             r=lmap.get(sym) or {}
             return f"Light only · score={r.get('finder_score',r.get('score'))} · fresh={r.get('fresh_mode')}"
+        if sym in es:
+            r=emap.get(sym) or dmap.get(sym) or {}
+            return (
+                f"Extreme mover · quality={r.get('quality_grade','C_HIGH_RISK')} · "
+                f"risk={r.get('chase_risk','EXTREME')} · "
+                + ('active watch universe' if sym in ds else 'separate extreme audit row')
+            )
         if sym in ds:
             r=dmap.get(sym) or {}
             grade=r.get('quality_grade')
             origin=r.get('origin')
             risk=r.get('chase_risk')
             return f"Discovery only · origin={origin} · quality={grade} · risk={risk}"
+        if sym in qrs:
+            r=qrmap.get(sym) or {}
+            return f"Quality risk · grade={r.get('quality_grade')} · reason={r.get('quality_reasons')}"
         if sym in ss:
             r=smap.get(sym) or {}
             return f"Screener only · score={r.get('score')} · eligible={r.get('eligible')}"
-        return 'Not present in current discovery/screener snapshots'
+        return 'Not present in current discovery/extreme/screener snapshots'
 
     # Current discovery-source coverage.
     source_counts={}
     for r in discovery_rows:
-        src=str(r.get('sources') or '')
-        for s0 in [x.strip() for x in src.split(',') if x.strip()]:
+        src=r.get('sources')
+        if isinstance(src,str):
+            parts=[x.strip() for x in src.split(',') if x.strip()]
+        elif isinstance(src,(set,list,tuple)):
+            parts=[str(x).strip() for x in src if str(x).strip()]
+        else:
+            parts=[]
+        for s0 in parts:
             source_counts[s0]=source_counts.get(s0,0)+1
 
     # Best current positive/negative movers among rows we actually know about.
@@ -644,7 +667,7 @@ def v4_coverage_audit(market:str='USA'):
 
     inverse=[]
     for sym in ('SOXS','SQQQ','SOXL','TQQQ'):
-        r=dmap.get(sym) or smap.get(sym) or lmap.get(sym) or fmap.get(sym) or hmap.get(sym) or qmap.get(sym) or {}
+        r=hmap.get(sym) or fmap.get(sym) or lmap.get(sym) or dmap.get(sym) or emap.get(sym) or qrmap.get(sym) or smap.get(sym) or qmap.get(sym) or {}
         inverse.append({
             'symbol':sym,
             'stage':stage(sym),

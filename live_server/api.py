@@ -313,13 +313,18 @@ async def v4_engine_forever():
     while True:
         try:
             now=time.monotonic()
-            if now-last['USA']>=60:
+            if now-last['USA']>=30:
                 finder=v4.build_usa_finder(
-                    screener_rows(db.quotes(),db.daily_metrics(),30),
-                    k.discovery,5
+                    screener_rows(db.quotes(),db.daily_metrics(),40),
+                    k.discovery,5,db=db
                 )
                 finder_syms=[r.get('symbol') for r in (finder.get('rows') or [])]
+                light_syms=[r.get('symbol') for r in (finder.get('light_rows') or [])]
                 await warm_usa_symbols(finder_syms)
+                logging.info(
+                    'V4 light tracker: %s',
+                    ','.join(x for x in light_syms[:20] if x)
+                )
                 # Keep the cache bounded to names that are still relevant plus positions.
                 active=set(finder_syms)
                 try:
@@ -492,7 +497,7 @@ def v4_status(market:str):
 @app.get('/api/v4/{market}/finder')
 def v4_finder(market:str):
     market=market.upper()
-    if market=='USA': return v4.build_usa_finder(screener_rows(db.quotes(),db.daily_metrics(),30),k.discovery,5)
+    if market=='USA': return v4.build_usa_finder(screener_rows(db.quotes(),db.daily_metrics(),40),k.discovery,5,db=db)
     if market=='KOREA': return v4.build_korea_finder(korea.discovery,5)
     raise HTTPException(400,'market must be USA or KOREA')
 

@@ -269,7 +269,7 @@ class V4Store:
 class CleanEngine:
     def __init__(self,db_path):
         self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._lock=threading.RLock()
-    def build_usa_finder(self,candidates,discovery,limit=5):
+    def build_usa_finder(self,candidates,discovery,limit=5,db=None):
         qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}
         rows=[]
         inverse_syms={'SOXS','SQQQ'}
@@ -278,6 +278,55 @@ class CleanEngine:
             if c.get('market_regime'):
                 regime=str(c.get('market_regime')).upper()
                 break
+
+        def recent_leadership(sym):
+            if db is None:
+                return {'ret_5m':0.0,'ret_15m':0.0,'vol_accel':1.0,'bars':0,'score':0.0}
+            try:
+                ticks=db.ticks(sym,2500)
+                b=ticks_to_bars(ticks,1)
+                if len(b)<6:
+                    return {'ret_5m':0.0,'ret_15m':0.0,'vol_accel':1.0,'bars':len(b),'score':0.0}
+                b=b.tail(25).copy()
+                close=pd.to_numeric(b['close'],errors='coerce')
+                volume=pd.to_numeric(b['volume'],errors='coerce').fillna(0)
+                last=_f(close.iloc[-1])
+                p5=_f(close.iloc[-6]) if len(close)>=6 else last
+                p15=_f(close.iloc[-16]) if len(close)>=16 else _f(close.iloc[0])
+                r5=(last/p5-1)*100 if p5>0 else 0.0
+                r15=(last/p15-1)*100 if p15>0 else 0.0
+                recent_vol=_f(volume.tail(3).mean(),0)
+                prior_vol=_f(volume.iloc[-13:-3].mean(),0) if len(volume)>=13 else _f(volume.iloc[:-3].mean(),0)
+                vacc=recent_vol/max(prior_vol,1.0)
+
+                lead=0.0
+                # Reward what is moving NOW, not only what moved earlier today.
+                if r5>=3: lead+=24
+                elif r5>=1.5: lead+=18
+                elif r5>=0.7: lead+=12
+                elif r5>=0.25: lead+=6
+                elif r5<=-1.5: lead-=24
+                elif r5<=-0.7: lead-=15
+                elif r5<=-0.25: lead-=7
+
+                if r15>=5: lead+=18
+                elif r15>=2.5: lead+=13
+                elif r15>=1: lead+=8
+                elif r15<=-2.5: lead-=16
+                elif r15<=-1: lead-=9
+
+                if vacc>=3: lead+=10
+                elif vacc>=1.8: lead+=7
+                elif vacc>=1.25: lead+=3
+                elif vacc<0.65: lead-=3
+
+                return {
+                    'ret_5m':round(r5,3),'ret_15m':round(r15,3),
+                    'vol_accel':round(vacc,2),'bars':len(b),
+                    'score':round(_clip(lead,-35,40),1)
+                }
+            except Exception:
+                return {'ret_5m':0.0,'ret_15m':0.0,'vol_accel':1.0,'bars':0,'score':0.0}
 
         for c in candidates or []:
             sym=str(c.get('symbol') or '').upper(); q=qmap.get(sym) or {}; quality=q.get('quality_grade')
@@ -297,8 +346,11 @@ class CleanEngine:
             # liquidity/ATR characteristics.
             live_score=_f(c.get('score'),base)
 
-            # V2: current tape matters more than static quality/ATR characteristics.
-            score=.72*live_score+.28*base
+            # V4.4: daily/live screener remains the base, but actual last 5m/15m
+            # leadership can promote a fresh mover or demote a fading earlier winner.
+            score=.65*live_score+.25*base
+            recent=recent_leadership(sym)
+            score+=recent['score']
 
             # We do not auto-short common stocks. A negative common-stock move should not
             # dominate the actionable TOP5 merely because its absolute move is large.
@@ -312,7 +364,24 @@ class CleanEngine:
                 inverse_bonus=10 if regime=='BEAR' else 16
                 score+=inverse_bonus
 
-            reason=f"live {live_score:.0f} + quality/liquidity {base:.0f}"
+            # If this name was recently in Heavy Tracker, use its measured Power
+            # to prevent an earlier daily winner from staying near the top while fading now.
+            prev_power_row=self._last.get(('POWER','USA',sym))
+            observed_power=_f((prev_power_row or {}).get('power')) if prev_power_row else None
+            fade_penalty=0.0
+            if recent.get('bars',0)>=6:
+                r5=_f(recent.get('ret_5m'))
+                if r5 < -0.25:
+                    fade_penalty += min(14.0, 5.0 + abs(r5)*5.0)
+                if observed_power is not None and observed_power < 0 and r5 < 0:
+                    fade_penalty += min(18.0, 8.0 + abs(observed_power)*0.22)
+            score-=fade_penalty
+
+            reason=f"live {live_score:.0f} + quality/liquidity {base:.0f} + recent {recent['score']:+.0f}"
+            if recent.get('bars',0)>=6:
+                reason+=f" (5m {recent['ret_5m']:+.2f}% / 15m {recent['ret_15m']:+.2f}% / vol×{recent['vol_accel']:.1f})"
+            if fade_penalty:
+                reason+=f" - fading {fade_penalty:.0f}"
             if down_penalty:
                 reason+=f" - long-only down {down_penalty:.0f}"
             if inverse_bonus:
@@ -325,23 +394,36 @@ class CleanEngine:
                 'dollar_volume':dv,'rvol':rvol,'atr_pct':atr,
                 'risk':'CHASE' if chase else 'NORMAL',
                 'market_regime':regime,'finder_reason':reason,
+                'ret_5m':recent.get('ret_5m'),'ret_15m':recent.get('ret_15m'),
+                'volume_accel':recent.get('vol_accel'),'recent_score':recent.get('score'),
+                'observed_power':observed_power,'fade_penalty':round(fade_penalty,1),
                 'inverse_candidate':sym in inverse_syms
             })
 
-        rows.sort(key=lambda r:(r['finder_score'],r['dollar_volume']),reverse=True)
-        selected=rows[:limit]
+        # Light Tracker 20:
+        # broad/daily screening first, then live 5m/15m leadership + fade controls.
+        rows.sort(key=lambda r:(r['finder_score'],r['recent_score'],r['dollar_volume']),reverse=True)
+        light_rows=rows[:20]
+        for i,r in enumerate(light_rows,1):
+            r['light_rank']=i
+
+        # Heavy Tracker receives only the best 5 from Light20.
+        selected=light_rows[:limit]
 
         # A bearish regime must not silently hide a qualified inverse ETF.
         if regime in ('BEAR','STRONG_BEAR'):
-            inv=[r for r in rows if r.get('inverse_candidate') and r.get('change_pct',0)>0 and r.get('finder_score',0)>=35]
-            inv.sort(key=lambda r:(r['finder_score'],r['dollar_volume']),reverse=True)
+            inv=[r for r in light_rows if r.get('inverse_candidate') and r.get('change_pct',0)>0 and r.get('finder_score',0)>=35]
+            inv.sort(key=lambda r:(r['finder_score'],r['recent_score'],r['dollar_volume']),reverse=True)
             if inv and inv[0]['symbol'] not in {r['symbol'] for r in selected}:
                 selected=selected[:max(0,limit-1)]+[inv[0]]
-                selected.sort(key=lambda r:(r['finder_score'],r['dollar_volume']),reverse=True)
+                selected.sort(key=lambda r:(r['finder_score'],r['recent_score'],r['dollar_volume']),reverse=True)
 
         selected=selected[:limit]
         for i,r in enumerate(selected,1):r['rank']=i
         self._update_finder('USA',selected)
+        self.finder['USA']['light_rows']=light_rows
+        self.finder['USA']['light_count']=len(light_rows)
+        self.finder['USA']['rotation_seconds']=30
         self.finder['USA']['market_regime']=regime
         self.finder['USA']['preferred_direction']='INVERSE' if regime in ('BEAR','STRONG_BEAR') else 'LONG'
         return self.finder['USA']

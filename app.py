@@ -99,10 +99,47 @@ def _price_volume_chart(rows, title, height=250):
             id_vars=[tcol],var_name='Series',value_name='Value'
         ).dropna()
 
-        line=alt.Chart(long).mark_line(strokeWidth=2).encode(
-            x=alt.X(f'{tcol}:T',title=None,axis=alt.Axis(format='%H:%M',labelAngle=0)),
-            y=alt.Y('Value:Q',title='가격',scale=alt.Scale(domain=domain,zero=False)),
+        line=alt.Chart(long).mark_line().encode(
+            x=alt.X(
+                f'{tcol}:T',
+                title=None,
+                axis=alt.Axis(
+                    format='%H:%M',
+                    labelAngle=0,
+                    grid=True,
+                    gridOpacity=0.14,
+                    domainOpacity=0.25,
+                    tickOpacity=0.25
+                )
+            ),
+            y=alt.Y(
+                'Value:Q',
+                title='가격',
+                scale=alt.Scale(domain=domain,zero=False),
+                axis=alt.Axis(
+                    grid=True,
+                    gridOpacity=0.14,
+                    domainOpacity=0.25,
+                    tickOpacity=0.25
+                )
+            ),
             color=alt.Color('Series:N',title=None),
+            strokeWidth=alt.StrokeWidth(
+                'Series:N',
+                scale=alt.Scale(
+                    domain=['Price','VWAP','EMA9','EMA20'],
+                    range=[3.0,2.4,1.35,1.1]
+                ),
+                legend=None
+            ),
+            opacity=alt.Opacity(
+                'Series:N',
+                scale=alt.Scale(
+                    domain=['Price','VWAP','EMA9','EMA20'],
+                    range=[1.0,0.95,0.78,0.68]
+                ),
+                legend=None
+            ),
             tooltip=[
                 alt.Tooltip(f'{tcol}:T',title='시간'),
                 alt.Tooltip('Series:N',title='지표'),
@@ -110,9 +147,28 @@ def _price_volume_chart(rows, title, height=250):
             ],
         ).properties(height=height)
 
-        volume=alt.Chart(df).mark_bar(opacity=0.45).encode(
-            x=alt.X(f'{tcol}:T',title=None,axis=alt.Axis(format='%H:%M',labelAngle=0)),
-            y=alt.Y('Volume:Q',title='거래량'),
+        volume=alt.Chart(df).mark_bar(opacity=0.42).encode(
+            x=alt.X(
+                f'{tcol}:T',
+                title=None,
+                axis=alt.Axis(
+                    format='%H:%M',
+                    labelAngle=0,
+                    grid=False,
+                    domainOpacity=0.22,
+                    tickOpacity=0.22
+                )
+            ),
+            y=alt.Y(
+                'Volume:Q',
+                title='거래량',
+                axis=alt.Axis(
+                    grid=True,
+                    gridOpacity=0.10,
+                    domainOpacity=0.22,
+                    tickOpacity=0.22
+                )
+            ),
             tooltip=[
                 alt.Tooltip(f'{tcol}:T',title='시간'),
                 alt.Tooltip('Volume:Q',title='거래량',format=',.0f'),

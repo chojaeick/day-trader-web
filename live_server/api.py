@@ -532,6 +532,13 @@ def v4_validation_snapshots(market:str|None=None,limit:int=Query(500,ge=1,le=500
 def v4_validation_marks(market:str|None=None,limit:int=Query(1000,ge=1,le=5000)):
     return {'data':v4.store.validation_marks(market,limit),'note':'Forward-return marks: +5/+15/+30/+60m and MFE/MAE. Heuristic diagnostics, not probabilities.'}
 
+@app.get('/api/v4/validation/episodes')
+def v4_validation_episodes(market:str|None=None,limit:int=Query(5000,ge=1,le=10000),bridge_minutes:int=Query(5,ge=1,le=15)):
+    return {
+        'data':v4.store.validation_episodes(market,limit,bridge_minutes),
+        'note':'Signal episodes derived from minute validation snapshots. Brief inactive flickers are bridged; episode count is closer to independent signal cycles than raw snapshot count.'
+    }
+
 @app.get('/health')
 def health():
     qs=db.quotes()

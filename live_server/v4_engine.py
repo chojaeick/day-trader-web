@@ -260,6 +260,84 @@ class V4Store:
                 if mins>=60 and r['ret_60m'] is None:vals['ret_60m']=ret; vals['settled_at']=_now()
                 c.execute(f"UPDATE v4_validation_marks SET {','.join(f'{k}=?' for k in vals)} WHERE id=?",list(vals.values())+[r['id']])
 
+    def validation_episodes(self,market=None,limit=5000,bridge_minutes=5):
+        # Derive signal episodes from minute validation snapshots.
+        rows=self.validation_marks(market,limit)
+        if not rows:return []
+
+        active={'SETUP','READY','ENTRY','HOLD','PARTIAL_EXIT','EXIT_READY','HARD_EXIT'}
+        level={'SETUP':1,'READY':2,'ENTRY':3,'HOLD':4,'PARTIAL_EXIT':5,'EXIT_READY':6,'HARD_EXIT':7}
+        rows=sorted(rows,key=lambda r:(str(r.get('symbol') or ''),str(r.get('ts') or '')))
+        current={}; episodes=[]
+
+        def dt(v):
+            try:
+                x=datetime.fromisoformat(str(v).replace('Z','+00:00'))
+                return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+            except Exception:return None
+
+        def finish(sym,cur):
+            if not cur:return
+            start=cur['start']
+            first_ts=dt(start.get('ts')); last_ts=dt(cur.get('last_active_ts'))
+            duration=((last_ts-first_ts).total_seconds()/60) if first_ts and last_ts else 0.0
+            path=cur.get('path') or []
+            max_state=max(path,key=lambda s:level.get(s,0)) if path else str(start.get('state') or 'SETUP')
+            episodes.append({
+                'market':start.get('market'),'symbol':sym,
+                'start_ts':start.get('ts'),'end_ts':cur.get('last_active_ts'),
+                'duration_min':round(max(0.0,duration),1),
+                'start_state':start.get('state'),'max_state':max_state,
+                'state_path':' → '.join(path),
+                'anchor_price':start.get('anchor_price'),
+                'start_power':start.get('power'),'max_power':cur.get('max_power'),
+                'start_power_delta':start.get('power_delta'),
+                'finder_rank':start.get('finder_rank'),
+                'start_setup':start.get('setup_count'),'max_setup':cur.get('max_setup'),
+                'start_trigger':start.get('trigger_count'),'max_trigger':cur.get('max_trigger'),
+                'rvol':start.get('rvol'),'volume_ratio':start.get('volume_ratio'),
+                'ret_5m':start.get('ret_5m'),'ret_15m':start.get('ret_15m'),
+                'ret_30m':start.get('ret_30m'),'ret_60m':start.get('ret_60m'),
+                'mfe_pct':start.get('mfe_pct'),'mae_pct':start.get('mae_pct'),
+                'settled_at':start.get('settled_at'),
+                'settled':start.get('ret_60m') is not None,
+            })
+
+        for r in rows:
+            sym=str(r.get('symbol') or '').upper()
+            if not sym:continue
+            state=str(r.get('state') or 'WATCH').upper()
+            ts=dt(r.get('ts')); cur=current.get(sym)
+
+            if state in active:
+                if cur:
+                    last=dt(cur.get('last_active_ts'))
+                    gap=((ts-last).total_seconds()/60) if ts and last else 999
+                    if gap>bridge_minutes:
+                        finish(sym,cur); cur=None
+                if not cur:
+                    cur={'start':r,'last_active_ts':r.get('ts'),'path':[state],
+                         'max_power':_f(r.get('power')),
+                         'max_setup':int(_f(r.get('setup_count'))),
+                         'max_trigger':int(_f(r.get('trigger_count')))}
+                else:
+                    cur['last_active_ts']=r.get('ts')
+                    if not cur['path'] or cur['path'][-1]!=state:cur['path'].append(state)
+                    cur['max_power']=max(_f(cur.get('max_power')),_f(r.get('power')))
+                    cur['max_setup']=max(int(_f(cur.get('max_setup'))),int(_f(r.get('setup_count'))))
+                    cur['max_trigger']=max(int(_f(cur.get('max_trigger'))),int(_f(r.get('trigger_count'))))
+                current[sym]=cur
+            elif cur:
+                last=dt(cur.get('last_active_ts'))
+                gap=((ts-last).total_seconds()/60) if ts and last else 999
+                if gap>bridge_minutes:
+                    finish(sym,cur); current.pop(sym,None)
+
+        for sym,cur in list(current.items()):finish(sym,cur)
+        episodes.sort(key=lambda x:str(x.get('start_ts') or ''),reverse=True)
+        for i,e in enumerate(episodes,1):e['episode_id']=i
+        return episodes
+
     def validation_marks(self,market=None,limit=1000):
         sql='SELECT id,ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,setup_count,trigger_count,rvol,volume_ratio,hard_floor,warning_floor,floor_mode,ret_5m,ret_15m,ret_30m,ret_60m,mfe_pct,mae_pct,settled_at FROM v4_validation_marks'; args=[]
         if market:sql+=' WHERE market=?'; args=[market.upper()]

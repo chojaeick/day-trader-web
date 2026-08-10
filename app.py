@@ -519,6 +519,62 @@ with t[2]:
                     power_rows.append(r)
                 st.dataframe(pd.DataFrame(power_rows),use_container_width=True,hide_index=True)
 
+        st.markdown('#### 🧩 Episode Validation')
+        st.caption('분당 스냅샷을 그대로 세지 않고 SETUP→READY→ENTRY→EXIT 계열의 연속 신호를 하나의 Episode로 묶어 봅니다. 짧은 WATCH 흔들림은 5분까지 같은 Episode로 합칩니다.')
+        eps=api(f'/api/v4/validation/episodes?market={m}&limit=5000&bridge_minutes=5').get('data') or []
+        if eps:
+            edf=pd.DataFrame(eps)
+            edf['start_dt']=pd.to_datetime(edf['start_ts'],utc=True,errors='coerce')
+            if m=='USA':
+                try:edf['episode_date']=edf['start_dt'].dt.tz_convert('America/New_York').dt.date.astype(str)
+                except Exception:edf['episode_date']=edf['start_dt'].dt.date.astype(str)
+            else:
+                try:edf['episode_date']=edf['start_dt'].dt.tz_convert('Asia/Seoul').dt.date.astype(str)
+                except Exception:edf['episode_date']=edf['start_dt'].dt.date.astype(str)
+            e=edf[edf['episode_date']==report_date].copy() if report_date else edf.copy()
+            for col in ['start_power','max_power','start_setup','max_setup','start_trigger','max_trigger','ret_5m','ret_15m','ret_30m','ret_60m','mfe_pct','mae_pct','duration_min']:
+                if col in e.columns:e[col]=pd.to_numeric(e[col],errors='coerce')
+
+            ec1,ec2,ec3,ec4=st.columns(4)
+            ec1.metric('Episode 수',len(e))
+            ec2.metric('60분 완료',int(e['ret_60m'].notna().sum()) if 'ret_60m' in e.columns else 0)
+            ec3.metric('READY 이상',int(e['max_state'].isin(['READY','ENTRY','HOLD','PARTIAL_EXIT','EXIT_READY','HARD_EXIT']).sum()) if 'max_state' in e.columns else 0)
+            ec4.metric('ENTRY 도달',int(e['max_state'].isin(['ENTRY','HOLD','PARTIAL_EXIT','EXIT_READY','HARD_EXIT']).sum()) if 'max_state' in e.columns else 0)
+
+            if len(e):
+                state_perf=[]
+                for state,g in e.groupby('max_state',dropna=False):
+                    r={'최고상태':stko(state),'Episode':len(g)}
+                    for col,label in [('ret_5m','5분%'),('ret_15m','15분%'),('ret_30m','30분%'),('ret_60m','60분%')]:
+                        vals=g[col].dropna() if col in g.columns else pd.Series(dtype=float)
+                        r[label]=round(vals.mean(),3) if len(vals) else None
+                    r['60분상승%']=round((g['ret_60m'].dropna()>0).mean()*100,1) if 'ret_60m' in g.columns and g['ret_60m'].notna().any() else None
+                    r['MFE%']=round(g['mfe_pct'].mean(),3) if 'mfe_pct' in g.columns and g['mfe_pct'].notna().any() else None
+                    r['MAE%']=round(g['mae_pct'].mean(),3) if 'mae_pct' in g.columns and g['mae_pct'].notna().any() else None
+                    state_perf.append(r)
+                st.markdown('##### Episode 최고 상태별 성과')
+                st.dataframe(pd.DataFrame(state_perf),use_container_width=True,hide_index=True)
+
+                ep=e[e['start_power'].notna()].copy() if 'start_power' in e.columns else pd.DataFrame()
+                if len(ep):
+                    ep['Power구간']=pd.cut(ep['start_power'],bins=[-1e9,0,20,40,60,1e9],labels=['≤0','0~20','20~40','40~60','60+'],right=False)
+                    buckets=[]
+                    for bucket,g in ep.groupby('Power구간',observed=True):
+                        r={'시작 Power':str(bucket),'Episode':len(g)}
+                        for col,label in [('ret_15m','15분%'),('ret_30m','30분%'),('ret_60m','60분%')]:
+                            vals=g[col].dropna() if col in g.columns else pd.Series(dtype=float)
+                            r[label]=round(vals.mean(),3) if len(vals) else None
+                        r['60분상승%']=round((g['ret_60m'].dropna()>0).mean()*100,1) if 'ret_60m' in g.columns and g['ret_60m'].notna().any() else None
+                        buckets.append(r)
+                    st.markdown('##### Episode 시작 Power별 성과')
+                    st.dataframe(pd.DataFrame(buckets),use_container_width=True,hide_index=True)
+
+                st.markdown('##### Episode 목록')
+                cols=[c for c in ['start_ts','symbol','start_state','max_state','state_path','duration_min','anchor_price','start_power','max_power','start_setup','max_setup','start_trigger','max_trigger','ret_5m','ret_15m','ret_30m','ret_60m','mfe_pct','mae_pct'] if c in e.columns]
+                st.dataframe(e[cols].sort_values('start_ts',ascending=False),use_container_width=True,hide_index=True)
+        else:
+            st.caption('Episode를 만들 수 있는 Validation 데이터가 아직 없습니다.')
+
         st.markdown('#### 🧭 오늘 엔진 판정')
         notes=[]
         completed=done60 if len(done60) else done30 if len(done30) else done15 if len(done15) else done5
@@ -563,7 +619,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.4.9 UI · FINDER + LIGHT20 + FRESH + VALIDATION DAILY REPORT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.5.0 · EPISODE VALIDATION + DAILY REPORT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

@@ -696,18 +696,134 @@ with t[2]:
                     cols=[c for c in ['Shadow','Power≥','Trigger≥','ΔPower≥','Episode','60분완료','5분%','15분%','30분%','60분%','60분상승%','MFE%','MAE%','Core통과%'] if c in view.columns]
                     st.dataframe(view[cols],use_container_width=True,hide_index=True)
 
-                    eligible=gdf[gdf['complete_60']>=5].copy()
-                    if len(eligible):
-                        eligible=eligible.sort_values(['ret_30m','ret_15m'],ascending=False,na_position='last')
-                        best=eligible.iloc[0]
-                        st.success(
-                            f"현재 최소 5개 60분 완료 표본 기준 상위 Shadow · {best['profile']} · "
-                            f"Episode {int(best['episodes'])} · 15분 {best['ret_15m']:+.3f}% · "
-                            f"30분 {best['ret_30m']:+.3f}% · 60분 "
-                            + (f"{best['ret_60m']:+.3f}%" if pd.notna(best['ret_60m']) else '-')
+                    # V4.5.4 confidence ranking.
+                    # Diagnostic comparison score only -- never a probability.
+                    def _n(v,default=0.0):
+                        try:
+                            x=float(v)
+                            return default if pd.isna(x) else x
+                        except Exception:
+                            return default
+
+                    ranked=gdf.copy()
+                    ranked['sample_score']=ranked.apply(
+                        lambda r:min(25.0,_n(r.get('complete_60'))*3.0+_n(r.get('episodes'))*0.5),axis=1
+                    )
+                    ranked['expectancy_score']=ranked.apply(
+                        lambda r:max(-30.0,min(30.0,
+                            _n(r.get('ret_15m'))*7.0+
+                            _n(r.get('ret_30m'))*9.0+
+                            _n(r.get('ret_60m'))*5.0
+                        )),axis=1
+                    )
+                    ranked['risk_score']=ranked.apply(
+                        lambda r:max(-15.0,min(15.0,
+                            _n(r.get('mfe_pct'))*4.0+
+                            _n(r.get('mae_pct'))*6.0
+                        )),axis=1
+                    )
+                    ranked['core_score']=ranked.apply(
+                        lambda r:max(-10.0,min(10.0,(_n(r.get('core_pass_pct'),50.0)-50.0)*0.20)),axis=1
+                    )
+                    ranked['confidence_score']=(
+                        ranked['sample_score']+
+                        ranked['expectancy_score']+
+                        ranked['risk_score']+
+                        ranked['core_score']
+                    ).round(1)
+
+                    def _grade(r):
+                        n60=int(_n(r.get('complete_60')))
+                        r15=_n(r.get('ret_15m')); r30=_n(r.get('ret_30m')); r60=_n(r.get('ret_60m'))
+                        mae=_n(r.get('mae_pct'),-99); core=_n(r.get('core_pass_pct'))
+                        if n60<5:
+                            return '표본부족'
+                        if r15>0 and r30>0 and r60>0 and mae>-0.50 and core>=60:
+                            return '추천 후보'
+                        return '관찰'
+
+                    ranked['판정']=ranked.apply(_grade,axis=1)
+
+                    # Profiles with exactly the same observed outcomes are effectively
+                    # duplicates for this session. Keep one representative and show all
+                    # equivalent thresholds together.
+                    sig_cols=['episodes','complete_60','ret_5m','ret_15m','ret_30m','ret_60m',
+                              'hit_60_pct','mfe_pct','mae_pct','core_pass_pct']
+                    for c in sig_cols:
+                        if c not in ranked.columns: ranked[c]=None
+                    ranked['_sig']=ranked[sig_cols].apply(
+                        lambda r:tuple(None if pd.isna(x) else round(float(x),6) for x in r),axis=1
+                    )
+
+                    compact=[]
+                    for sig,g in ranked.groupby('_sig',dropna=False):
+                        # Prefer the least restrictive representative; equivalent stricter
+                        # rows are displayed as aliases rather than pretending to be new evidence.
+                        gg=g.sort_values(['power_min','trigger_min','delta_min'])
+                        rep=gg.iloc[0].copy()
+                        rep['동일결과 조합']=' / '.join(gg['profile'].astype(str).tolist())
+                        rep['중복수']=len(gg)
+                        compact.append(rep)
+                    cdf=pd.DataFrame(compact)
+                    if len(cdf):
+                        order={'추천 후보':0,'관찰':1,'표본부족':2}
+                        cdf['_grade_order']=cdf['판정'].map(order).fillna(9)
+                        cdf=cdf.sort_values(
+                            ['_grade_order','confidence_score','complete_60','ret_30m'],
+                            ascending=[True,False,False,False],
+                            na_position='last'
                         )
-                    else:
-                        st.info('아직 60분 완료 Episode가 5개 이상인 Shadow 조합이 없습니다. 임계값 변경 판단은 보류합니다.')
+
+                        st.markdown('##### 🏅 Shadow Confidence Ranking')
+                        st.caption('Confidence 점수는 확률이 아니라 조합 비교용 진단 점수입니다. 동일한 Episode/성과를 만든 임계값 조합은 한 행으로 묶습니다.')
+                        cv=cdf.rename(columns={
+                            'profile':'대표 Shadow','confidence_score':'Confidence',
+                            'episodes':'Episode','complete_60':'60분완료',
+                            'ret_15m':'15분%','ret_30m':'30분%','ret_60m':'60분%',
+                            'hit_60_pct':'60분상승%','mfe_pct':'MFE%','mae_pct':'MAE%',
+                            'core_pass_pct':'Core통과%'
+                        })
+                        ccols=[c for c in ['판정','대표 Shadow','동일결과 조합','중복수','Confidence',
+                                           'Episode','60분완료','15분%','30분%','60분%',
+                                           '60분상승%','MFE%','MAE%','Core통과%'] if c in cv.columns]
+                        st.dataframe(cv[ccols],use_container_width=True,hide_index=True)
+
+                        rec=cdf[cdf['판정']=='추천 후보']
+                        watch=cdf[cdf['판정']=='관찰']
+                        scarce=cdf[cdf['판정']=='표본부족']
+                        k1,k2,k3=st.columns(3)
+                        k1.metric('추천 후보',len(rec))
+                        k2.metric('관찰',len(watch))
+                        k3.metric('표본부족',len(scarce))
+
+                        if len(rec):
+                            best=rec.iloc[0]
+                            st.success(
+                                f"현재 Shadow 추천 후보 · {best['profile']} · Confidence {best['confidence_score']:.1f} · "
+                                f"60분완료 {int(best['complete_60'])} · 15분 {best['ret_15m']:+.3f}% · "
+                                f"30분 {best['ret_30m']:+.3f}% · 60분 {best['ret_60m']:+.3f}%"
+                            )
+                        elif len(watch):
+                            best=watch.iloc[0]
+                            st.warning(
+                                f"아직 실제 기준 변경 후보는 없음 · 최상위 관찰 {best['profile']} · "
+                                f"Confidence {best['confidence_score']:.1f} · 60분완료 {int(best['complete_60'])}. "
+                                "성과/표본 조건이 모두 충족될 때까지 Shadow 유지"
+                            )
+                        else:
+                            st.info('모든 Shadow 조합이 아직 표본부족입니다. 실제 ENTRY 기준은 유지합니다.')
+
+                        # Delta-Power redundancy check: same P/T profiles with D0/D2/D4
+                        # that produce the exact same observed signature.
+                        redundant=[]
+                        for (p,tg),g in ranked.groupby(['power_min','trigger_min']):
+                            if len(g)<2:continue
+                            sigs=g['_sig'].nunique(dropna=False)
+                            if sigs==1:
+                                redundant.append(f"P{int(p)}/T{int(tg)}: D0·D2·D4 동일")
+                        if redundant:
+                            st.info('ΔPower 중복 관측 · '+' | '.join(redundant[:8])+
+                                    ' · 같은 결과가 여러 세션 반복되면 ΔPower 독립필터 필요성을 재검토합니다.')
 
                     with st.expander('Shadow 해석 기준'):
                         st.write('• CURRENT_READY / CURRENT_CORE는 저장 당시 실제 live gate 판정입니다.')
@@ -787,7 +903,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.5.3 · ENTRY THRESHOLD SHADOW + STAGE FUNNEL · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.5.4 · SHADOW CONFIDENCE RANKING + DEDUP · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

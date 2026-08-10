@@ -29,6 +29,17 @@ def market_minutes_elapsed() -> int:
     mins=(et.hour*60+et.minute)-(9*60+30)
     return max(1,min(390,mins))
 
+def rvol_progress() -> float:
+    # RVOL session rule:
+    # - regular session: scale by elapsed fraction of 390-minute session
+    # - outside regular session: compare completed/full-day volume with avg daily volume
+    et=datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+    if et.weekday() < 5:
+        minute=et.hour*60+et.minute
+        if 9*60+30 <= minute < 16*60:
+            return max(0.08, market_minutes_elapsed()/390)
+    return 1.0
+
 def _score_row(q:dict,m:dict,index_strength:float,semi_strength:float,progress:float):
     sym=q['symbol']; price=float(q.get('price') or 0); vol=float(q.get('volume') or 0); day=float(q.get('change_pct') or 0)
     ma5=float(m.get('ma5') or 0); slope=float(m.get('ma5_slope_pct') or 0); avg5vol=float(m.get('avg5_volume') or 0)
@@ -110,7 +121,7 @@ def screener_rows(quotes: list[dict], metrics: list[dict], top_n: int=10) -> lis
     mm={m['symbol']:m for m in metrics}; qmap={q['symbol']:q for q in quotes}
     index_strength=float((qmap.get('QQQ') or {}).get('change_pct') or 0)
     semi_strength=float((qmap.get('SMH') or {}).get('change_pct') or 0)
-    progress=max(0.08,market_minutes_elapsed()/390)
+    progress=rvol_progress()
     out=[_score_row(q,mm.get(q['symbol'],{}),index_strength,semi_strength,progress) for q in quotes]
     rows=[r for r in out if r['eligible']]
     rows.sort(key=lambda r:(r['score'],r['dollar_volume']),reverse=True)

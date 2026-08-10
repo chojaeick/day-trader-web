@@ -201,6 +201,23 @@ class KiwoomClient:
     def active_exchange(self, symbol:str) -> str:
         return (self.discovery.get('exchanges') or {}).get(symbol.upper()) or self.s.exchange_for(symbol)
 
+    def _ws_items(self, symbols) -> list[dict]:
+        """Build Kiwoom USA websocket REG items using the documented symbol+exchange map."""
+        items=[]
+        for raw_symbol in symbols:
+            symbol=str(raw_symbol or '').upper().strip()
+            if not symbol:
+                continue
+            exchange=str(self.active_exchange(symbol) or '').upper().strip()
+            # Preserve the project's already-verified AMEX normalization.
+            if exchange == 'AM':
+                exchange='NA'
+            if exchange not in ('ND','NY','NA'):
+                log.warning('WebSocket skip %s: unsupported exchange=%s',symbol,exchange)
+                continue
+            items.append({'jmcode':symbol,'stex_tp':exchange})
+        return items
+
 
     async def manual_discover_now(self):
         """Force a fresh market-wide discovery and prime newly added symbols."""
@@ -422,16 +439,24 @@ class KiwoomClient:
                             if d.get('return_code')!=0: raise RuntimeError(f'LOGIN failed: {d}')
                             break
                     registered=tuple(self.s.symbols)
-                    await ws.send(json.dumps({'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':list(registered),'type':['F5']}]}))
+                    reg_items=self._ws_items(registered)
+                    if not reg_items:
+                        raise RuntimeError('REG failed: no valid USA websocket items')
+                    await ws.send(json.dumps({'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':reg_items,'type':['F5']}]}))
                     reg_d=json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+                    self.db.add_raw(json.dumps(reg_d,ensure_ascii=False), datetime.now(timezone.utc).isoformat())
                     if reg_d.get('return_code') != 0: raise RuntimeError(f'REG failed: {reg_d}')
-                    log.info('WebSocket live: %s', ','.join(registered))
+                    log.info('WebSocket live: %s', ','.join(f"{x['jmcode']}/{x['stex_tp']}" for x in reg_items))
                     while True:
                         current=tuple(self.s.symbols)
                         if current != registered:
-                            await ws.send(json.dumps({'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':list(current),'type':['F5']}]}))
-                            registered=current
-                            log.info('WebSocket universe refreshed: %s',','.join(registered))
+                            reg_items=self._ws_items(current)
+                            if reg_items:
+                                await ws.send(json.dumps({'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':reg_items,'type':['F5']}]}))
+                                registered=current
+                                log.info('WebSocket universe refreshed: %s',','.join(f"{x['jmcode']}/{x['stex_tp']}" for x in reg_items))
+                            else:
+                                log.warning('WebSocket universe refresh skipped: no valid USA websocket items')
                         try:
                             raw=await asyncio.wait_for(ws.recv(),timeout=15)
                         except asyncio.TimeoutError:

@@ -427,6 +427,35 @@ class V4Store:
                 return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
             except Exception:return None
 
+        def session_day(r):
+            t=r.get('_ts') or dt(r.get('ts'))
+            if not t:return 'UNKNOWN'
+            try:
+                tz=ZoneInfo('America/New_York' if str(r.get('market') or market or '').upper()=='USA' else 'Asia/Seoul')
+                return t.astimezone(tz).date().isoformat()
+            except Exception:
+                return t.date().isoformat()
+
+        def session_summary(hits):
+            groups={}
+            for h in hits:
+                groups.setdefault(session_day(h),[]).append(h)
+            out=[]
+            for day,rows in sorted(groups.items()):
+                def avg(col):
+                    vals=[]
+                    for x in rows:
+                        if x.get(col) is None:continue
+                        v=_f(x.get(col),float('nan'))
+                        if not math.isnan(v):vals.append(v)
+                    return round(sum(vals)/len(vals),3) if vals else None
+                r60=[_f(x.get('ret_60m')) for x in rows if x.get('ret_60m') is not None]
+                out.append({'session_date':day,'episodes':len(rows),'complete_60':len(r60),
+                            'ret_15m':avg('ret_15m'),'ret_30m':avg('ret_30m'),'ret_60m':avg('ret_60m'),
+                            'hit_60_pct':round(sum(1 for x in r60 if x>0)/len(r60)*100,1) if r60 else None,
+                            'mfe_pct':avg('mfe_pct'),'mae_pct':avg('mae_pct')})
+            return out
+
         parsed=[]
         for r in marks:
             try:feat=json.loads(r.get('feature_json') or '{}')
@@ -513,9 +542,11 @@ class V4Store:
                             hits.append(hit)
                             if hit.get('_green') and hit.get('_break') and hit.get('_volume'):
                                 core_pass+=1
+                    stats=session_summary(hits)
                     meta={
                         'power_min':pmin,'trigger_min':tmin,'delta_min':dmin,
-                        'core_pass_pct':round(core_pass/len(hits)*100,1) if hits else None
+                        'core_pass_pct':round(core_pass/len(hits)*100,1) if hits else None,
+                        'session_stats':stats,'session_count':len(stats)
                     }
                     grid.append(summarize(hits,f'P{pmin}/T{tmin}/D{dmin}',meta))
 

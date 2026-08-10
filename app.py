@@ -725,20 +725,35 @@ with t[2]:
                     ranked['core_score']=ranked.apply(
                         lambda r:max(-10.0,min(10.0,(_n(r.get('core_pass_pct'),50.0)-50.0)*0.20)),axis=1
                     )
-                    ranked['confidence_score']=(
-                        ranked['sample_score']+
-                        ranked['expectancy_score']+
-                        ranked['risk_score']+
-                        ranked['core_score']
-                    ).round(1)
+                    ranked['raw_confidence']=(
+                        ranked['sample_score']+ranked['expectancy_score']+ranked['risk_score']+ranked['core_score']
+                    )
+                    def _sample_factor(r):
+                        n=int(_n(r.get('complete_60')))
+                        return 0.25 if n<=0 else 0.50 if n<=2 else 0.75 if n<=4 else 1.00
+                    ranked['sample_factor']=ranked.apply(_sample_factor,axis=1)
+                    ranked['confidence_score']=(ranked['raw_confidence']*ranked['sample_factor']).round(1)
+
+                    def _stability(r):
+                        stats=r.get('session_stats')
+                        if not isinstance(stats,list) or not stats:return '표본부족'
+                        usable=[x for x in stats if x.get('ret_30m') is not None or x.get('ret_60m') is not None]
+                        if not usable:return '표본부족'
+                        days=len(usable); pos30=sum(1 for x in usable if x.get('ret_30m') is not None and _n(x.get('ret_30m'))>0)
+                        r60=[x for x in usable if x.get('ret_60m') is not None]; pos60=sum(1 for x in r60 if _n(x.get('ret_60m'))>0)
+                        if days>=3 and pos30/days>=0.67 and r60 and pos60/len(r60)>=0.60:return '반복 우수'
+                        if days==1 and pos30==1:return '1일 우수'
+                        if days>=2 and pos30/days<0.60:return '불안정'
+                        return '관찰'
+                    ranked['세션안정성']=ranked.apply(_stability,axis=1)
 
                     def _grade(r):
                         n60=int(_n(r.get('complete_60')))
                         r15=_n(r.get('ret_15m')); r30=_n(r.get('ret_30m')); r60=_n(r.get('ret_60m'))
                         mae=_n(r.get('mae_pct'),-99); core=_n(r.get('core_pass_pct'))
-                        if n60<5:
-                            return '표본부족'
-                        if r15>0 and r30>0 and r60>0 and mae>-0.50 and core>=60:
+                        stability=str(r.get('세션안정성') or '')
+                        if n60<5:return '표본부족'
+                        if r15>0 and r30>0 and r60>0 and mae>-0.50 and core>=60 and stability=='반복 우수':
                             return '추천 후보'
                         return '관찰'
 
@@ -763,6 +778,7 @@ with t[2]:
                         rep=gg.iloc[0].copy()
                         rep['동일결과 조합']=' / '.join(gg['profile'].astype(str).tolist())
                         rep['중복수']=len(gg)
+                        stats=rep.get('session_stats'); rep['세션수']=len(stats) if isinstance(stats,list) else int(_n(rep.get('session_count')))
                         compact.append(rep)
                     cdf=pd.DataFrame(compact)
                     if len(cdf):
@@ -775,7 +791,7 @@ with t[2]:
                         )
 
                         st.markdown('##### 🏅 Shadow Confidence Ranking')
-                        st.caption('Confidence 점수는 확률이 아니라 조합 비교용 진단 점수입니다. 동일한 Episode/성과를 만든 임계값 조합은 한 행으로 묶습니다.')
+                        st.caption('Confidence는 확률이 아닌 조합 비교용 진단 점수이며 60분 완료 표본수에 따라 25/50/75/100%로 할인됩니다. 실제 기준 변경 후보는 여러 거래일에서 반복 우수가 확인되어야 합니다.')
                         cv=cdf.rename(columns={
                             'profile':'대표 Shadow','confidence_score':'Confidence',
                             'episodes':'Episode','complete_60':'60분완료',
@@ -783,7 +799,7 @@ with t[2]:
                             'hit_60_pct':'60분상승%','mfe_pct':'MFE%','mae_pct':'MAE%',
                             'core_pass_pct':'Core통과%'
                         })
-                        ccols=[c for c in ['판정','대표 Shadow','동일결과 조합','중복수','Confidence',
+                        ccols=[c for c in ['판정','세션안정성','대표 Shadow','동일결과 조합','중복수','Confidence','세션수',
                                            'Episode','60분완료','15분%','30분%','60분%',
                                            '60분상승%','MFE%','MAE%','Core통과%'] if c in cv.columns]
                         st.dataframe(cv[ccols],use_container_width=True,hide_index=True)
@@ -818,12 +834,29 @@ with t[2]:
                         redundant=[]
                         for (p,tg),g in ranked.groupby(['power_min','trigger_min']):
                             if len(g)<2:continue
+                            if int(pd.to_numeric(g['episodes'],errors='coerce').fillna(0).max())<3:continue
                             sigs=g['_sig'].nunique(dropna=False)
-                            if sigs==1:
-                                redundant.append(f"P{int(p)}/T{int(tg)}: D0·D2·D4 동일")
+                            if sigs==1:redundant.append(f"P{int(p)}/T{int(tg)}: D0·D2·D4 동일 (Episode≥3)")
                         if redundant:
-                            st.info('ΔPower 중복 관측 · '+' | '.join(redundant[:8])+
-                                    ' · 같은 결과가 여러 세션 반복되면 ΔPower 독립필터 필요성을 재검토합니다.')
+                            st.info('ΔPower 중복 관측 · '+' | '.join(redundant[:8])+' · Episode가 실제 존재하는 조합만 표시합니다.')
+
+                        st.markdown('##### 📆 Multi-session Shadow Stability')
+                        stability_rows=[]
+                        for _,rr in ranked.iterrows():
+                            stats=rr.get('session_stats')
+                            if not isinstance(stats,list):continue
+                            for ss in stats:
+                                stability_rows.append({'Shadow':rr.get('profile'),'거래일':ss.get('session_date'),'Episode':ss.get('episodes'),
+                                                       '60분완료':ss.get('complete_60'),'15분%':ss.get('ret_15m'),'30분%':ss.get('ret_30m'),
+                                                       '60분%':ss.get('ret_60m'),'MFE%':ss.get('mfe_pct'),'MAE%':ss.get('mae_pct')})
+                        if stability_rows:
+                            sdf=pd.DataFrame(stability_rows); focus=['P55/T3/D0','P55/T4/D0','P60/T4/D0','P60/T4/D2','P60/T4/D4']
+                            sf=sdf[sdf['Shadow'].isin(focus)].copy()
+                            st.dataframe((sf if len(sf) else sdf).sort_values(['Shadow','거래일']),use_container_width=True,hide_index=True)
+                            days=sdf['거래일'].nunique()
+                            if days<3:st.info(f'현재 Shadow 데이터 거래일은 {days}일입니다. 최소 3개 거래일 반복 전에는 실제 ENTRY 기준을 변경하지 않습니다.')
+                        else:
+                            st.caption('거래일별 Shadow 통계가 아직 없습니다.')
 
                     with st.expander('Shadow 해석 기준'):
                         st.write('• CURRENT_READY / CURRENT_CORE는 저장 당시 실제 live gate 판정입니다.')
@@ -903,7 +936,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.5.4 · SHADOW CONFIDENCE RANKING + DEDUP · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.5.5 · MULTI-SESSION SHADOW STABILITY + SAMPLE SHRINKAGE · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

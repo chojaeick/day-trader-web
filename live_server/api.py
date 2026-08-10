@@ -288,6 +288,8 @@ async def preopen_scheduler_forever():
 async def v4_engine_forever():
     last={'USA':0.0,'KOREA':0.0}
     warmed_usa=set()
+    bridge_warmed=set()
+    bridge_warm_task=None
 
     async def warm_usa_symbols(symbols):
         # Prime only newly entering heavy-tracker names. This avoids showing
@@ -310,14 +312,71 @@ async def v4_engine_forever():
             await asyncio.sleep(0.12)
         warmed_usa.update(new_syms)
 
+    async def warm_bridge_candidates(candidates,discovery):
+        # V4.6.2.1: prepare data only. This does NOT add symbols to live Finder.
+        # Warm the highest Screener-eligible names absent from Discovery plus
+        # the core leveraged/inverse ETFs whose data must always be auditable.
+        nonlocal bridge_warmed
+        d=discovery if isinstance(discovery,dict) else {}
+        seen=set()
+        for key in ('rows','extreme_rows','quality_risk_rows'):
+            seen.update(
+                str(r.get('symbol') or '').upper()
+                for r in (d.get(key) or []) if r.get('symbol')
+            )
+
+        misses=[
+            r for r in (candidates or [])
+            if r.get('eligible')
+            and str(r.get('symbol') or '').upper()
+            and str(r.get('symbol') or '').upper() not in seen
+        ]
+        misses.sort(
+            key=lambda r:(float(r.get('score') or 0),abs(float(r.get('change_pct') or 0))),
+            reverse=True
+        )
+
+        wanted=[]
+        for r in misses[:8]:
+            sym=str(r.get('symbol') or '').upper()
+            if sym and sym not in wanted:wanted.append(sym)
+        for sym in ('SOXS','SQQQ','SOXL','TQQQ'):
+            if sym not in wanted:wanted.append(sym)
+
+        new_syms=[x for x in wanted if x not in bridge_warmed]
+        if not new_syms:return
+
+        for sym in new_syms[:12]:
+            try:
+                ex=k.active_exchange(sym)
+                await asyncio.to_thread(k.quote,sym,ex)
+                await asyncio.to_thread(k.daily_metrics,sym,ex)
+                inserted,bars=await asyncio.to_thread(k.backfill_symbol,sym,ex,80)
+                bridge_warmed.add(sym)
+                logging.info(
+                    'V4 bridge warmup %s/%s: bars=%s inserted=%s',
+                    sym,ex,bars,inserted
+                )
+            except Exception as e:
+                # Do not mark failed symbols as warmed; retry on a later cycle.
+                logging.warning('V4 bridge warmup %s failed: %s',sym,e)
+            await asyncio.sleep(0.12)
+
     while True:
         try:
             now=time.monotonic()
             if now-last['USA']>=30:
+                usa_candidates=screener_rows(db.quotes(),db.daily_metrics(),40)
                 finder=v4.build_usa_finder(
-                    screener_rows(db.quotes(),db.daily_metrics(),40),
+                    usa_candidates,
                     k.discovery,5,db=db
                 )
+                # Candidate data warming runs asynchronously so live Finder/Tracker
+                # is never blocked by extra quote/daily/minute requests.
+                if bridge_warm_task is None or bridge_warm_task.done():
+                    bridge_warm_task=asyncio.create_task(
+                        warm_bridge_candidates(usa_candidates,k.discovery)
+                    )
                 finder_syms=[r.get('symbol') for r in (finder.get('rows') or [])]
                 light_syms=[r.get('symbol') for r in (finder.get('light_rows') or [])]
                 await warm_usa_symbols(finder_syms)
@@ -800,7 +859,8 @@ def v4_discovery_bridge_shadow(market:str='USA'):
     # Same Finder formula, no state mutation / no TOP5 events.
     shadow=v4.build_usa_finder(
         candidates,discovery,5,db=db,
-        commit=False,shadow_allow_unknown_quality=True
+        commit=False,shadow_allow_unknown_quality=True,
+        shadow_min_recent_bars=6
     )
 
     live_rows=live.get('rows') or []
@@ -823,6 +883,9 @@ def v4_discovery_bridge_shadow(market:str='USA'):
         if not sym or sym in dset or sym in eset or sym in qrset:
             continue
         srow=sh_l.get(sym) or sh_f.get(sym)
+        recent_bars=int((srow or {}).get('recent_bars') or 0)
+        price=float((srow or {}).get('price') or (db.quote(sym) or {}).get('price') or 0)
+        data_ready=bool(recent_bars>=6 and price>0)
         misses.append({
             'symbol':sym,
             'screener_score':c.get('score'),
@@ -835,7 +898,10 @@ def v4_discovery_bridge_shadow(market:str='USA'):
             'shadow_finder_rank':(sh_f.get(sym) or {}).get('rank'),
             'shadow_finder_score':(srow or {}).get('finder_score'),
             'shadow_quality':(srow or {}).get('quality'),
-            'recent_bars':(srow or {}).get('recent_bars'),
+            'price':price,
+            'recent_bars':recent_bars,
+            'data_ready':data_ready,
+            'fair_status':'READY' if data_ready else 'INSUFFICIENT_DATA',
             'fresh':(srow or {}).get('fresh_mode'),
             'fresh_score':(srow or {}).get('fresh_score'),
             'ret_1m':(srow or {}).get('ret_1m'),
@@ -847,8 +913,9 @@ def v4_discovery_bridge_shadow(market:str='USA'):
             'would_reach_light':sym in sh_l,
             'would_reach_finder':sym in sh_f,
             'note':(
-                'Finder Shadow TOP5' if sym in sh_f else
-                'Light Shadow only' if sym in sh_l else
+                'Finder Shadow TOP5 · fair data ready' if sym in sh_f else
+                'Light Shadow only · fair data ready' if sym in sh_l and data_ready else
+                'Light에는 보이나 데이터 준비 부족' if sym in sh_l else
                 'Shadow에서도 Light20 미진입'
             )
         })
@@ -891,8 +958,23 @@ def v4_discovery_bridge_shadow(market:str='USA'):
         'comparison':comparison,
         'miss_rows':misses,
         'shadow_light_count':len(shadow_light),
+        'data_ready_misses':sum(1 for r in misses if r.get('data_ready')),
+        'insufficient_data_misses':sum(1 for r in misses if not r.get('data_ready')),
+        'core_etf_readiness':[
+            {
+                'symbol':sym,
+                'price':float((db.quote(sym) or {}).get('price') or 0),
+                'minute_bars':len(ticks_to_bars(db.ticks(sym,2500),1)),
+                'ready':bool(
+                    float((db.quote(sym) or {}).get('price') or 0)>0
+                    and len(ticks_to_bars(db.ticks(sym,2500),1))>=6
+                )
+            }
+            for sym in ('SOXS','SQQQ','SOXL','TQQQ')
+        ],
+        'fair_guard':'SHADOW_UNKNOWN requires recent_bars >= 6 before Shadow Finder eligibility',
         'unknown_quality_policy':'Screener eligible + missing verified discovery quality => SHADOW_UNKNOWN, quality bonus 0',
-        'note':'Shadow only. Same Finder scoring path, commit=False. No live Finder state/event/order is changed.'
+        'note':'Shadow only. Candidate data is warmed separately; live Finder state/event/order is unchanged.'
     }
 
 

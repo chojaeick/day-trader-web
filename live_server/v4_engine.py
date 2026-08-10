@@ -571,7 +571,7 @@ class V4Store:
 class CleanEngine:
     def __init__(self,db_path):
         self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._lock=threading.RLock()
-    def build_usa_finder(self,candidates,discovery,limit=5,db=None,commit=True,shadow_allow_unknown_quality=False):
+    def build_usa_finder(self,candidates,discovery,limit=5,db=None,commit=True,shadow_allow_unknown_quality=False,shadow_min_recent_bars=0):
         qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}
         rows=[]
         inverse_syms={'SOXS','SQQQ'}
@@ -918,6 +918,15 @@ class CleanEngine:
             r for r in light_rows
             if r.get('quality')!='C_HIGH_RISK' or r.get('extreme_continue')
         ]
+        # V4.6.2.1 fair-comparison guard:
+        # unknown-quality Bridge rows may appear in Light diagnostics immediately,
+        # but cannot enter Shadow Finder until enough 1m bars exist.
+        if not commit and int(shadow_min_recent_bars or 0)>0:
+            heavy_pool=[
+                r for r in heavy_pool
+                if (not r.get('shadow_quality_unknown'))
+                or int(r.get('recent_bars') or 0)>=int(shadow_min_recent_bars)
+            ]
         selected=heavy_pool[:limit]
 
         # A bearish regime must not silently hide a qualified inverse ETF.

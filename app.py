@@ -649,18 +649,31 @@ with t[2]:
             if len(warm):
                 st.markdown('##### ♨️ Bridge Warm Diagnostics')
                 wcols=[c for c in [
-                    'symbol','status','last_attempt','exchange','quote_ok','daily_ok',
-                    'minute_bars','inserted','price','quote_age_sec','ready_now','error'
+                    'symbol','status','failed_step','error_short',
+                    'last_attempt','exchange','quote_ok','daily_ok','minute_ok',
+                    'minute_bars','inserted','price','quote_age_sec','ready_now'
                 ] if c in warm.columns]
                 st.dataframe(warm[wcols],use_container_width=True,hide_index=True)
-                failed=warm[warm['status'].isin(['FAILED','PARTIAL'])] if 'status' in warm.columns else pd.DataFrame()
+
+                hard_fail_status=['QUOTE_FAILED','MINUTE_FAILED']
+                hard_failed=warm[warm['status'].isin(hard_fail_status)] if 'status' in warm.columns else pd.DataFrame()
+                daily_warn=warm[warm['status'].eq('READY_DAILY_WARN')] if 'status' in warm.columns else pd.DataFrame()
+                partial=warm[warm['status'].eq('PARTIAL')] if 'status' in warm.columns else pd.DataFrame()
                 pending=warm[warm['status'].isin(['PENDING','RUNNING'])] if 'status' in warm.columns else pd.DataFrame()
-                if len(failed):
-                    st.warning(f'Bridge warm 실패/부분완료 {len(failed)}개 · error 열 확인')
-                elif len(pending):
+
+                if len(hard_failed):
+                    st.error(f'Bridge warm 필수데이터 실패 {len(hard_failed)}개 · failed_step / error_short 확인')
+                if len(daily_warn):
+                    st.warning(f'Daily 보조데이터 경고 {len(daily_warn)}개 · quote+minute은 사용 가능(READY_DAILY_WARN)')
+                if len(partial):
+                    st.warning(f'Bridge warm 부분완료 {len(partial)}개')
+                if len(pending):
                     st.info(f'Bridge warm 대기/진행 {len(pending)}개')
-                else:
-                    st.success('현재 표시된 Bridge/Core warm 대상은 준비상태 정상')
+                if not len(hard_failed) and not len(partial) and not len(pending):
+                    if len(daily_warn):
+                        st.info('필수 quote+minute 데이터는 준비됐고 일부 종목만 daily 보조데이터 경고 상태입니다.')
+                    else:
+                        st.success('현재 표시된 Bridge/Core warm 대상은 준비상태 정상')
 
             if len(inactive_stale):
                 with st.expander(f"Inactive cache stale · {cov.get('inactive_stale_count',len(inactive_stale))}개"):
@@ -1092,7 +1105,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.6.2.3 · SESSION-AWARE FRESHNESS + WARM DIAGNOSTICS · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.6.2.4 · WARM FAULT ISOLATION · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

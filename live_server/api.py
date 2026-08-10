@@ -352,37 +352,104 @@ async def v4_engine_forever():
 
         for sym in new_syms[:12]:
             started=datetime.now(timezone.utc).isoformat()
-            bridge_warm_status[sym]={
+            state={
                 'symbol':sym,'status':'RUNNING','last_attempt':started,
-                'exchange':None,'quote_ok':False,'daily_ok':False,
-                'minute_bars':None,'inserted':None,'error':None
+                'exchange':None,
+                'quote_ok':False,'daily_ok':False,'minute_ok':False,
+                'minute_bars':None,'inserted':None,
+                'failed_step':None,'error_short':None,'error':None
             }
+            bridge_warm_status[sym]=state
+
+            # V4.6.2.4 fault isolation:
+            # QUOTE / DAILY / MINUTE are independent. DAILY is supporting data;
+            # a daily failure must not prevent minute backfill or make usable
+            # quote+minute data look like a total warm failure.
             try:
                 ex=k.active_exchange(sym)
-                bridge_warm_status[sym]['exchange']=ex
-
-                await asyncio.to_thread(k.quote,sym,ex)
-                bridge_warm_status[sym]['quote_ok']=True
-
-                await asyncio.to_thread(k.daily_metrics,sym,ex)
-                bridge_warm_status[sym]['daily_ok']=True
-
-                inserted,bars=await asyncio.to_thread(k.backfill_symbol,sym,ex,80)
-                bridge_warm_status[sym]['minute_bars']=bars
-                bridge_warm_status[sym]['inserted']=inserted
-                bridge_warm_status[sym]['status']='READY' if int(bars or 0)>=6 else 'PARTIAL'
-                bridge_warm_status[sym]['finished_at']=datetime.now(timezone.utc).isoformat()
-                bridge_warmed.add(sym)
-                logging.info(
-                    'V4 bridge warmup %s/%s: bars=%s inserted=%s',
-                    sym,ex,bars,inserted
-                )
+                state['exchange']=ex
             except Exception as e:
-                # Do not mark failed symbols as warmed; retry on a later cycle.
-                bridge_warm_status[sym]['status']='FAILED'
-                bridge_warm_status[sym]['error']=str(e)
-                bridge_warm_status[sym]['finished_at']=datetime.now(timezone.utc).isoformat()
-                logging.warning('V4 bridge warmup %s failed: %s',sym,e)
+                ex=None
+                state['status']='QUOTE_FAILED'
+                state['failed_step']='EXCHANGE'
+                state['error_short']=str(e)[:160]
+                state['error']=str(e)
+
+            if ex:
+                try:
+                    await asyncio.to_thread(k.quote,sym,ex)
+                    state['quote_ok']=True
+                except Exception as e:
+                    state['failed_step']='QUOTE'
+                    state['error_short']=str(e)[:160]
+                    state['error']=str(e)
+                    logging.warning('V4 bridge quote warm %s failed: %s',sym,e)
+
+                try:
+                    await asyncio.to_thread(k.daily_metrics,sym,ex)
+                    state['daily_ok']=True
+                except Exception as e:
+                    # Supporting-data warning only; continue to minute warm.
+                    if state.get('failed_step') is None:
+                        state['failed_step']='DAILY'
+                        state['error_short']=str(e)[:160]
+                        state['error']=str(e)
+                    logging.warning('V4 bridge daily warm %s failed: %s',sym,e)
+
+                try:
+                    inserted,bars=await asyncio.to_thread(k.backfill_symbol,sym,ex,80)
+                    state['minute_bars']=bars
+                    state['inserted']=inserted
+                    state['minute_ok']=bool(int(bars or 0)>=6)
+                except Exception as e:
+                    state['minute_ok']=False
+                    if state.get('failed_step') in (None,'DAILY'):
+                        state['failed_step']='MINUTE'
+                        state['error_short']=str(e)[:160]
+                        state['error']=str(e)
+                    logging.warning('V4 bridge minute warm %s failed: %s',sym,e)
+
+            # Evaluate actual data now in DB, not only API call success.
+            try:
+                q_now=db.quote(sym) or {}
+                bars_now=len(ticks_to_bars(db.ticks(sym,2500),1))
+                price_now=float(q_now.get('price') or 0)
+            except Exception:
+                bars_now=int(state.get('minute_bars') or 0)
+                price_now=0.0
+
+            usable=bool(price_now>0 and bars_now>=6)
+            state['minute_bars']=bars_now
+            state['usable_now']=usable
+
+            if usable and state.get('daily_ok'):
+                state['status']='READY'
+            elif usable:
+                state['status']='READY_DAILY_WARN'
+            elif state.get('quote_ok') and not state.get('minute_ok'):
+                state['status']='MINUTE_FAILED'
+                if state.get('failed_step') is None:
+                    state['failed_step']='MINUTE'
+            elif not state.get('quote_ok'):
+                state['status']='QUOTE_FAILED'
+                if state.get('failed_step') is None:
+                    state['failed_step']='QUOTE'
+            else:
+                state['status']='PARTIAL'
+
+            state['finished_at']=datetime.now(timezone.utc).isoformat()
+
+            # Usable quote+minute data is enough to stop wasteful retries even when
+            # daily is unavailable. Daily status remains visible as a warning.
+            if usable:
+                bridge_warmed.add(sym)
+
+            logging.info(
+                'V4 bridge warmup %s/%s status=%s quote=%s daily=%s minute=%s bars=%s inserted=%s',
+                sym,state.get('exchange'),state.get('status'),
+                state.get('quote_ok'),state.get('daily_ok'),state.get('minute_ok'),
+                state.get('minute_bars'),state.get('inserted')
+            )
             await asyncio.sleep(0.12)
 
     while True:
@@ -839,16 +906,22 @@ def v4_coverage_audit(market:str='USA'):
         if not st:
             st={
                 'symbol':sym,'status':'PENDING' if sym in bridge_syms else 'OBSERVED',
-                'last_attempt':None,'exchange':None,'quote_ok':bool(price>0),
+                'last_attempt':None,'exchange':None,
+                'quote_ok':bool(price>0),
                 'daily_ok':bool((db.daily_metrics(sym) or {})),
-                'minute_bars':bars,'inserted':None,'error':None
+                'minute_ok':bool(bars>=6),
+                'minute_bars':bars,'inserted':None,
+                'failed_step':None,'error_short':None,'error':None
             }
         else:
             st['minute_bars']=bars
             st['quote_ok']=bool(price>0) or bool(st.get('quote_ok'))
+            st['minute_ok']=bool(bars>=6) or bool(st.get('minute_ok'))
         st['price']=price
         st['quote_age_sec']=_age_seconds(q) if q else None
         st['ready_now']=bool(price>0 and bars>=6)
+        if st['ready_now'] and not st.get('daily_ok') and st.get('status') in ('FAILED','PARTIAL','MINUTE_FAILED','RUNNING'):
+            st['status']='READY_DAILY_WARN'
         warm_rows.append(st)
 
     # V4.6.1: explain Light -> Finder cutline without changing selection logic.

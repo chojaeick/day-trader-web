@@ -287,14 +287,53 @@ async def preopen_scheduler_forever():
 
 async def v4_engine_forever():
     last={'USA':0.0,'KOREA':0.0}
+    warmed_usa=set()
+
+    async def warm_usa_symbols(symbols):
+        # Prime only newly entering heavy-tracker names. This avoids showing
+        # DATA_INVALID for a fresh Finder rotation while waiting for the
+        # once-per-minute recovery loop.
+        nonlocal warmed_usa
+        wanted=[str(x or '').upper() for x in symbols if x]
+        new_syms=[x for x in wanted if x not in warmed_usa]
+        if not new_syms:
+            return
+        for sym in new_syms[:5]:
+            try:
+                ex=k.active_exchange(sym)
+                await asyncio.to_thread(k.quote,sym,ex)
+                await asyncio.to_thread(k.daily_metrics,sym,ex)
+                inserted,bars=await asyncio.to_thread(k.backfill_symbol,sym,ex,80)
+                logging.info('V4 tracker warmup %s/%s: bars=%s inserted=%s',sym,ex,bars,inserted)
+            except Exception as e:
+                logging.warning('V4 tracker warmup %s failed: %s',sym,e)
+            await asyncio.sleep(0.12)
+        warmed_usa.update(new_syms)
+
     while True:
         try:
             now=time.monotonic()
             if now-last['USA']>=60:
-                v4.build_usa_finder(screener_rows(db.quotes(),db.daily_metrics(),30),k.discovery,5); last['USA']=now
+                finder=v4.build_usa_finder(
+                    screener_rows(db.quotes(),db.daily_metrics(),30),
+                    k.discovery,5
+                )
+                finder_syms=[r.get('symbol') for r in (finder.get('rows') or [])]
+                await warm_usa_symbols(finder_syms)
+                # Keep the cache bounded to names that are still relevant plus positions.
+                active=set(finder_syms)
+                try:
+                    active.update(p.get('symbol') for p in v4.store.positions('USA') if p.get('symbol'))
+                except Exception:
+                    pass
+                warmed_usa.intersection_update(active)
+                last['USA']=now
+
             if now-last['KOREA']>=300:
                 v4.build_korea_finder(korea.discovery,5); last['KOREA']=now
-            v4.refresh_usa_tracker(db); v4.refresh_korea_tracker(korea)
+
+            v4.refresh_usa_tracker(db)
+            v4.refresh_korea_tracker(korea)
         except Exception:
             logging.exception('V4 engine loop failed')
         await asyncio.sleep(5)

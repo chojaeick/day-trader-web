@@ -168,8 +168,14 @@ class KiwoomClient:
         gainers=self.ranking_change_rate('1')
         losers=self.ranking_change_rate('4')
         surge=self.ranking_volume_surge()
+
+        # V4.3.8: always-evaluate liquid leadership / inverse watch.
+        # Leveraged inverse ETFs are already in Settings core; PLTR is added here
+        # so it cannot disappear merely because it misses a ranking API snapshot.
+        core=list(dict.fromkeys([*(self.s.core_symbols or []),'PLTR']))
+
         result=merge_rankings(
-            volume,dollar,self.s.core_symbols,self.s.discovery_limit,
+            volume,dollar,core,self.s.discovery_limit,
             self.s.discovery_min_price,self.s.discovery_min_dollar,
             gainers=gainers,losers=losers,volume_surge=surge
         )
@@ -177,8 +183,8 @@ class KiwoomClient:
         self.s.symbols=list(result.symbols)
         self.discovery={
             'symbols':list(result.symbols),'rows':result.rows,'updated_at':result.updated_at,
-            'count':len(result.symbols),'core':list(self.s.core_symbols),'exchanges':exchanges,
-            'auto_count':len([x for x in result.symbols if x not in self.s.core_symbols]),
+            'count':len(result.symbols),'core':list(core),'exchanges':exchanges,
+            'auto_count':len([x for x in result.symbols if x not in core]),
             'sources':['volume','dollar','gainer','loser','surge'],
             'extreme_count':len(result.extreme_rows),'extreme_rows':result.extreme_rows,
             'quality_risk_rows':result.quality_risk_rows,

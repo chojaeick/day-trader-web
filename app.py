@@ -440,6 +440,88 @@ with t[0]:
 
                     st.caption('To ENTRY-CANDIDATE: '+(', '.join(candidate_missing) if candidate_missing else 'READY'))
 
+
+                    # V474_TRADE_PLAN_PANEL
+
+                    price_now=f(r.get('price'))
+
+                    hard=f(r.get('hard_floor'))
+
+                    warn=f(r.get('warning_floor'))
+
+                    t1=f(r.get('target1'))
+
+                    t2=f(r.get('target2'))
+
+
+
+                    risk_per_share=(price_now-hard) if price_now>0 and hard>0 and hard<price_now else 0
+
+                    rr1=((t1-price_now)/risk_per_share) if risk_per_share>0 and t1>price_now else None
+
+                    rr2=((t2-price_now)/risk_per_share) if risk_per_share>0 and t2>price_now else None
+
+
+
+                    st.markdown('#### Trade Plan')
+
+                    p1,p2,p3,p4,p5=st.columns(5)
+
+                    p1.metric('Entry Ref',px(price_now,m))
+
+                    p2.metric('Hard Stop',px(hard,m) if hard else '-')
+
+                    p3.metric('T1',px(t1,m) if t1 else '-')
+
+                    p4.metric('T2',px(t2,m) if t2 else '-')
+
+                    p5.metric('R:R T1',f'{rr1:.2f}R' if rr1 is not None else '-')
+
+
+
+                    if rr2 is not None:
+
+                        st.caption(f'R:R T2 = {rr2:.2f}R')
+
+
+
+                    if warn:
+
+                        st.caption(f'Warning Floor: {px(warn,m)}')
+
+
+
+                    if not live_now:
+
+                        st.info('REFERENCE ONLY - levels activate in REGULAR session')
+
+                    elif not di_ok:
+
+                        st.error('NO TRADE - invalid market data')
+
+                    elif grade in ('ENTRY_CANDIDATE','ENTRY'):
+
+                        if rr1 is not None and rr1>=1.5:
+
+                            st.success(f'RISK/REWARD OK - T1 {rr1:.2f}R')
+
+                        elif rr1 is not None:
+
+                            st.warning(f'RISK/REWARD WEAK - T1 {rr1:.2f}R')
+
+                        else:
+
+                            st.warning('TRADE LEVELS NOT READY')
+
+                    elif grade=='READY_STRONG':
+
+                        st.info('READY STRONG - wait for entry confirmation')
+
+                    else:
+
+                        st.caption('No active trade plan yet')
+
+
             b1=api(f'/api/bars/{sel}?minutes=1&limit=240').get('data') or []
             b5=api(f'/api/bars/{sel}?minutes=5&limit=240').get('data') or []
             b1f=_focus_bars(b1,60); b5f=_focus_bars(b5,180); c1,c2=st.columns(2)

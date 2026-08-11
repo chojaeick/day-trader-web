@@ -1240,11 +1240,175 @@ class CleanEngine:
             final_reason=' · '.join(reason[:3]) or '뚜렷한 실시간 힘 없음'
         return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'entry_gate':entry_gate,'position_gate':position_gate,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
     def refresh_korea_tracker(self,korea):
-        syms=self.tracked_symbols('KOREA'); fmap={r['symbol']:r for r in self.finder['KOREA']['rows']}; pmap={p['symbol']:p for p in self.store.positions('KOREA')}; pulse={str(r.get('symbol') or ''):r for r in (korea.intraday_pulse.get('rows') or [])}; rows=[]
+
+        syms=self.tracked_symbols('KOREA')
+
+        fmap={r['symbol']:r for r in self.finder['KOREA']['rows']}
+
+        pmap={p['symbol']:p for p in self.store.positions('KOREA')}
+
+        pulse={str(r.get('symbol') or ''):r for r in (korea.intraday_pulse.get('rows') or [])}
+
+        rows=[]
+
+
+
         for sym in syms:
-            f=fmap.get(sym) or {}; p=pulse.get(sym) or {}; strength=p.get('strength_composite'); score=_f(p.get('live_score',f.get('finder_score'))); bias=str(p.get('bias') or f.get('direction') or 'NEUTRAL').upper(); sc=_clip((_f(strength)-100)/35,-1,1)*45 if strength is not None else 0; ss=_clip((score-50)/50,-1,1)*40; sign=1 if bias in ('LONG','UP') else -1 if bias in ('SHORT','DOWN') else 0; power=round(_clip(sign*abs(ss)+sc,-100,100),1); prev=self._last.get(('POWER','KOREA',sym)); delta=round(power-_f(prev.get('power')),1) if prev else 0; vi=bool(p.get('vi_triggered')); risk='HIGH' if vi else str(f.get('risk') or 'NORMAL'); state='HOLD' if pmap.get(sym) else ('SETUP' if abs(power)>=55 and _session('KOREA')=='REGULAR' else 'WATCH')
-            rows.append({'market':'KOREA','symbol':sym,'name':f.get('name') or sym,'finder_rank':f.get('rank'),'finder_score':f.get('finder_score'),'position_open':bool(pmap.get(sym)),'qty':_f((pmap.get(sym) or {}).get('qty')),'avg_entry':_f((pmap.get(sym) or {}).get('avg_entry')),'price':_f(p.get('price',f.get('price'))),'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'components':{'execution_strength':strength,'live_score':score,'minute_chart_gate':False},'warning_floor':None,'hard_floor':None,'target1':None,'target2':None,'floor_mode':'PENDING','reason':'체결강도/후보점수 기반 · 국내 1/5분봉 Gate 연결 전','session':_session('KOREA'),'updated_at':_now()})
-        rows.sort(key=_tracker_sort_key); self._finalize('KOREA',rows); return self.tracker['KOREA']
+
+            f=fmap.get(sym) or {}
+
+            p=pulse.get(sym) or {}
+
+
+
+            strength=p.get('strength_composite')
+
+            score=_f(p.get('live_score',f.get('finder_score')))
+
+            bias=str(p.get('bias') or f.get('direction') or 'NEUTRAL').upper()
+
+
+
+            sc=_clip((_f(strength)-100)/35,-1,1)*45 if strength is not None else 0
+
+            ss=_clip((score-50)/50,-1,1)*40
+
+            sign=1 if bias in ('LONG','UP') else -1 if bias in ('SHORT','DOWN') else 0
+
+
+
+            power=round(_clip(sign*abs(ss)+sc,-100,100),1)
+
+
+
+            prev=self._last.get(('POWER','KOREA',sym))
+
+            delta=round(power-_f(prev.get('power')),1) if prev else 0
+
+
+
+            vi=bool(p.get('vi_triggered'))
+
+            risk='HIGH' if vi else str(f.get('risk') or 'NORMAL')
+
+
+
+            # V4.6.6 KR Direction Guard
+
+            # KR Power remains an attention/strength diagnostic.
+
+            # It must not generate directional SETUP/ENTRY before
+
+            # a verified KR 1m/5m Setup + Trigger Gate exists.
+
+            state='HOLD' if pmap.get(sym) else 'WATCH'
+
+
+
+            ap=abs(power)
+
+            attention_label=(
+
+                '매우 강한 관심도' if ap>=70 else
+
+                '강한 관심도' if ap>=40 else
+
+                '보통 관심도' if ap>=18 else
+
+                '낮은 관심도'
+
+            )
+
+
+
+            rows.append({
+
+                'market':'KOREA',
+
+                'symbol':sym,
+
+                'name':f.get('name') or sym,
+
+                'finder_rank':f.get('rank'),
+
+                'finder_score':f.get('finder_score'),
+
+                'position_open':bool(pmap.get(sym)),
+
+                'qty':_f((pmap.get(sym) or {}).get('qty')),
+
+                'avg_entry':_f((pmap.get(sym) or {}).get('avg_entry')),
+
+                'price':_f(p.get('price',f.get('price'))),
+
+
+
+                'direction':'UNVERIFIED',
+
+
+
+                'power':power,
+
+                'power_delta':delta,
+
+                'power_label':attention_label,
+
+
+
+                'state':state,
+
+                'risk':risk,
+
+
+
+                'components':{
+
+                    'execution_strength':strength,
+
+                    'live_score':score,
+
+                    'attention_power':power,
+
+                    'legacy_bias':bias,
+
+                    'minute_chart_gate':False,
+
+                    'direction_verified':False
+
+                },
+
+
+
+                'warning_floor':None,
+
+                'hard_floor':None,
+
+                'target1':None,
+
+                'target2':None,
+
+                'floor_mode':'PENDING',
+
+
+
+                'reason':'KR Attention Power 관찰용 · 방향 미검증 · 국내 1m/5m Gate 연결 전',
+
+                'session':_session('KOREA'),
+
+                'updated_at':_now()
+
+            })
+
+
+
+        rows.sort(key=_tracker_sort_key)
+
+        self._finalize('KOREA',rows)
+
+        return self.tracker['KOREA']
+
+
+
     def _position_manager(self,power,delta,price,pos,vwap,ema9,ema20,b1,b5):
         entry=_f(pos.get('avg_entry'))
         if not entry or not price:return {'state':'HOLD','floor_mode':'INITIAL','reason':'포지션 데이터 부족'}

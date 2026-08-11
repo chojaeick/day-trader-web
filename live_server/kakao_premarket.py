@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 
 from .premarket_briefing import build_premarket_briefing
+from .premarket_history import build_and_store_message
 
 
 
@@ -375,7 +376,7 @@ def make_report(label="PREMARKET"):
 
 def send_report(label="PREMARKET"):
 
-    text = make_report(label)
+    text = build_and_store_message(label)
 
     result = send_text(text)
 
@@ -386,6 +387,8 @@ def send_report(label="PREMARKET"):
     print(text)
 
     print(result)
+
+
 
 
 

@@ -77,65 +77,313 @@ def _data_integrity_usa(price,b1,b5,session):
             'last_1m_close':last1 or None,'last_5m_close':last5 or None}
 
 def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta,b1,b5,risk):
-    """V1 long-entry gate.
 
-    5m = setup/trend.
-    1m = actual trigger.
-    The score is diagnostic only, not a probability.
+    """V4.7.3 USA long-entry gate.
+
+
+
+    5m = directional setup/trend.
+
+    1m = actual breakout/participation trigger.
+
+
+
+    READY calibration:
+
+    - Setup >= 3/4
+
+    - Non-Power 1m trigger >= 3/4
+
+    - Power >= 40
+
+    - Chase guard must pass
+
+
+
+    ENTRY remains intentionally strict.
+
     """
+
     setup_checks={}
+
     trigger_checks={}
+
+
+
     if len(b5)>=3:
-        c0=_f(b5.iloc[-1]['close']); c1=_f(b5.iloc[-2]['close']); c2=_f(b5.iloc[-3]['close'])
-        l0=_f(b5.iloc[-1]['low']); l1=_f(b5.iloc[-2]['low'])
+
+        c0=_f(b5.iloc[-1]['close'])
+
+        c1=_f(b5.iloc[-2]['close'])
+
+        c2=_f(b5.iloc[-3]['close'])
+
+        l0=_f(b5.iloc[-1]['low'])
+
+        l1=_f(b5.iloc[-2]['low'])
+
+
+
         setup_checks={
-            'price_above_vwap': bool(price and vwap and price>vwap),
-            'ema9_above_ema20': bool(ema9 and ema20 and ema9>ema20),
-            'five_min_rising': bool(c0>c1),
-            'five_min_structure': bool((c0>c1>c2) or (l0>l1 and c0>=c1)),
+
+            'price_above_vwap':bool(price and vwap and price>vwap),
+
+            'ema9_above_ema20':bool(ema9 and ema20 and ema9>ema20),
+
+            'five_min_rising':bool(c0>c1),
+
+            'five_min_structure':bool(
+
+                (c0>c1>c2) or
+
+                (l0>l1 and c0>=c1)
+
+            ),
+
         }
+
     else:
-        setup_checks={'price_above_vwap':False,'ema9_above_ema20':False,'five_min_rising':False,'five_min_structure':False}
+
+        setup_checks={
+
+            'price_above_vwap':False,
+
+            'ema9_above_ema20':False,
+
+            'five_min_rising':False,
+
+            'five_min_structure':False
+
+        }
+
+
 
     if len(b1)>=3:
-        last=b1.iloc[-1]; prev=b1.iloc[-2]
-        lc=_f(last['close']); lo=_f(last['open']); ph=_f(prev['high']); pc=_f(prev['close'])
+
+        last=b1.iloc[-1]
+
+        prev=b1.iloc[-2]
+
+
+
+        lc=_f(last['close'])
+
+        lo=_f(last['open'])
+
+        ph=_f(prev['high'])
+
+        pc=_f(prev['close'])
+
+
+
         one_ret=((lc/pc-1)*100) if pc else 0
+
+
+
         trigger_checks={
-            'green_1m': bool(lc>lo),
-            'break_prev_high': bool(lc>ph),
-            'volume_expansion': bool(vol_ratio>=1.5),
-            'one_min_impulse': bool(one_ret>=0.15),
-            'power_acceleration': bool(power>=60 and delta>=4),
+
+            'green_1m':bool(lc>lo),
+
+            'break_prev_high':bool(lc>ph),
+
+            'volume_expansion':bool(vol_ratio>=1.5),
+
+            'one_min_impulse':bool(one_ret>=0.15),
+
+
+
+            # V4.7.3:
+
+            # retained as diagnostic/ENTRY confirmation,
+
+            # but no longer counted as a READY price-volume trigger.
+
+            'power_acceleration':bool(
+
+                power>=60 and delta>=4
+
+            ),
+
         }
+
     else:
+
         one_ret=0.0
-        trigger_checks={'green_1m':False,'break_prev_high':False,'volume_expansion':False,'one_min_impulse':False,'power_acceleration':False}
+
+        trigger_checks={
+
+            'green_1m':False,
+
+            'break_prev_high':False,
+
+            'volume_expansion':False,
+
+            'one_min_impulse':False,
+
+            'power_acceleration':False
+
+        }
+
+
 
     setup_count=sum(1 for v in setup_checks.values() if v)
+
     trigger_count=sum(1 for v in trigger_checks.values() if v)
+
+
+
+    nonpower_keys=(
+
+        'green_1m',
+
+        'break_prev_high',
+
+        'volume_expansion',
+
+        'one_min_impulse'
+
+    )
+
+
+
+    nonpower_trigger_count=sum(
+
+        1 for k in nonpower_keys
+
+        if trigger_checks.get(k)
+
+    )
+
+
+
     setup_ok=setup_count>=3
-    # ENTRY requires a real 1m breakout + participation + accelerating Power.
-    trigger_core=bool(trigger_checks.get('green_1m') and trigger_checks.get('break_prev_high')
-                      and trigger_checks.get('volume_expansion') and trigger_checks.get('power_acceleration'))
-    chase_ok=bool(risk=='NORMAL' and rsi<74 and over_vwap<2.5)
-    ready=bool(setup_ok and trigger_count>=3 and power>=55 and chase_ok)
-    entry=bool(setup_ok and trigger_core and power>=68 and delta>=4 and chase_ok)
+
+
+
+    chase_ok=bool(
+
+        risk=='NORMAL'
+
+        and rsi<74
+
+        and over_vwap<2.5
+
+    )
+
+
+
+    # V4.7.3 READY:
+
+    # historical validation showed excessive Power gating
+
+    # was suppressing otherwise valid price/volume setups.
+
+    ready=bool(
+
+        setup_ok
+
+        and nonpower_trigger_count>=3
+
+        and power>=40
+
+        and chase_ok
+
+    )
+
+
+
+    # ENTRY is NOT loosened in V4.7.3.
+
+    trigger_core=bool(
+
+        trigger_checks.get('green_1m')
+
+        and trigger_checks.get('break_prev_high')
+
+        and trigger_checks.get('volume_expansion')
+
+        and trigger_checks.get('power_acceleration')
+
+    )
+
+
+
+    entry=bool(
+
+        setup_ok
+
+        and trigger_core
+
+        and power>=68
+
+        and delta>=4
+
+        and chase_ok
+
+    )
+
+
 
     return {
+
         'setup_ok':setup_ok,
+
         'ready':ready,
+
         'entry':entry,
+
+
+
         'setup_count':setup_count,
+
         'setup_total':len(setup_checks),
+
+
+
+        # Backward-compatible total still contains Power acceleration.
+
         'trigger_count':trigger_count,
+
         'trigger_total':len(trigger_checks),
+
+
+
+        # New V4.7.3 READY diagnostics.
+
+        'nonpower_trigger_count':nonpower_trigger_count,
+
+        'nonpower_trigger_total':4,
+
+        'ready_power_min':40,
+
+        'entry_power_min':68,
+
+
+
         'setup_checks':setup_checks,
+
         'trigger_checks':trigger_checks,
+
         'one_min_return_pct':round(one_ret,3),
+
         'chase_ok':chase_ok,
-        'rule':'5m Setup + 1m breakout/volume + Power acceleration + chase guard',
+
+
+
+        'rule':(
+
+            'V4.7.3 · READY=5m Setup>=3/4 + '
+
+            'non-Power 1m Trigger>=3/4 + Power>=40 + chase guard · '
+
+            'ENTRY remains strict'
+
+        ),
+
     }
+
+
+
 
 class V4Store:
     def __init__(self,path): self.path=path; self._init()

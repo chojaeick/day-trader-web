@@ -248,6 +248,168 @@ with t[0]:
 
 
 
+        # V486_DECISION_FIRST_UI
+
+        priority={
+
+            "ENTRY":0,
+
+            "ENTRY_CANDIDATE":1,
+
+            "READY_STRONG":2,
+
+            "READY_WATCH":3,
+
+            "SETUP":4,
+
+            "HOLD":5,
+
+            "WATCH":6,
+
+            "DATA_INVALID":99,
+
+        }
+
+
+
+        def ui_grade(rr):
+
+            g=rr.get("entry_gate") or {}
+
+            return g.get("signal_grade") or rr.get("state") or "WATCH"
+
+
+
+        ranked=sorted(
+
+            rows,
+
+            key=lambda rr:(
+
+                priority.get(ui_grade(rr),50),
+
+                -abs(f(rr.get("power")))
+
+            )
+
+        )
+
+
+
+        st.markdown("## \U0001f3af \uc9c0\uae08 \ud560 \uc77c")
+
+
+
+        if not ranked:
+
+            st.info("\ud604\uc7ac \uc9d1\uc911 \ucd94\uc801 \uc885\ubaa9\uc774 \uc5c6\uc2b5\ub2c8\ub2e4. Finder\uac00 \ud6c4\ubcf4\ub97c \ucc3e\ub294 \uc911\uc785\ub2c8\ub2e4.")
+
+        else:
+
+            top=ranked[0]
+
+            grade=ui_grade(top)
+
+            symbol=top.get("symbol") or "-"
+
+            name=top.get("name") or symbol
+
+            power=f(top.get("power"))
+
+            delta=f(top.get("power_delta"))
+
+            data_ok=(top.get("data_integrity") or {}).get("valid",True)
+
+
+
+            if not data_ok:
+
+                action="\ub9e4\ub9e4 \uae08\uc9c0"
+
+                msg="\ub370\uc774\ud130 \uc774\uc0c1"
+
+            elif grade=="ENTRY":
+
+                action="\uc9c4\uc785 \uac80\ud1a0"
+
+                msg="\uc5c4\uaca9\ud55c \uc9c4\uc785 \uc870\uac74 \ud1b5\uacfc"
+
+            elif grade=="ENTRY_CANDIDATE":
+
+                action="\uc9c4\uc785 \ud6c4\ubcf4"
+
+                msg="\uc9c4\uc785 \uc9c1\uc804 - \uac00\uaca9/\ucd94\uaca9 \uc5ec\ubd80 \ud655\uc778"
+
+            elif grade=="READY_STRONG":
+
+                action="\uc6b0\uc120 \uac10\uc2dc"
+
+                msg="\uc870\uac74 \uc6b0\uc218 - Trigger \uc9d1\uc911 \ud655\uc778"
+
+            elif grade=="READY_WATCH":
+
+                action="\uad00\uc2ec \uac10\uc2dc"
+
+                msg="\uc544\uc9c1 \uc9c4\uc785 \ub2e8\uacc4 \uc544\ub2d8"
+
+            elif grade=="SETUP":
+
+                action="\ud0c0\uc774\ubc0d \ub300\uae30"
+
+                msg="\uad6c\uc870 \ud615\uc131 - \ucd5c\uc885 \uc9c4\uc785 \uc870\uac74 \ub300\uae30"
+
+            else:
+
+                action="\ub300\uae30"
+
+                msg="\uc9c4\uc785 \uc870\uac74 \ubd80\uc871"
+
+
+
+            a1,a2,a3,a4=st.columns(4)
+
+            a1.metric("\uc9c0\uae08 \ud560 \uc77c",action)
+
+            a2.metric("1\uc21c\uc704 \uc885\ubaa9",symbol)
+
+            a3.metric("\ud604\uc7ac \ub2e8\uacc4",grade.replace("_","-"))
+
+            a4.metric("Power",f"{power:.0f}",delta=f"{delta:+.0f}")
+
+
+
+            st.info(f"**{name} ({symbol})** - {msg}")
+
+            st.caption("\ud575\uc2ec \uc774\uc720 - "+str(top.get("reason") or "-"))
+
+
+
+        with st.expander("\uc6a9\uc5b4 \uc124\uba85"):
+
+            st.markdown(
+
+                "**Finder** = \uc804\uccb4 \uc2dc\uc7a5\uc5d0\uc11c \ucc3e\uc740 \ud6c4\ubcf4  \n"
+
+                "**Tracker** = \uc2e4\uc2dc\uac04 \uc9d1\uc911 \ucd94\uc801 \uc885\ubaa9  \n"
+
+                "**Power** = \uac00\uaca9+\uac70\ub798\ub7c9+\ubaa8\uba58\ud140 \uc885\ud569 \uac15\ub3c4  \n"
+
+                "**Delta Power** = \uc9c1\uc804\ubcf4\ub2e4 \uac15\ud574\uc84c\ub294\uc9c0 \uc57d\ud574\uc84c\ub294\uc9c0  \n"
+
+                "**Setup** = \uc88b\uc740 \ub9e4\ub9e4 \uad6c\uc870 \ud615\uc131 \uc5ec\ubd80  \n"
+
+                "**Trigger** = \uc2e4\uc81c \uc9c4\uc785 \ud0c0\uc774\ubc0d  \n"
+
+                "**Chase BLOCK** = \uacfc\ub3c4\ud55c \ucd94\uaca9\ub9e4\uc218 \ucc28\ub2e8"
+
+            )
+
+
+
+        st.markdown("### \uc138\ubd80 \uc2e0\ud638 / \uac80\uc99d \uc815\ubcf4")
+
+
+
         st.markdown('### V4.7.4 Signal Quality')
 
         q1,q2,q3,q4=st.columns(4)

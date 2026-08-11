@@ -48,6 +48,430 @@ class KoreaMarketAdapter:
         self.stock_meta_updated_at=None
         self.cap_rank_enabled=False
 
+    def minute_chart(self, stk_cd, tick=1, max_pages=1):
+
+        """V4.7 ka10080 real minute-bar adapter.
+
+
+
+        Returns actual Kiwoom 1m/5m OHLCV bars in chronological order.
+
+        Default max_pages=1 keeps live Heavy5 polling lightweight.
+
+        """
+
+        code=_clean_code(stk_cd)
+
+        tick=str(int(tick))
+
+
+
+        if tick not in ('1','5'):
+
+            raise ValueError('tick must be 1 or 5')
+
+
+
+        rows=[]
+
+        pages=0
+
+        next_key=''
+
+        cont_yn=''
+
+
+
+        while pages < max(1,int(max_pages)):
+
+            hdr=self.k.headers('ka10080')
+
+
+
+            if next_key:
+
+                hdr['cont-yn']='Y'
+
+                hdr['next-key']=next_key
+
+
+
+            r=requests.post(
+
+                self.k.s.rest_base+'/api/dostk/chart',
+
+                headers=hdr,
+
+                json={
+
+                    'stk_cd':code,
+
+                    'tic_scope':tick,
+
+                    'upd_stkpc_tp':'1'
+
+                },
+
+                timeout=30
+
+            )
+
+
+
+            d=r.json()
+
+
+
+            if d.get('return_code') not in (None,0):
+
+                raise RuntimeError(
+
+                    f"ka10080 {code}/{tick}m: "
+
+                    f"{d.get('return_code')} {d.get('return_msg')}"
+
+                )
+
+
+
+            raw=d.get('stk_min_pole_chart_qry') or []
+
+
+
+            for x in raw:
+
+                if not isinstance(x,dict):
+
+                    continue
+
+
+
+                tm=str(x.get('cntr_tm') or '').strip()
+
+                close=abs(_num(x.get('cur_prc')))
+
+                op=abs(_num(x.get('open_pric')))
+
+                hi=abs(_num(x.get('high_pric')))
+
+                lo=abs(_num(x.get('low_pric')))
+
+                vol=abs(_num(x.get('trde_qty')))
+
+                acc_vol=abs(_num(x.get('acc_trde_qty')))
+
+
+
+                if len(tm)<12 or close<=0:
+
+                    continue
+
+
+
+                rows.append({
+
+                    'time':tm,
+
+                    'open':op,
+
+                    'high':hi,
+
+                    'low':lo,
+
+                    'close':close,
+
+                    'volume':vol,
+
+                    'acc_volume':acc_vol
+
+                })
+
+
+
+            pages+=1
+
+
+
+            cont_yn=str(
+
+                r.headers.get('cont-yn')
+
+                or r.headers.get('Cont-Yn')
+
+                or ''
+
+            ).upper()
+
+
+
+            next_key=(
+
+                r.headers.get('next-key')
+
+                or r.headers.get('Next-Key')
+
+                or ''
+
+            )
+
+
+
+            if cont_yn!='Y' or not next_key:
+
+                break
+
+
+
+        # ka10080 is newest-first. Engine uses chronological order.
+
+        unique={}
+
+        for row in rows:
+
+            unique[row['time']]=row
+
+
+
+        bars=sorted(unique.values(),key=lambda x:x['time'])
+
+
+
+        return {
+
+            'ok':True,
+
+            'api_id':'ka10080',
+
+            'symbol':code,
+
+            'tick_minutes':int(tick),
+
+            'pages':pages,
+
+            'count':len(bars),
+
+            'bars':bars,
+
+            'oldest':bars[0] if bars else None,
+
+            'latest':bars[-1] if bars else None,
+
+            'continuation':{
+
+                'cont_yn':cont_yn,
+
+                'next_key':next_key
+
+            },
+
+            'checked_at':datetime.now(timezone.utc).isoformat()
+
+        }
+
+
+
+    def canonical_minute_bars(self, stk_cd, max_pages=3):
+
+        """Aggregate raw ka10079 rows into canonical 1-minute OHLCV bars."""
+
+        d=self.minute_chart(stk_cd,1,max_pages=max_pages)
+
+        raw=d.get('bars') or []
+
+
+
+        grouped={}
+
+        for r in raw:
+
+            minute=str(r.get('time') or '')[:12]
+
+            if len(minute)!=12:
+
+                continue
+
+            grouped.setdefault(minute,[]).append(r)
+
+
+
+        out=[]
+
+        for minute in sorted(grouped):
+
+            g=grouped[minute]
+
+            g.sort(key=lambda x:x['time'])
+
+
+
+            opens=[_num(x.get('open')) for x in g if _num(x.get('open'))>0]
+
+            highs=[_num(x.get('high')) for x in g if _num(x.get('high'))>0]
+
+            lows=[_num(x.get('low')) for x in g if _num(x.get('low'))>0]
+
+            closes=[_num(x.get('close')) for x in g if _num(x.get('close'))>0]
+
+            vols=[max(0.0,_num(x.get('volume'))) for x in g]
+
+
+
+            if not closes:
+
+                continue
+
+
+
+            op=opens[0] if opens else closes[0]
+
+            hi=max(highs) if highs else max(closes)
+
+            lo=min(lows) if lows else min(closes)
+
+            cl=closes[-1]
+
+            vol=sum(vols)
+
+
+
+            out.append({
+
+                'time':minute+'00',
+
+                'open':op,
+
+                'high':hi,
+
+                'low':lo,
+
+                'close':cl,
+
+                'volume':vol,
+
+                'raw_rows':len(g)
+
+            })
+
+
+
+        return {
+
+            'ok':True,
+
+            'symbol':d.get('symbol'),
+
+            'tick_minutes':1,
+
+            'pages':d.get('pages'),
+
+            'raw_count':d.get('raw_count'),
+
+            'count':len(out),
+
+            'bars':out,
+
+            'oldest':out[0] if out else None,
+
+            'latest':out[-1] if out else None
+
+        }
+
+
+
+    def canonical_five_minute_bars(self, stk_cd, max_pages=3):
+
+        """Aggregate canonical 1-minute bars into KST-aligned 5-minute OHLCV bars."""
+
+        d=self.canonical_minute_bars(stk_cd,max_pages=max_pages)
+
+        one=d.get('bars') or []
+
+
+
+        grouped={}
+
+        for r in one:
+
+            tm=str(r.get('time') or '')
+
+            if len(tm)<12:
+
+                continue
+
+
+
+            ymd=tm[:8]
+
+            hh=int(tm[8:10])
+
+            mm=int(tm[10:12])
+
+            bucket_mm=(mm//5)*5
+
+            key=f"{ymd}{hh:02d}{bucket_mm:02d}"
+
+            grouped.setdefault(key,[]).append(r)
+
+
+
+        out=[]
+
+        for key in sorted(grouped):
+
+            g=grouped[key]
+
+            g.sort(key=lambda x:x['time'])
+
+
+
+            out.append({
+
+                'time':key+'00',
+
+                'open':g[0]['open'],
+
+                'high':max(x['high'] for x in g),
+
+                'low':min(x['low'] for x in g),
+
+                'close':g[-1]['close'],
+
+                'volume':sum(x['volume'] for x in g),
+
+                'minute_bars':len(g)
+
+            })
+
+
+
+        return {
+
+            'ok':True,
+
+            'symbol':d.get('symbol'),
+
+            'tick_minutes':5,
+
+            'source':'canonical_1m',
+
+            'pages':d.get('pages'),
+
+            'raw_count':d.get('raw_count'),
+
+            'one_minute_count':d.get('count'),
+
+            'count':len(out),
+
+            'bars':out,
+
+            'oldest':out[0] if out else None,
+
+            'latest':out[-1] if out else None
+
+        }
+
+
+
     def quote(self, stk_cd='005930'):
         code=_clean_code(stk_cd)
         r=requests.post(

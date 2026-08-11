@@ -1537,9 +1537,13 @@ class CleanEngine:
 
             short_trigger_count=sum(short_trigger_checks.values())
 
-            long_trigger=long_trigger_count>=3
+            # V4.7.2 validated shadow profile:
 
-            short_trigger=short_trigger_count>=3
+            # 5m Setup >= 3/4 + 1m Trigger = 4/4.
+
+            long_trigger=long_trigger_count>=4
+
+            short_trigger=short_trigger_count>=4
 
 
 
@@ -1763,13 +1767,15 @@ class CleanEngine:
 
 
 
-            attention_ok=abs(power)>=40
+            # V4.7.2: Attention Power is diagnostic only.
+
+            # It no longer gates directional Shadow READY.
+
+            attention_ok=True
 
             shadow_direction=gate.get('shadow_direction','UNVERIFIED')
 
             gate_ready=bool(
-
-                attention_ok and
 
                 shadow_direction in ('LONG','SHORT') and
 
@@ -1780,6 +1786,8 @@ class CleanEngine:
 
 
             gate['attention_ok']=attention_ok
+
+            gate['attention_filter_required']=False
 
             gate['gate_ready']=gate_ready
 
@@ -1807,7 +1815,7 @@ class CleanEngine:
 
 
 
-            reason='KR Attention Power 관찰용 · 라이브 방향 미검증'
+            reason='KR 5m Setup≥3/4 + 1m Trigger=4/4 Shadow Gate · 라이브 방향 미검증'
 
 
 
@@ -1912,6 +1920,7 @@ class CleanEngine:
                     'shadow_trigger_total':gate.get('trigger_total'),
 
                     'shadow_attention_ok':attention_ok,
+                    'shadow_attention_filter_required':False,
 
                     'shadow_data_ok':gate.get('data_ok'),
 

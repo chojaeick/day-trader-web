@@ -324,6 +324,36 @@ def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta
 
 
 
+
+
+    # V4.7.4 signal grading
+
+    if entry:
+
+        signal_grade='ENTRY'
+
+    elif ready and setup_count>=4 and nonpower_trigger_count>=4:
+
+        signal_grade='ENTRY_CANDIDATE'
+
+    elif ready and setup_count>=4 and nonpower_trigger_count>=3:
+
+        signal_grade='READY_STRONG'
+
+    elif ready:
+
+        signal_grade='READY_WATCH'
+
+    elif setup_ok:
+
+        signal_grade='SETUP'
+
+    else:
+
+        signal_grade='WATCH'
+
+
+
     return {
 
         'setup_ok':setup_ok,
@@ -331,6 +361,10 @@ def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta
         'ready':ready,
 
         'entry':entry,
+
+        'signal_grade':signal_grade,
+
+        'grade_rule':'V4.7.4 WATCH=current READY · STRONG=S4/N3 · ENTRY_CANDIDATE=S4/N4 · ENTRY=strict',
 
 
 

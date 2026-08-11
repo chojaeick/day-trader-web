@@ -20,6 +20,7 @@ from .news_ai import analyze_news_with_openai, analyze_news_resilient
 from .korea import KoreaMarketAdapter
 from .recommendation import build_usa_final_recommendations, build_korea_final_recommendations
 from .v4_engine import CleanEngine
+from .premarket_briefing import build_premarket_briefing
 import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
@@ -1456,3 +1457,41 @@ def validation_run(days:int=Query(60,ge=20,le=260), max_symbols:int=Query(20,ge=
 @app.get('/api/validation/live')
 def validation_live(trade_date:str|None=None):
     return live_validator.evaluate(trade_date)
+
+
+
+@app.get("/api/premarket/intelligence")
+
+async def premarket_intelligence():
+
+    try:
+
+        data=await asyncio.to_thread(
+
+            build_premarket_briefing,
+
+            s.db_path
+
+        )
+
+        return {
+
+            "ok":True,
+
+            "market":"USA",
+
+            "generated_at":datetime.now(timezone.utc).isoformat(),
+
+            "data":data
+
+        }
+
+    except Exception as e:
+
+        logging.exception("premarket intelligence failed")
+
+        raise HTTPException(status_code=500,detail=str(e))
+
+
+
+

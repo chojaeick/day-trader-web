@@ -624,6 +624,140 @@ with t[0]:
 with t[1]:
     st.subheader('🗞️ Briefing')
     if m=='USA':
+
+
+        # V482_PREMARKET_INTELLIGENCE_UI
+
+        intel=api('/api/premarket/intelligence',timeout=30)
+
+        idata=(intel or {}).get('data') or {}
+
+
+
+        if idata:
+
+            st.markdown('### Premarket Intelligence · V4.8.2')
+
+
+
+            themes=idata.get('themes') or []
+
+            industries=idata.get('industries') or []
+
+            candidates=idata.get('candidates') or []
+
+
+
+            if themes:
+
+                top=themes[0]
+
+                a,b,c,d=st.columns(4)
+
+                a.metric('Strongest Theme',top.get('theme') or '-')
+
+                b.metric('Theme Power',f"{f(top.get('final_power')):.1f}")
+
+                c.metric('Theme Leader',top.get('leader') or '-')
+
+                d.metric('Candidates',len(candidates))
+
+
+
+            st.markdown('#### Official Industry TOP5')
+
+            if industries:
+
+                st.dataframe(pd.DataFrame([{
+
+                    'Rank':i+1,
+
+                    'Industry':x.get('inds_nm'),
+
+                    'Power':x.get('industry_power'),
+
+                    '1D %':x.get('perf_1d'),
+
+                    '5D %':x.get('perf_5d'),
+
+                    '1M %':x.get('perf_1m')
+
+                } for i,x in enumerate(industries[:5])]),
+
+                use_container_width=True,hide_index=True)
+
+
+
+            st.markdown('#### Theme Power TOP5')
+
+            if themes:
+
+                st.dataframe(pd.DataFrame([{
+
+                    'Rank':i+1,
+
+                    'Theme':x.get('theme'),
+
+                    'Final Power':x.get('final_power'),
+
+                    'Custom':x.get('power'),
+
+                    'Industry':x.get('industry_power'),
+
+                    'Breadth %':x.get('breadth_pct'),
+
+                    'RVOL':x.get('avg_rvol'),
+
+                    'Leader':x.get('leader'),
+
+                    'Leader %':x.get('leader_change_pct')
+
+                } for i,x in enumerate(themes[:5])]),
+
+                use_container_width=True,hide_index=True)
+
+
+
+            st.markdown('#### Premarket Day-Trade TOP10')
+
+            if candidates:
+
+                st.dataframe(pd.DataFrame([{
+
+                    'Rank':i+1,
+
+                    'Symbol':x.get('symbol'),
+
+                    'Score':x.get('final_score'),
+
+                    'Change %':x.get('change_pct'),
+
+                    'RVOL':x.get('rvol'),
+
+                    'Theme':x.get('theme'),
+
+                    'Context Power':x.get('context_power')
+
+                } for i,x in enumerate(candidates[:10])]),
+
+                use_container_width=True,hide_index=True)
+
+
+
+            st.caption(
+
+                'Premarket ranking is a watchlist, not an entry signal. '
+
+                'REGULAR-session Setup / Trigger / Chase / Data Integrity gates remain required.'
+
+            )
+
+
+
+            st.divider()
+
+
+
         latest=api('/api/briefing/latest?market=USA'); report=latest.get('data') if isinstance(latest,dict) and 'data' in latest else latest
         if report:
             text=report.get('report_text') or report.get('summary') or ''

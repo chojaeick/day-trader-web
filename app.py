@@ -230,6 +230,82 @@ with t[0]:
     a,b,c,d=st.columns(4); a.metric('현재 시장',sko(s.get('session'))); b.metric('Finder 후보',len(fr)); c.metric('실시간 추적',tr.get('tracked_count',len(rows))); d.metric('보유 종목',len(pos)); a.caption('시장 시간'); b.caption('전체 시장 저빈도 선별'); c.caption('Heavy Tracker 최대 5개'); d.caption('추적 슬롯 최우선')
     if m=='KOREA':st.info('국장은 현재 체결강도 기반 Power까지만 사용합니다. 검증된 1분/5분봉 Gate 연결 전에는 ENTRY 신호를 내지 않습니다.')
     live_now=bool(tr.get('is_live'))
+
+
+    # V474_HIST_CONF
+
+    if m=='USA':
+
+        gc={}
+
+        for rr in rows:
+
+            gg=rr.get('entry_gate') or {}
+
+            gr=gg.get('signal_grade') or 'WATCH'
+
+            gc[gr]=gc.get(gr,0)+1
+
+
+
+        st.markdown('### V4.7.4 Signal Quality')
+
+        q1,q2,q3,q4=st.columns(4)
+
+        q1.metric('READY-WATCH',gc.get('READY_WATCH',0))
+
+        q2.metric('READY-STRONG',gc.get('READY_STRONG',0))
+
+        q3.metric('ENTRY-CANDIDATE',gc.get('ENTRY_CANDIDATE',0))
+
+        q4.metric('ENTRY',gc.get('ENTRY',0))
+
+
+
+        with st.expander('Historical Confidence - 2026-08-10'):
+
+            hist=pd.DataFrame([
+
+                {'Grade':'READY-WATCH','Episodes':24,'Symbols':11,
+
+                 '30m Avg %':0.139,'30m Hit %':55.0,
+
+                 '60m Avg %':0.180,'60m Hit %':61.5,
+
+                 'Confidence':'LOW-MEDIUM'},
+
+
+
+                {'Grade':'READY-STRONG','Episodes':19,'Symbols':8,
+
+                 '30m Avg %':0.239,'30m Hit %':60.0,
+
+                 '60m Avg %':0.263,'60m Hit %':72.7,
+
+                 'Confidence':'MEDIUM'},
+
+
+
+                {'Grade':'ENTRY-CANDIDATE','Episodes':6,'Symbols':5,
+
+                 '30m Avg %':1.000,'30m Hit %':66.7,
+
+                 '60m Avg %':-0.087,'60m Hit %':0.0,
+
+                 'Confidence':'SAMPLE LOW'}
+
+            ])
+
+            st.dataframe(hist,use_container_width=True,hide_index=True)
+
+            st.caption(
+
+                '10-minute episode dedup. Historical performance is not '
+
+                'a guaranteed probability.'
+
+            )
+
     st.markdown('### 🔥 실시간 Power 순위' if live_now else '### 🕘 장 마감 기준 Power 순위')
     if not live_now: st.caption('현재 장중 실시간 값이 아니라 마지막 사용 가능한 시장 데이터 기준 참고값입니다.')
     if rows:

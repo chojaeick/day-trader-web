@@ -241,6 +241,192 @@ class V4Store:
             c.execute("""INSERT OR IGNORE INTO v4_validation_marks(ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,setup_count,trigger_count,rvol,volume_ratio,hard_floor,warning_floor,floor_mode,mfe_pct,mae_pct,feature_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (minute,'USA',row.get('symbol'),row.get('state'),row.get('price'),row.get('power'),row.get('power_delta'),row.get('finder_rank'),gate.get('setup_count'),gate.get('trigger_count'),comp.get('rvol'),comp.get('volume_ratio'),row.get('hard_floor'),row.get('warning_floor'),row.get('floor_mode'),0.0,0.0,json.dumps(row,ensure_ascii=False,default=str)))
 
+
+    def add_korea_validation_mark(self,row):
+        """Store one regular-session KR tracker observation per minute.
+
+        KR does not yet have a verified 1m/5m chart gate, so setup/trigger fields
+        are intentionally left NULL. This is observational validation only.
+        """
+        if str(row.get('market') or '').upper()!='KOREA' or not row.get('price'):
+            return
+        if str(row.get('session') or '').upper()!='REGULAR':
+            return
+        minute=str(row.get('updated_at') or _now())[:16]+':00+00:00'
+        with self._c() as c:
+            c.execute("""INSERT OR IGNORE INTO v4_validation_marks(
+                ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,
+                setup_count,trigger_count,rvol,volume_ratio,
+                hard_floor,warning_floor,floor_mode,mfe_pct,mae_pct,feature_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    minute,'KOREA',row.get('symbol'),row.get('state'),row.get('price'),
+                    row.get('power'),row.get('power_delta'),row.get('finder_rank'),
+                    None,None,None,None,None,None,'KR_REFERENCE',
+                    0.0,0.0,json.dumps(row,ensure_ascii=False,default=str)
+                )
+            )
+
+    def backfill_korea_validation_from_snapshots(self,session_date=None):
+        """Retrofit existing KR tracker snapshots into validation marks."""
+        tz=ZoneInfo('Asia/Seoul')
+        with self._c() as c:
+            rows=[dict(r) for r in c.execute(
+                """SELECT id,ts,market,symbol,finder_rank,power,power_delta,state,risk,price,payload_json
+                   FROM v4_tracker_snapshots
+                   WHERE market='KOREA'
+                   ORDER BY symbol,ts"""
+            ).fetchall()]
+
+        parsed=[]
+        for r in rows:
+            try:
+                t=datetime.fromisoformat(str(r.get('ts')).replace('Z','+00:00'))
+                if t.tzinfo is None:t=t.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            kst=t.astimezone(tz)
+            day=kst.date().isoformat()
+            if session_date and day!=session_date:
+                continue
+            mins=kst.hour*60+kst.minute
+            if not (9*60 <= mins < 15*60+30):
+                continue
+            if _f(r.get('price'))<=0:
+                continue
+            try:
+                payload=json.loads(r.get('payload_json') or '{}')
+            except Exception:
+                payload={}
+            parsed.append((r,t,day,payload))
+
+        by_symbol={}
+        for item in parsed:
+            by_symbol.setdefault(str(item[0].get('symbol') or '').upper(),[]).append(item)
+
+        inserted=0
+        with self._c() as c:
+            for sym,items in by_symbol.items():
+                items.sort(key=lambda x:x[1])
+                for idx,(r,t,day,payload) in enumerate(items):
+                    minute=t.replace(second=0,microsecond=0).isoformat()
+                    anchor=_f(r.get('price'))
+                    if not anchor:
+                        continue
+
+                    future=items[idx:]
+                    def first_after(target_min):
+                        for rr,tt,dd,pp in future:
+                            if (tt-t).total_seconds() >= target_min*60:
+                                return _f(rr.get('price')) or None
+                        return None
+
+                    p5=first_after(5); p15=first_after(15)
+                    p30=first_after(30); p60=first_after(60)
+                    within60=[
+                        _f(rr.get('price')) for rr,tt,dd,pp in future
+                        if 0 <= (tt-t).total_seconds() <= 60*60 and _f(rr.get('price'))>0
+                    ]
+                    rets=[(p/anchor-1)*100 for p in within60] if within60 else [0.0]
+                    settled_at=None
+                    for rr,tt,dd,pp in future:
+                        if (tt-t).total_seconds() >= 60*60:
+                            settled_at=tt.isoformat(); break
+
+                    c.execute("""INSERT OR IGNORE INTO v4_validation_marks(
+                        ts,market,symbol,state,anchor_price,power,power_delta,finder_rank,
+                        setup_count,trigger_count,rvol,volume_ratio,
+                        hard_floor,warning_floor,floor_mode,
+                        ret_5m,ret_15m,ret_30m,ret_60m,mfe_pct,mae_pct,settled_at,feature_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            minute,'KOREA',sym,r.get('state'),anchor,r.get('power'),
+                            r.get('power_delta'),r.get('finder_rank'),
+                            None,None,None,None,None,None,'KR_REFERENCE',
+                            ((p5/anchor-1)*100 if p5 else None),
+                            ((p15/anchor-1)*100 if p15 else None),
+                            ((p30/anchor-1)*100 if p30 else None),
+                            ((p60/anchor-1)*100 if p60 else None),
+                            max(rets),min(rets),settled_at,
+                            json.dumps(payload or r,ensure_ascii=False,default=str)
+                        )
+                    )
+                    if c.execute("SELECT changes()").fetchone()[0]:
+                        inserted+=1
+        return {'inserted':inserted,'source_snapshots':len(parsed),'symbols':len(by_symbol)}
+
+    def korea_session_report(self,session_date=None):
+        tz=ZoneInfo('Asia/Seoul')
+        if not session_date:
+            session_date=datetime.now(timezone.utc).astimezone(tz).date().isoformat()
+
+        rows=self.validation_marks('KOREA',10000)
+        day=[]
+        for r in rows:
+            try:
+                t=datetime.fromisoformat(str(r.get('ts')).replace('Z','+00:00'))
+                if t.tzinfo is None:t=t.replace(tzinfo=timezone.utc)
+                if t.astimezone(tz).date().isoformat()==session_date:
+                    day.append(r)
+            except Exception:
+                pass
+
+        def avg(rows,col):
+            vals=[_f(r.get(col),float('nan')) for r in rows if r.get(col) is not None]
+            vals=[v for v in vals if not math.isnan(v)]
+            return round(sum(vals)/len(vals),3) if vals else None
+
+        def hit(rows,col):
+            vals=[_f(r.get(col)) for r in rows if r.get(col) is not None]
+            return round(sum(1 for v in vals if v>0)/len(vals)*100,1) if vals else None
+
+        symbol_rows=[]
+        for sym in sorted({str(r.get('symbol') or '') for r in day if r.get('symbol')}):
+            g=[r for r in day if str(r.get('symbol') or '')==sym]
+            symbol_rows.append({
+                'symbol':sym,'samples':len(g),
+                'ret_5m':avg(g,'ret_5m'),'ret_15m':avg(g,'ret_15m'),
+                'ret_30m':avg(g,'ret_30m'),'ret_60m':avg(g,'ret_60m'),
+                'hit_60_pct':hit(g,'ret_60m'),
+                'mfe_pct':avg(g,'mfe_pct'),'mae_pct':avg(g,'mae_pct'),
+                'avg_power':avg(g,'power'),
+                'max_power':round(max((_f(r.get('power')) for r in g),default=0),1),
+                'avg_power_delta':avg(g,'power_delta'),
+            })
+        symbol_rows.sort(
+            key=lambda r:(r.get('ret_60m') is not None,r.get('ret_60m') or -999),
+            reverse=True
+        )
+
+        power_rows=[]
+        buckets=[
+            ('≤0',-1e9,0),('0~20',0,20),('20~40',20,40),
+            ('40~60',40,60),('60+',60,1e9)
+        ]
+        for label,lo,hi in buckets:
+            g=[r for r in day if lo <= _f(r.get('power')) < hi]
+            if not g:continue
+            power_rows.append({
+                'power_bucket':label,'samples':len(g),
+                'ret_5m':avg(g,'ret_5m'),'ret_15m':avg(g,'ret_15m'),
+                'ret_30m':avg(g,'ret_30m'),'ret_60m':avg(g,'ret_60m'),
+                'hit_60_pct':hit(g,'ret_60m'),
+                'mfe_pct':avg(g,'mfe_pct'),'mae_pct':avg(g,'mae_pct')
+            })
+
+        complete60=sum(1 for r in day if r.get('ret_60m') is not None)
+        return {
+            'market':'KOREA','session_date':session_date,
+            'samples':len(day),'complete_60':complete60,
+            'symbols':len(symbol_rows),
+            'ret_5m':avg(day,'ret_5m'),'ret_15m':avg(day,'ret_15m'),
+            'ret_30m':avg(day,'ret_30m'),'ret_60m':avg(day,'ret_60m'),
+            'hit_60_pct':hit(day,'ret_60m'),
+            'mfe_pct':avg(day,'mfe_pct'),'mae_pct':avg(day,'mae_pct'),
+            'by_symbol':symbol_rows,'by_power':power_rows,
+            'note':'KR observational validation from Tracker snapshots. No verified KR 1m/5m Setup/Trigger gate yet.'
+        }
+
     def update_validation_outcomes(self,market,symbol,current_price):
         if not current_price:return
         now_dt=datetime.now(timezone.utc)
@@ -1129,8 +1315,12 @@ class CleanEngine:
                 self.store.snapshot(r)
                 if market=='USA' and r.get('session')=='REGULAR' and (r.get('data_integrity') or {}).get('valid'):
                     self.store.add_validation_mark(r)
+                elif market=='KOREA' and r.get('session')=='REGULAR':
+                    self.store.add_korea_validation_mark(r)
                 self._snap[(market,sym)]=minute
             if market=='USA' and r.get('session')=='REGULAR' and (r.get('data_integrity') or {}).get('valid'):
+                self.store.update_validation_outcomes(market,sym,_f(r.get('price')))
+            elif market=='KOREA' and r.get('session')=='REGULAR':
                 self.store.update_validation_outcomes(market,sym,_f(r.get('price')))
         sess=_session(market)
         self.tracker[market]={'rows':rows,'updated_at':_now(),'session':sess,'tracked_count':len(rows),'max_tracked':TRACK_LIMIT,'is_live':sess=='REGULAR','power_basis':'LIVE_REGULAR' if sess=='REGULAR' else 'LAST_AVAILABLE_REFERENCE','policy':'OPEN POSITIONS first; remaining slots use live readiness/power, then Finder rank. Maximum 5 heavy-tracked symbols.'}

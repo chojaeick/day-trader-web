@@ -657,6 +657,24 @@ def v4_tracker(market:str):
     if market=='KOREA': return v4.refresh_korea_tracker(korea)
     raise HTTPException(400,'market must be USA or KOREA')
 
+
+@app.post('/api/v4/korea/session-audit/backfill')
+def v4_korea_session_audit_backfill(date:str|None=None):
+    try:
+        result=v4.store.backfill_korea_validation_from_snapshots(date)
+        return {'ok':True,'date':date,**result}
+    except Exception as e:
+        logging.exception('KOREA session audit backfill failed')
+        raise HTTPException(500,str(e))
+
+@app.get('/api/v4/korea/session-audit')
+def v4_korea_session_audit(date:str|None=None):
+    try:
+        return v4.store.korea_session_report(date)
+    except Exception as e:
+        logging.exception('KOREA session audit report failed')
+        raise HTTPException(500,str(e))
+
 @app.get('/api/v4/positions')
 def v4_positions(market:str|None=None): return {'data':v4.store.positions(market)}
 

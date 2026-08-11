@@ -519,6 +519,29 @@ with t[2]:
                     power_rows.append(r)
                 st.dataframe(pd.DataFrame(power_rows),use_container_width=True,hide_index=True)
 
+        if m=='KOREA':
+            st.markdown('#### 🇰🇷 KR Session Snapshot Audit')
+            st.caption('한국 Tracker의 장중 분단위 snapshot을 이용한 관찰형 검증입니다. 국내 1m/5m Setup/Trigger Gate를 의미하지 않습니다.')
+            krrep=api('/api/v4/korea/session-audit') or {}
+            k1,k2,k3,k4,k5=st.columns(5)
+            k1.metric('표본',krrep.get('samples',0))
+            k2.metric('60분 완료',krrep.get('complete_60',0))
+            k3.metric('추적 종목',krrep.get('symbols',0))
+            k4.metric('60분 평균',f"{krrep.get('ret_60m'):+.3f}%" if krrep.get('ret_60m') is not None else '-')
+            k5.metric('60분 상승비율',f"{krrep.get('hit_60_pct'):.1f}%" if krrep.get('hit_60_pct') is not None else '-')
+
+            bys=pd.DataFrame(krrep.get('by_symbol') or [])
+            if len(bys):
+                st.markdown('##### 종목별 실제 추적 성과')
+                st.dataframe(bys,use_container_width=True,hide_index=True)
+
+            byp=pd.DataFrame(krrep.get('by_power') or [])
+            if len(byp):
+                st.markdown('##### KR Power 구간별 성과')
+                st.dataframe(byp,use_container_width=True,hide_index=True)
+
+            st.info('오늘 이전에 이미 저장된 KR Tracker snapshot은 backfill API로 Validation에 복구할 수 있습니다.')
+
         st.markdown('#### 🔎 Scanner / Coverage Audit')
         st.caption('Broad Discovery → Light Tracker → Finder → Heavy5의 현재 파이프라인을 점검합니다. 추천식은 바꾸지 않고 “어디에서 놓쳤는지”만 보여줍니다.')
         cov=api(f'/api/v4/coverage-audit?market={m}') or {}
@@ -1105,7 +1128,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.6.2.4 · WARM FAULT ISOLATION · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('V4.6.5 · KR SESSION SNAPSHOT AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
 if auto_live:
     time.sleep(5)
     st.rerun()

@@ -340,6 +340,106 @@ with t[0]:
                 for k,v in (gate.get('setup_checks') or {}).items(): checks.append(('✅' if v else '⬜')+' '+labels.get(k,k))
                 for k,v in (gate.get('trigger_checks') or {}).items(): checks.append(('✅' if v else '⬜')+' '+labels.get(k,k))
                 st.caption(' · '.join(checks))
+
+
+                # V474_ENTRY_DECISION_PANEL
+
+                grade=gate.get('signal_grade') or 'WATCH'
+
+                setup_n=int(gate.get('setup_count') or 0)
+
+                np_n=int(gate.get('nonpower_trigger_count') or 0)
+
+                chase_pass=bool(gate.get('chase_ok'))
+
+                power_now=f(r.get('power'))
+
+                di_ok=(r.get('data_integrity') or {}).get('valid',True)
+
+
+
+                strong_missing=[]
+
+                if setup_n<4: strong_missing.append(f'Setup {setup_n}/4')
+
+                if np_n<3: strong_missing.append(f'Trigger {np_n}/3')
+
+                if power_now<40: strong_missing.append(f'Power {power_now:.0f}/40')
+
+                if not chase_pass: strong_missing.append('Chase')
+
+                if not di_ok: strong_missing.append('Data')
+
+
+
+                candidate_missing=[]
+
+                if setup_n<4: candidate_missing.append(f'Setup {setup_n}/4')
+
+                if np_n<4: candidate_missing.append(f'Trigger {np_n}/4')
+
+                if power_now<40: candidate_missing.append(f'Power {power_now:.0f}/40')
+
+                if not chase_pass: candidate_missing.append('Chase')
+
+                if not di_ok: candidate_missing.append('Data')
+
+
+
+                st.markdown('#### Entry Decision')
+
+                d1,d2,d3,d4=st.columns(4)
+
+                d1.metric('Signal Grade',grade)
+
+                d2.metric('Setup',f'{setup_n}/4')
+
+                d3.metric('Trigger',f'{np_n}/4')
+
+                d4.metric('Chase','PASS' if chase_pass else 'BLOCK')
+
+
+
+                if not di_ok:
+
+                    st.error('NO TRADE - Data Integrity failed')
+
+                elif grade=='ENTRY':
+
+                    st.error('ENTRY - strict gate passed')
+
+                elif grade=='ENTRY_CANDIDATE':
+
+                    st.warning('ENTRY CANDIDATE - manual review')
+
+                elif grade=='READY_STRONG':
+
+                    st.success('READY STRONG - priority review')
+
+                elif grade=='READY_WATCH':
+
+                    st.info('READY WATCH - monitor')
+
+                elif grade=='SETUP':
+
+                    st.info('SETUP - waiting for trigger')
+
+                else:
+
+                    st.caption('WATCH - setup incomplete')
+
+
+
+                if grade not in ('READY_STRONG','ENTRY_CANDIDATE','ENTRY'):
+
+                    st.caption('To READY-STRONG: '+(', '.join(strong_missing) if strong_missing else 'READY'))
+
+
+
+                if grade not in ('ENTRY_CANDIDATE','ENTRY'):
+
+                    st.caption('To ENTRY-CANDIDATE: '+(', '.join(candidate_missing) if candidate_missing else 'READY'))
+
             b1=api(f'/api/bars/{sel}?minutes=1&limit=240').get('data') or []
             b5=api(f'/api/bars/{sel}?minutes=5&limit=240').get('data') or []
             b1f=_focus_bars(b1,60); b5f=_focus_bars(b5,180); c1,c2=st.columns(2)

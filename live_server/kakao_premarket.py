@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 from .premarket_briefing import build_premarket_briefing
 from .premarket_history import build_and_store_message
+from .premarket_validation import capture_from_snapshot, update_outcomes
 
 
 
@@ -378,6 +379,18 @@ def send_report(label="PREMARKET"):
 
     text = build_and_store_message(label)
 
+
+
+    try:
+
+        capture_from_snapshot(label)
+
+    except Exception as e:
+
+        print("VALIDATION CAPTURE ERROR",label,repr(e),flush=True)
+
+
+
     result = send_text(text)
 
 
@@ -413,6 +426,26 @@ def scheduler():
             day = now.strftime("%Y-%m-%d")
 
             minute = now.hour * 60 + now.minute
+
+
+
+            if 9 * 60 + 30 <= minute <= 10 * 60 + 35:
+
+                try:
+
+                    update_outcomes()
+
+                except Exception as e:
+
+                    print(
+
+                        "PREMARKET OUTCOME ERROR",
+
+                        repr(e),
+
+                        flush=True,
+
+                    )
 
 
 

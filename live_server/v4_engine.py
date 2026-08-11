@@ -756,7 +756,7 @@ class V4Store:
 
 class CleanEngine:
     def __init__(self,db_path):
-        self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._lock=threading.RLock()
+        self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._kr_gate_cache={}; self._lock=threading.RLock()
     def build_usa_finder(self,candidates,discovery,limit=5,db=None,commit=True,shadow_allow_unknown_quality=False,shadow_min_recent_bars=0):
         qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}
         rows=[]
@@ -1239,6 +1239,434 @@ class CleanEngine:
         else:
             final_reason=' · '.join(reason[:3]) or '뚜렷한 실시간 힘 없음'
         return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'entry_gate':entry_gate,'position_gate':position_gate,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
+    def _korea_shadow_gate(self,sym,korea,cache_seconds=45):
+
+        """V4.7.1 observational KR 5m Setup + 1m Trigger gate.
+
+
+
+        Shadow only:
+
+        - never changes live direction/state/order behavior
+
+        - Power is attention strength only
+
+        - ka10080 real 1m bars are the source of truth
+
+        """
+
+        now=datetime.now(timezone.utc)
+
+        cached=self._kr_gate_cache.get(sym)
+
+
+
+        if cached:
+
+            age=(now-cached['ts']).total_seconds()
+
+            if age<cache_seconds:
+
+                return cached['data']
+
+
+
+        empty={
+
+            'shadow_direction':'UNVERIFIED',
+
+            'gate_ready':False,
+
+            'attention_ok':False,
+
+            'setup_side':'NONE',
+
+            'setup_count':0,
+
+            'setup_total':4,
+
+            'trigger_count':0,
+
+            'trigger_total':4,
+
+            'long_setup':False,
+
+            'short_setup':False,
+
+            'long_trigger':False,
+
+            'short_trigger':False,
+
+            'vol_ratio':None,
+
+            'bars_1m':0,
+
+            'bars_5m':0,
+
+            'data_ok':False,
+
+            'error':None
+
+        }
+
+
+
+        try:
+
+            d=korea.minute_chart(sym,1,max_pages=1)
+
+            raw=d.get('bars') or []
+
+
+
+            if len(raw)<25:
+
+                out=dict(empty)
+
+                out['bars_1m']=len(raw)
+
+                out['error']='INSUFFICIENT_1M_BARS'
+
+                self._kr_gate_cache[sym]={'ts':now,'data':out}
+
+                return out
+
+
+
+            b=pd.DataFrame(raw).copy()
+
+
+
+            for col in ('open','high','low','close','volume'):
+
+                b[col]=pd.to_numeric(b[col],errors='coerce')
+
+
+
+            b=b.dropna(subset=['open','high','low','close']).copy()
+
+
+
+            b['dt']=pd.to_datetime(
+
+                b['time'].astype(str).str[:14],
+
+                format='%Y%m%d%H%M%S',
+
+                errors='coerce'
+
+            )
+
+            b=b.dropna(subset=['dt']).sort_values('dt')
+
+            b=b.drop_duplicates('dt',keep='last').reset_index(drop=True)
+
+
+
+            if len(b)<25:
+
+                out=dict(empty)
+
+                out['bars_1m']=len(b)
+
+                out['error']='INSUFFICIENT_NORMALIZED_1M_BARS'
+
+                self._kr_gate_cache[sym]={'ts':now,'data':out}
+
+                return out
+
+
+
+            b['ema9']=b['close'].ewm(span=9,adjust=False).mean()
+
+            b['ema20']=b['close'].ewm(span=20,adjust=False).mean()
+
+
+
+            med=b['volume'].rolling(20,min_periods=5).median()
+
+            b['vol_ratio']=b['volume']/med.replace(0,pd.NA)
+
+
+
+            five=(
+
+                b.set_index('dt')
+
+                 .resample('5min',origin='start_day')
+
+                 .agg({
+
+                     'open':'first',
+
+                     'high':'max',
+
+                     'low':'min',
+
+                     'close':'last',
+
+                     'volume':'sum'
+
+                 })
+
+                 .dropna(subset=['close'])
+
+                 .reset_index()
+
+            )
+
+
+
+            if len(five)<4:
+
+                out=dict(empty)
+
+                out['bars_1m']=len(b)
+
+                out['bars_5m']=len(five)
+
+                out['error']='INSUFFICIENT_5M_BARS'
+
+                self._kr_gate_cache[sym]={'ts':now,'data':out}
+
+                return out
+
+
+
+            five['ema9']=five['close'].ewm(span=9,adjust=False).mean()
+
+            five['ema20']=five['close'].ewm(span=20,adjust=False).mean()
+
+
+
+            a=b.iloc[-1]
+
+            p1=b.iloc[-2]
+
+            f0=five.iloc[-1]
+
+            f1=five.iloc[-2]
+
+
+
+            long_setup_checks={
+
+                'close_above_ema9':bool(f0['close']>f0['ema9']),
+
+                'ema9_above_ema20':bool(f0['ema9']>f0['ema20']),
+
+                'close_not_lower':bool(f0['close']>=f1['close']),
+
+                'higher_low_or_break':bool(
+
+                    (f0['low']>=f1['low']) or
+
+                    (f0['close']>f1['high'])
+
+                )
+
+            }
+
+
+
+            short_setup_checks={
+
+                'close_below_ema9':bool(f0['close']<f0['ema9']),
+
+                'ema9_below_ema20':bool(f0['ema9']<f0['ema20']),
+
+                'close_not_higher':bool(f0['close']<=f1['close']),
+
+                'lower_high_or_break':bool(
+
+                    (f0['high']<=f1['high']) or
+
+                    (f0['close']<f1['low'])
+
+                )
+
+            }
+
+
+
+            long_setup_count=sum(long_setup_checks.values())
+
+            short_setup_count=sum(short_setup_checks.values())
+
+            long_setup=long_setup_count>=3
+
+            short_setup=short_setup_count>=3
+
+
+
+            vr=_f(a.get('vol_ratio'),0)
+
+            impulse=((_f(a['close'])/_f(p1['close'])-1)*100) if _f(p1['close']) else 0.0
+
+
+
+            long_trigger_checks={
+
+                'green_1m':bool(a['close']>a['open']),
+
+                'break_prev_high':bool(a['close']>p1['high']),
+
+                'volume_expansion':bool(vr>=1.20),
+
+                'one_min_impulse':bool(impulse>=0.10)
+
+            }
+
+
+
+            short_trigger_checks={
+
+                'red_1m':bool(a['close']<a['open']),
+
+                'break_prev_low':bool(a['close']<p1['low']),
+
+                'volume_expansion':bool(vr>=1.20),
+
+                'one_min_impulse':bool(impulse<=-0.10)
+
+            }
+
+
+
+            long_trigger_count=sum(long_trigger_checks.values())
+
+            short_trigger_count=sum(short_trigger_checks.values())
+
+            long_trigger=long_trigger_count>=3
+
+            short_trigger=short_trigger_count>=3
+
+
+
+            shadow='UNVERIFIED'
+
+            setup_side='NONE'
+
+            setup_count=max(long_setup_count,short_setup_count)
+
+            trigger_count=max(long_trigger_count,short_trigger_count)
+
+
+
+            if long_setup and long_trigger and not short_setup:
+
+                shadow='LONG'
+
+                setup_side='LONG'
+
+                setup_count=long_setup_count
+
+                trigger_count=long_trigger_count
+
+            elif short_setup and short_trigger and not long_setup:
+
+                shadow='SHORT'
+
+                setup_side='SHORT'
+
+                setup_count=short_setup_count
+
+                trigger_count=short_trigger_count
+
+            elif long_setup:
+
+                setup_side='LONG'
+
+                setup_count=long_setup_count
+
+                trigger_count=long_trigger_count
+
+            elif short_setup:
+
+                setup_side='SHORT'
+
+                setup_count=short_setup_count
+
+                trigger_count=short_trigger_count
+
+
+
+            out={
+
+                'shadow_direction':shadow,
+
+                'gate_ready':False,  # set by tracker after attention-power check
+
+                'attention_ok':False,
+
+                'setup_side':setup_side,
+
+                'setup_count':setup_count,
+
+                'setup_total':4,
+
+                'trigger_count':trigger_count,
+
+                'trigger_total':4,
+
+                'long_setup':long_setup,
+
+                'short_setup':short_setup,
+
+                'long_trigger':long_trigger,
+
+                'short_trigger':short_trigger,
+
+                'long_setup_count':long_setup_count,
+
+                'short_setup_count':short_setup_count,
+
+                'long_trigger_count':long_trigger_count,
+
+                'short_trigger_count':short_trigger_count,
+
+                'vol_ratio':round(vr,2),
+
+                'impulse_1m_pct':round(impulse,3),
+
+                'bars_1m':len(b),
+
+                'bars_5m':len(five),
+
+                'latest_1m':str(a.get('time')),
+
+                'latest_5m':five.iloc[-1]['dt'].isoformat(),
+
+                'data_ok':True,
+
+                'error':None,
+
+                'long_setup_checks':long_setup_checks,
+
+                'short_setup_checks':short_setup_checks,
+
+                'long_trigger_checks':long_trigger_checks,
+
+                'short_trigger_checks':short_trigger_checks
+
+            }
+
+
+
+        except Exception as e:
+
+            out=dict(empty)
+
+            out['error']=str(e)[:300]
+
+
+
+        self._kr_gate_cache[sym]={'ts':now,'data':out}
+
+        return out
+
+
+
     def refresh_korea_tracker(self,korea):
 
         syms=self.tracked_symbols('KOREA')
@@ -1247,7 +1675,13 @@ class CleanEngine:
 
         pmap={p['symbol']:p for p in self.store.positions('KOREA')}
 
-        pulse={str(r.get('symbol') or ''):r for r in (korea.intraday_pulse.get('rows') or [])}
+        pulse={
+
+            str(r.get('symbol') or ''):r
+
+            for r in (korea.intraday_pulse.get('rows') or [])
+
+        }
 
         rows=[]
 
@@ -1265,15 +1699,39 @@ class CleanEngine:
 
             score=_f(p.get('live_score',f.get('finder_score')))
 
-            bias=str(p.get('bias') or f.get('direction') or 'NEUTRAL').upper()
+            bias=str(
+
+                p.get('bias') or
+
+                f.get('direction') or
+
+                'NEUTRAL'
+
+            ).upper()
 
 
 
-            sc=_clip((_f(strength)-100)/35,-1,1)*45 if strength is not None else 0
+            sc=(
+
+                _clip((_f(strength)-100)/35,-1,1)*45
+
+                if strength is not None else 0
+
+            )
 
             ss=_clip((score-50)/50,-1,1)*40
 
-            sign=1 if bias in ('LONG','UP') else -1 if bias in ('SHORT','DOWN') else 0
+
+
+            sign=(
+
+                1 if bias in ('LONG','UP')
+
+                else -1 if bias in ('SHORT','DOWN')
+
+                else 0
+
+            )
 
 
 
@@ -1283,7 +1741,11 @@ class CleanEngine:
 
             prev=self._last.get(('POWER','KOREA',sym))
 
-            delta=round(power-_f(prev.get('power')),1) if prev else 0
+            delta=round(
+
+                power-_f(prev.get('power')),1
+
+            ) if prev else 0
 
 
 
@@ -1293,13 +1755,37 @@ class CleanEngine:
 
 
 
-            # V4.6.6 KR Direction Guard
+            # V4.7.1 Shadow Gate telemetry.
 
-            # KR Power remains an attention/strength diagnostic.
+            # Still no live KR directional state.
 
-            # It must not generate directional SETUP/ENTRY before
+            gate=self._korea_shadow_gate(sym,korea)
 
-            # a verified KR 1m/5m Setup + Trigger Gate exists.
+
+
+            attention_ok=abs(power)>=40
+
+            shadow_direction=gate.get('shadow_direction','UNVERIFIED')
+
+            gate_ready=bool(
+
+                attention_ok and
+
+                shadow_direction in ('LONG','SHORT') and
+
+                gate.get('data_ok')
+
+            )
+
+
+
+            gate['attention_ok']=attention_ok
+
+            gate['gate_ready']=gate_ready
+
+
+
+            # V4.6.6 Direction Guard remains authoritative.
 
             state='HOLD' if pmap.get(sym) else 'WATCH'
 
@@ -1321,6 +1807,34 @@ class CleanEngine:
 
 
 
+            reason='KR Attention Power 관찰용 · 라이브 방향 미검증'
+
+
+
+            if gate.get('data_ok'):
+
+                reason+=(
+
+                    f" · Shadow {shadow_direction}"
+
+                    f" · 5m {gate.get('setup_count')}/4"
+
+                    f" · 1m {gate.get('trigger_count')}/4"
+
+                )
+
+
+
+                if gate_ready:
+
+                    reason+=' · SHADOW READY'
+
+            elif gate.get('error'):
+
+                reason+=f" · Gate data {gate.get('error')}"
+
+
+
             rows.append({
 
                 'market':'KOREA',
@@ -1333,6 +1847,8 @@ class CleanEngine:
 
                 'finder_score':f.get('finder_score'),
 
+
+
                 'position_open':bool(pmap.get(sym)),
 
                 'qty':_f((pmap.get(sym) or {}).get('qty')),
@@ -1342,6 +1858,8 @@ class CleanEngine:
                 'price':_f(p.get('price',f.get('price'))),
 
 
+
+                # Live direction remains blocked.
 
                 'direction':'UNVERIFIED',
 
@@ -1371,11 +1889,45 @@ class CleanEngine:
 
                     'legacy_bias':bias,
 
-                    'minute_chart_gate':False,
 
-                    'direction_verified':False
+
+                    'minute_chart_gate':True,
+
+                    'direction_verified':False,
+
+
+
+                    'shadow_direction':shadow_direction,
+
+                    'shadow_gate_ready':gate_ready,
+
+                    'shadow_setup_side':gate.get('setup_side'),
+
+                    'shadow_setup_count':gate.get('setup_count'),
+
+                    'shadow_setup_total':gate.get('setup_total'),
+
+                    'shadow_trigger_count':gate.get('trigger_count'),
+
+                    'shadow_trigger_total':gate.get('trigger_total'),
+
+                    'shadow_attention_ok':attention_ok,
+
+                    'shadow_data_ok':gate.get('data_ok'),
+
+                    'shadow_vol_ratio':gate.get('vol_ratio'),
+
+                    'shadow_impulse_1m_pct':gate.get('impulse_1m_pct'),
+
+                    'shadow_gate_error':gate.get('error')
 
                 },
+
+
+
+                # Full diagnostic is retained in feature_json snapshot.
+
+                'shadow_gate':gate,
 
 
 
@@ -1391,7 +1943,7 @@ class CleanEngine:
 
 
 
-                'reason':'KR Attention Power 관찰용 · 방향 미검증 · 국내 1m/5m Gate 연결 전',
+                'reason':reason,
 
                 'session':_session('KOREA'),
 

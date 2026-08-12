@@ -480,6 +480,45 @@ with t[0]:
             p1,p2,p3,p4,p5=st.columns(5); p1.metric('포지션 상태',stko(pg.get('state'))); p2.metric('현재 R',f"{f(pg.get('profit_r')):.2f}R"); p3.metric('초기 Floor',px(pg.get('initial_floor'),m)); p4.metric('현재 Hard Floor',px(pg.get('hard_floor'),m)); p5.metric('Floor 단계',pg.get('floor_mode') or '-')
             if pg.get('suggested_exit_pct'):st.warning(f"수동 대응 제안: {int(f(pg.get('suggested_exit_pct')))}% 정리 검토 · {pg.get('reason')}")
             else:st.caption(pg.get('reason') or '보유 관리 중')
+        pi=r.get('position_intelligence') or {}
+        if pi:
+            st.markdown('#### Position Intelligence')
+            if not pi.get('enabled'):
+                st.warning(f"{pi.get('action') or 'DATA_WAIT'} - {pi.get('reason') or 'Position intelligence unavailable'}")
+            else:
+                x1,x2,x3,x4,x5=st.columns(5)
+                x1.metric('Action',pi.get('action') or '-')
+                x2.metric('PnL',f"${f(pi.get('pnl_usd')):+.2f}",delta=f"{f(pi.get('pnl_pct')):+.2f}%")
+                x3.metric('Dynamic Floor',px(pi.get('floor'),m))
+                x4.metric('Dynamic Ceiling',px(pi.get('ceiling'),m))
+                x5.metric('Ceiling Mode',pi.get('ceiling_mode') or '-')
+
+                y1,y2,y3,y4,y5=st.columns(5)
+                y1.metric('Floor Mode',pi.get('floor_mode') or '-')
+                y2.metric('Floor Dist',f"{f(pi.get('distance_to_floor_pct')):.2f}%")
+                y3.metric('Ceiling Dist',f"{f(pi.get('distance_to_ceiling_pct')):.2f}%")
+                y4.metric('Power',f"{f(pi.get('power')):+.0f}",delta=f"{f(pi.get('power_delta')):+.0f}")
+                y5.metric('Above VWAP','YES' if (pi.get('guards') or {}).get('above_vwap') else 'NO')
+
+                pf=pi.get('portfolio') or {}
+                o=pi.get('orders') or {}
+                z1,z2,z3,z4,z5=st.columns(5)
+                z1.metric('Cash',f"${f(pf.get('available_cash')):,.0f}")
+                z2.metric('Total Capital',f"${f(pf.get('total_capital')):,.0f}" if f(pf.get('total_capital')) else '-')
+                z3.metric('Position Value',f"${f(pf.get('position_value')):,.0f}")
+                z4.metric('Add Winner Qty',int(f(o.get('add_winner_qty'))))
+                z5.metric('Avg Down Qty',int(f(o.get('average_down_qty'))))
+
+                if o.get('exit_pct'):
+                    st.error(f"Manual exit review - {int(f(o.get('exit_pct')))}% - {pi.get('reason') or ''}")
+                elif o.get('add_winner_qty'):
+                    st.success(f"Add winner review - max {int(f(o.get('add_winner_qty')))} shares - {pi.get('reason') or ''}")
+                elif o.get('average_down_qty'):
+                    st.warning(f"Average down review - max {int(f(o.get('average_down_qty')))} shares - {pi.get('reason') or ''}")
+                else:
+                    st.info(pi.get('reason') or 'HOLD')
+
+                st.caption('MANUAL ORDER ONLY - NO AUTO ORDER')
         if m=='USA':
             di=r.get('data_integrity') or {}
             if not di.get('valid',True):

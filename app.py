@@ -232,6 +232,126 @@ with t[0]:
     live_now=bool(tr.get('is_live'))
 
 
+    # V4 SHADOW INTELLIGENCE PANEL
+
+    if m=='USA':
+
+        sh=api('/api/v4/USA/shadow-status',timeout=15)
+
+
+
+        if sh.get('ok'):
+
+            st.markdown('## Shadow Intelligence')
+
+
+
+            focus=sh.get('focus') or 'UNKNOWN'
+
+            soxl=sh.get('soxl') or {}
+
+            soxs=sh.get('soxs') or {}
+
+
+
+            c1,c2,c3=st.columns(3)
+
+
+
+            c1.metric('FOCUS',focus)
+
+
+
+            c2.metric(
+
+                'SOXL',
+
+                f"{soxl.get('state','-')} / {soxl.get('structure','-')}",
+
+                delta=(
+
+                    f"MFI {f(soxl.get('mfi_delta')):+.1f} / "
+
+                    f"P3 {f(soxl.get('p3')):+.2f}%"
+
+                )
+
+            )
+
+
+
+            c3.metric(
+
+                'SOXS',
+
+                f"{soxs.get('state','-')} / {soxs.get('structure','-')}",
+
+                delta=(
+
+                    f"MFI {f(soxs.get('mfi_delta')):+.1f} / "
+
+                    f"P3 {f(soxs.get('p3')):+.2f}%"
+
+                )
+
+            )
+
+
+
+            if focus=='SOXL':
+
+                st.success('SOXL 우선 관찰')
+
+            elif focus=='SOXS':
+
+                st.warning('SOXS 우선 관찰')
+
+            elif focus=='CASH':
+
+                st.info('방향 미확정 · CASH / 관망')
+
+            else:
+
+                st.caption('FOCUS 데이터 준비 중')
+
+
+
+            sev=sh.get('recent_events') or []
+
+
+
+            if sev:
+
+                with st.expander(
+
+                    '최근 Shadow READY / ENTRY 이벤트',
+
+                    expanded=False
+
+                ):
+
+                    st.dataframe(
+
+                        pd.DataFrame(sev[::-1]),
+
+                        use_container_width=True,
+
+                        hide_index=True
+
+                    )
+
+
+
+            st.caption(
+
+                'SHADOW DISPLAY ONLY · MANUAL ORDER ONLY · NO AUTO ORDER'
+
+            )
+
+
+
+
+
     # V474_HIST_CONF
 
     if m=='USA':

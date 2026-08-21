@@ -534,11 +534,11 @@ with t[0]:
 
         q1,q2,q3,q4=st.columns(4)
 
-        q1.metric('WATCH / READY-WATCH',gc.get('READY_WATCH',0))
+        q1.metric('WATCH',gc.get('READY_WATCH',0))
 
-        q2.metric('READY-STRONG',gc.get('READY_STRONG',0))
+        q2.metric('READY',gc.get('READY_STRONG',0))
 
-        q3.metric('ENTRY-CANDIDATE',gc.get('ENTRY_CANDIDATE',0))
+        q3.metric('ENTRY CHECK',gc.get('ENTRY_CANDIDATE',0))
 
         q4.metric('ENTRY',gc.get('ENTRY',0))
 
@@ -695,15 +695,15 @@ with t[0]:
 
                 elif grade=='ENTRY_CANDIDATE':
 
-                    st.warning('ENTRY CANDIDATE - manual review')
+                    st.warning('READY - entry confirmation required')
 
                 elif grade=='READY_STRONG':
 
-                    st.success('READY STRONG - priority review')
+                    st.success('READY - priority setup')
 
                 elif grade=='READY_WATCH':
 
-                    st.info('READY WATCH - monitor')
+                    st.info('WATCH - approaching READY')
 
                 elif grade=='SETUP':
 
@@ -717,13 +717,13 @@ with t[0]:
 
                 if grade not in ('READY_STRONG','ENTRY_CANDIDATE','ENTRY'):
 
-                    st.caption('To READY-STRONG: '+(', '.join(strong_missing) if strong_missing else 'READY'))
+                    st.caption('To READY: '+(', '.join(strong_missing) if strong_missing else 'READY'))
 
 
 
                 if grade not in ('ENTRY_CANDIDATE','ENTRY'):
 
-                    st.caption('To ENTRY-CANDIDATE: '+(', '.join(candidate_missing) if candidate_missing else 'READY'))
+                    st.caption('To ENTRY confirmation: '+(', '.join(candidate_missing) if candidate_missing else 'READY'))
 
 
                     # V474_TRADE_PLAN_PANEL
@@ -800,7 +800,7 @@ with t[0]:
 
                     elif grade=='READY_STRONG':
 
-                        st.info('READY STRONG - wait for entry confirmation')
+                        st.info('READY - wait for price entry confirmation')
 
                     else:
 
@@ -921,7 +921,7 @@ with t[1]:
 
         if idata:
 
-            st.markdown('### Premarket Intelligence · V4.8.2')
+            st.markdown('### Premarket Intelligence')
 
 
 
@@ -1805,7 +1805,7 @@ with t[2]:
 
 with t[3]:
     st.subheader('📚 Archive'); trades=api(f'/api/v4/trades?market={m}&limit=300').get('data') or []; events=api(f'/api/v4/events?market={m}&limit=300').get('data') or []; st.markdown('#### 실제 수동 매매 기록'); st.dataframe(pd.DataFrame(trades),use_container_width=True,hide_index=True) if trades else st.caption('등록된 실제 매매가 없습니다.'); st.markdown('#### 엔진 신호/순위 변화 기록'); st.dataframe(pd.DataFrame(events),use_container_width=True,hide_index=True) if events else st.caption('저장된 이벤트가 없습니다.')
-st.divider(); st.caption('V4.6.5 · KR SESSION SNAPSHOT AUDIT · MAX 5 HEAVY TRACKING · MANUAL ORDER ONLY')
+st.divider(); st.caption('DAY TRADER V4 · MANUAL ORDER ONLY · NO AUTO ORDER')
 if auto_live:
     time.sleep(5)
     st.rerun()

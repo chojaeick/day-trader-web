@@ -530,11 +530,11 @@ with t[0]:
 
 
 
-        st.markdown('### V4.7.4 Signal Quality')
+        st.markdown('### Production Signal Status')
 
         q1,q2,q3,q4=st.columns(4)
 
-        q1.metric('READY-WATCH',gc.get('READY_WATCH',0))
+        q1.metric('WATCH / READY-WATCH',gc.get('READY_WATCH',0))
 
         q2.metric('READY-STRONG',gc.get('READY_STRONG',0))
 
@@ -542,51 +542,15 @@ with t[0]:
 
         q4.metric('ENTRY',gc.get('ENTRY',0))
 
+        st.caption(
+
+            'Production Tracker 상태 · 위 Shadow Intelligence는 '
+
+            '현재 Price / VO / MFI 연구 신호입니다.'
+
+        )
 
 
-        with st.expander('Historical Confidence - 2026-08-10'):
-
-            hist=pd.DataFrame([
-
-                {'Grade':'READY-WATCH','Episodes':24,'Symbols':11,
-
-                 '30m Avg %':0.139,'30m Hit %':55.0,
-
-                 '60m Avg %':0.180,'60m Hit %':61.5,
-
-                 'Confidence':'LOW-MEDIUM'},
-
-
-
-                {'Grade':'READY-STRONG','Episodes':19,'Symbols':8,
-
-                 '30m Avg %':0.239,'30m Hit %':60.0,
-
-                 '60m Avg %':0.263,'60m Hit %':72.7,
-
-                 'Confidence':'MEDIUM'},
-
-
-
-                {'Grade':'ENTRY-CANDIDATE','Episodes':6,'Symbols':5,
-
-                 '30m Avg %':1.000,'30m Hit %':66.7,
-
-                 '60m Avg %':-0.087,'60m Hit %':0.0,
-
-                 'Confidence':'SAMPLE LOW'}
-
-            ])
-
-            st.dataframe(hist,use_container_width=True,hide_index=True)
-
-            st.caption(
-
-                '10-minute episode dedup. Historical performance is not '
-
-                'a guaranteed probability.'
-
-            )
 
     st.markdown('### 🔥 실시간 Power 순위' if live_now else '### 🕘 장 마감 기준 Power 순위')
     if not live_now: st.caption('현재 장중 실시간 값이 아니라 마지막 사용 가능한 시장 데이터 기준 참고값입니다.')

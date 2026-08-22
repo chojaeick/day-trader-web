@@ -34,6 +34,17 @@ def api(path, timeout=10):
         return {'ok': False, 'error': str(e)}
 
 
+def post(path, payload, timeout=10):
+    if not API_URL:
+        return {'ok': False, 'error': 'DAYTRADER_API_URL is empty'}
+    try:
+        r = requests.post(API_URL + path, json=payload, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
 def f(v, default=0.0):
     try: return float(v)
     except Exception: return default
@@ -98,7 +109,14 @@ def render_buy_box(r,market):
     c3.metric('예상 수량',f'{qty:,}주')
     actual=qty*buy_px
     st.caption(f'예상 체결금액 {money(actual,market)} · 잔여금액 {money(max(amount-actual,0),market)}')
-    st.warning('수동 주문 전용 · 이 화면은 실제 주문을 전송하지 않습니다.')
+    st.warning('수동 주문 전용 · 이 버튼은 증권사 주문이 아니라 앱의 보유 포지션 장부에만 등록합니다.')
+    if st.button('이 매수를 실제 보유 단타로 등록', disabled=(qty<=0 or buy_px<=0), key=f'reg_{market}_{symbol}'):
+        result=post('/api/v4/position/buy', {'market':market,'symbol':symbol,'qty':qty,'price':buy_px,'note':'V5 manual registration'})
+        if result.get('ok'):
+            st.success(f'{symbol} {qty:,}주 @ {money(buy_px,market)} 등록 완료')
+            st.rerun()
+        else:
+            st.error(f"등록 실패: {result.get('error') or result}")
 
 
 def render_selected_detail(r,market):
@@ -136,13 +154,17 @@ def position_values(p,market):
 def render_positions(market,tracker):
     st.subheader('🛡 실제 보유 단타')
     positions=api('/api/v4/positions',10)
-    pos_rows=positions.get('rows') if isinstance(positions,dict) else None
+    pos_rows=positions.get('data') if isinstance(positions,dict) else None
     shown=0
     tracker_hold={str(r.get('symbol')) for r in tracker if action_of(r) in {'HOLD','HOLD_WATCH'}}
     for p in pos_rows or []:
         if str(p.get('market') or '').upper() not in {'',market}: continue
         shown+=1
-        sym=p.get('symbol') or '-'; avg,qty,cur,pnl,pct,floor,ceiling,t1,t2=position_values(p,market)
+        sym=p.get('symbol') or '-'
+        live=next((r for r in tracker if str(r.get('symbol'))==str(sym)), None)
+        if live and not (p.get('current_price') or p.get('price')):
+            p=dict(p); p['current_price']=live.get('price') or live.get('current_price')
+        avg,qty,cur,pnl,pct,floor,ceiling,t1,t2=position_values(p,market)
         c1,c2,c3,c4,c5=st.columns(5)
         c1.metric(sym,f'{qty:,.0f}주'); c2.metric('현재가',money(cur,market)); c3.metric('평단',money(avg,market)); c4.metric('평가손익',money(pnl,market),f'{pct:+.2f}%'); c5.metric('판단',action_ko(action_of(p)))
         st.markdown(f'''<div class="v5-card"><div class="v5-kicker">REGISTERED POSITION</div><div><b>Floor</b> {money(floor,market) if floor is not None else '-'} · <b>Ceiling</b> {money(ceiling,market) if ceiling is not None else '-'} · <b>T1</b> {money(t1,market) if t1 is not None else '-'} · <b>T2</b> {money(t2,market) if t2 is not None else '-'}</div></div>''',unsafe_allow_html=True)

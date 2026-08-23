@@ -51,24 +51,20 @@ def main():
             render_buy_box(r,market)
 
 '''
-    # next function may be holding_display_name decorator; replace with regex directly
     m=re.search(r'def render_selected_detail\(.*?\n(?=@st\.cache_data\(ttl=300,show_spinner=False\)\ndef holding_display_name)',s,re.S)
-    if not m: raise SystemExit('PATCH_TARGET_NOT_FOUND: render_selected_detail')
+    if not m:
+        raise SystemExit('PATCH_TARGET_NOT_FOUND: render_selected_detail')
     s=s[:m.start()]+selected+s[m.end():]
 
-    # holding expander title should also be name-first
     s=s.replace("with st.expander(f'{sym} 상세 엔진 평가',expanded=False):",
                 "with st.expander(f'{display_name} · {sym} 상세 엔진 평가',expanded=False):")
 
-    # force candidate selector to name-first and keep the actual row mapping unchanged
     s=re.sub(
         r"labels=\[.*?for r in source\]",
         "labels=[f\"{resolve_display_name(market,r.get('symbol'),r.get('name') or '')} · {str(r.get('symbol') or '').upper()} · {action_ko(action_of(r))}\" for r in source]",
         s,count=1,flags=re.S)
 
-    # final CSS overrides: intentionally last so old accumulated CSS cannot win.
-    css=r'''
-st.markdown('''
+    css = '''st.markdown("""
 <style>
 /* ===== UI v18 HARD OVERRIDE ===== */
 .block-container{max-width:1560px!important;padding:.65rem 1.2rem 1.2rem!important}
@@ -82,18 +78,16 @@ st.markdown('''
 [data-testid="stExpander"]{border-color:#203a58!important;background:#0a1422!important}
 [data-testid="stDataFrame"] [role="gridcell"]{font-size:.81rem!important}
 [data-testid="stDataFrame"] [role="columnheader"]{font-size:.72rem!important;font-weight:800!important}
-/* name-first holdings */
 .v5-good{color:#20d87a!important}.v5-bad{color:#ff5267!important}
 </style>
-''',unsafe_allow_html=True)
+""",unsafe_allow_html=True)
 '''
     if 'UI v18 HARD OVERRIDE' not in s:
-        # append immediately before first helper function so it always executes after base style definitions
         anchor='def api(path, timeout=10):\n'
-        if anchor not in s: raise SystemExit('PATCH_TARGET_NOT_FOUND: api anchor')
+        if anchor not in s:
+            raise SystemExit('PATCH_TARGET_NOT_FOUND: api anchor')
         s=s.replace(anchor,css+'\n'+anchor,1)
 
-    # visible build marker for verification
     s=s.replace("DAY TRADER V5</div>","DAY TRADER V5 <span style='font-size:.62rem;color:#4d8edb'>v18</span></div>",1)
 
     APP.write_text(s)

@@ -20,7 +20,6 @@ import math
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -57,14 +56,22 @@ def load_bars(con: sqlite3.Connection, symbol: str) -> pd.DataFrame:
     df = pd.read_sql_query(q, con, params=(symbol,))
     if df.empty:
         return df
-    df['et_time'] = pd.to_datetime(df['et_time'], errors='coerce')
+    # The DB spans EST/EDT and therefore contains mixed UTC offsets. Parse in UTC
+    # first so pandas always creates a real DatetimeIndex, then convert to New York.
+    df['et_time'] = pd.to_datetime(df['et_time'], errors='coerce', utc=True)
     df = df.dropna(subset=['et_time']).set_index('et_time')
+    df.index = df.index.tz_convert('America/New_York')
+    df = df[~df.index.duplicated(keep='last')].sort_index()
     for c in ['open','high','low','close','volume']:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     return df.dropna(subset=['open','high','low','close'])
 
 
 def resample5(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError(f'expected DatetimeIndex, got {type(df.index).__name__}')
     x = df.resample('5min').agg({'open':'first','high':'max','low':'min','close':'last','volume':'sum'}).dropna()
     return x
 
@@ -92,7 +99,6 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     x = x.join(ichimoku(x))
     x['pivot_low'] = pivots(x['low'])
 
-    # causal bullish divergence: current confirmed pivot low vs prior confirmed pivot low
     div = pd.Series(False, index=x.index)
     piv_idx = [i for i,b in enumerate(x['pivot_low'].values) if b]
     for j in range(1, len(piv_idx)):
@@ -102,17 +108,13 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         p0, p1 = x['low'].iloc[i0], x['low'].iloc[i1]
         r0, r1 = x['rsi'].iloc[i0], x['rsi'].iloc[i1]
         if p1 < p0 and r1 > r0 and r0 < 45 and r1 < 50:
-            # signal only after right-side pivot confirmation (2 bars later)
             sig_i = min(i1+2, len(x)-1)
             div.iloc[sig_i] = True
     x['F0'] = div
-    # first recovery confirmation
     recent_div = x['F0'].rolling(7, min_periods=1).max().astype(bool)
     x['F1'] = recent_div & (x['rsi'] > 40) & (x['rsi'] > x['rsi'].shift(1)) & (x['close'] > x['close'].shift(1))
-    # second confirmation / momentum continuation
     recent_f1 = x['F1'].rolling(4, min_periods=1).max().astype(bool)
     x['F2'] = recent_f1 & (x['rsi'] > 48) & (x['ema8'] > x['ema20']) & (x['close'] > x['ema8'])
-    # ichimoku breakout + chikou alignment proxy, causal cloud values only
     cloud_top = pd.concat([x['span_a'], x['span_b']], axis=1).max(axis=1)
     cloud_prev = cloud_top.shift(1)
     recent_f2 = x['F2'].rolling(6, min_periods=1).max().astype(bool)
@@ -142,23 +144,24 @@ def run_stage(symbol: str, x: pd.DataFrame, stage: str) -> list[Trade]:
         if not sig[i]:
             i += 1
             continue
-        entry_i = i+1  # next-bar open, causal
+        entry_i = i+1
         entry = float(x['open'].iloc[entry_i])
         if not math.isfinite(entry) or entry <= 0:
-            i += 1; continue
-        end_i = min(entry_i+24, len(x)-1)  # max 2h on 5m
+            i += 1
+            continue
+        end_i = min(entry_i+24, len(x)-1)
         exit_i = end_i
         if stage == 'F4':
-            # staged-exit proxy: RSI deterioration, then trend loss, then hard/time exit
             for k in range(entry_i+1, end_i+1):
                 r = x['rsi'].iloc[k]
                 if (r < 50 and x['rsi'].iloc[k-1] >= 50) or x['close'].iloc[k] < x['ema20'].iloc[k]:
-                    exit_i = k; break
+                    exit_i = k
+                    break
         else:
-            # common diagnostic exit: first EMA8 loss after minimum 3 bars, else 2h
             for k in range(entry_i+3, end_i+1):
                 if x['close'].iloc[k] < x['ema8'].iloc[k]:
-                    exit_i = k; break
+                    exit_i = k
+                    break
         exit_px = float(x['close'].iloc[exit_i])
         window = x.iloc[entry_i:exit_i+1]
         gross = (exit_px/entry - 1)*100
@@ -173,7 +176,8 @@ def metrics(trades: list[Trade], cost: float) -> dict:
     if not trades:
         return {'trades':0,'wr':0,'avg':0,'pf':0,'net':0,'mdd':0,'mfe':0,'mae':0}
     r = np.array([t.gross_pct-cost for t in trades], dtype=float)
-    wins = r[r>0]; losses = r[r<0]
+    wins = r[r>0]
+    losses = r[r<0]
     pf = wins.sum()/abs(losses.sum()) if len(losses) and abs(losses.sum())>1e-12 else (999 if len(wins) else 0)
     equity = np.cumprod(1+r/100)
     peak = np.maximum.accumulate(equity)
@@ -203,13 +207,14 @@ def main():
     for sym in syms:
         raw=load_bars(con,sym)
         if raw.empty:
-            coverage.append((sym,0)); continue
+            coverage.append((sym,0))
+            continue
         x=add_features(resample5(raw))
         coverage.append((sym,len(x)))
         for stg in all_stage:
-            base = 'F3' if stg=='F4' else stg
             tmp=x.copy()
-            if stg=='F4': tmp['F4']=tmp['F3']
+            if stg=='F4':
+                tmp['F4']=tmp['F3']
             all_stage[stg].extend(run_stage(sym,tmp,stg))
     con.close()
 

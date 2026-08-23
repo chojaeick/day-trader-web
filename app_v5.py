@@ -108,7 +108,7 @@ def render_selected_detail(r,market):
 def normalize_position(p,live=None):
     base=p.get('position') if isinstance(p.get('position'),dict) else {}
     merged={**base,**p}
-    avg=first_value(merged,'avg_price','average_price','avg_cost','average_cost','entry_price','buy_price','registered_price','registered_avg_price')
+    avg=first_value(merged,'avg_entry','avg_price','average_price','avg_cost','average_cost','entry_price','buy_price','registered_price','registered_avg_price')
     qty=first_value(merged,'qty','quantity','shares','registered_qty')
     cur=first_value(merged,'current_price','last_price','market_price','price')
     if live: cur=first_value(live,'price','current_price','last_price') or cur
@@ -148,10 +148,12 @@ def render_trading(market):
         with st.expander('📈 중장기 후보'):st.info('장기 엔진/월봉·기본정보 연결 단계')
 
 def render_portfolio(market):
-    rows,raw=position_rows();norm=[]
+    rows,_=position_rows();status=get_market_status(market);live_rows=tracker_rows(status);norm=[]
     for p in rows:
         if str(p.get('market') or '').upper() not in {'',market}: continue
-        norm.append(normalize_position(p,None))
+        sym=p.get('symbol') or (p.get('position') or {}).get('symbol') or '-'
+        live=next((r for r in live_rows if str(r.get('symbol'))==str(sym)),None)
+        norm.append(normalize_position(p,live))
     known_value=sum((x['cur'] or 0)*x['qty'] for x in norm if x['cur'] is not None)
     known_cost=sum((x['avg'] or 0)*x['qty'] for x in norm if x['avg'] is not None)
     known_pnl=sum(x['pnl'] or 0 for x in norm if x['pnl'] is not None)

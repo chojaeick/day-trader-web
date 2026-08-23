@@ -55,13 +55,13 @@ def precursor_counts(d):
     z['drsi_low']=rprev.rolling(60,min_periods=30).quantile(.20).ewm(span=5,adjust=False).mean()
     pl=(l.shift(2)<l.shift(4))&(l.shift(2)<=l.shift(3))&(l.shift(2)<=l.shift(1))&(l.shift(2)<l)
     z['pivot']=pl.fillna(False)
-    z['pivot_price']=np.where(z.pivot,l.shift(2),np.nan)
-    z['pivot_rsi']=np.where(z.pivot,z.rsi.shift(2),np.nan)
+    z['pivot_price']=np.where(z['pivot'],l.shift(2),np.nan)
+    z['pivot_rsi']=np.where(z['pivot'],z.rsi.shift(2),np.nan)
     last_p=last_r=prev_p=prev_r=np.nan; bull=[]
     for _,row in z.iterrows():
         flag=False
-        if bool(row.pivot) and np.isfinite(row.pivot_price) and np.isfinite(row.pivot_rsi):
-            prev_p,prev_r=last_p,last_r; last_p,last_r=float(row.pivot_price),float(row.pivot_rsi)
+        if bool(row['pivot']) and np.isfinite(row['pivot_price']) and np.isfinite(row['pivot_rsi']):
+            prev_p,prev_r=last_p,last_r; last_p,last_r=float(row['pivot_price']),float(row['pivot_rsi'])
             if np.isfinite(prev_p) and np.isfinite(prev_r):
                 flag=(last_p<prev_p) and (last_r>prev_r)
         bull.append(flag)
@@ -73,7 +73,7 @@ def precursor_counts(d):
     for i in div_idx:
         if np.any((cross_idx>i)&(cross_idx<=i+10)):
             latch_hits+=1
-    return int(z.rsi.notna().sum()),int(z.drsi_low.notna().sum()),int(z.pivot.sum()),int(z.bull_div.sum()),int(z.drsi_cross.sum()),latch_hits
+    return int(z.rsi.notna().sum()),int(z.drsi_low.notna().sum()),int(z['pivot'].sum()),int(z.bull_div.sum()),int(z.drsi_cross.sum()),latch_hits
 
 
 def main():

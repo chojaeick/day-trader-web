@@ -22,11 +22,32 @@ from .recommendation import build_usa_final_recommendations, build_korea_final_r
 from .v4_engine import CleanEngine
 from .premarket_briefing import build_premarket_briefing
 import os
+import re
+import requests
+import sqlite3
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
 s=Settings(); db=DB(s.db_path); k=KiwoomClient(s,db); validator=HistoricalValidator(k,s.db_path); live_validator=LiveTop10Validator(s.db_path); archive=RankingArchive(s.db_path); preopen_store=PreOpenReportStore(s.db_path); korea=KoreaMarketAdapter(k); tasks=[]
 manual_scan_state={'last_started_monotonic':0.0,'last_result':None}
 v4=CleanEngine(s.db_path)
+
+# V5 runtime load mode. Connectivity/WebSocket stays alive in both modes;
+# only heavy Finder/Tracker analysis cadence changes.
+runtime_mode={
+    'mode':'NORMAL',
+    'updated_at':datetime.now(timezone.utc).isoformat(),
+}
+
+def _runtime_profile():
+    daytrade=runtime_mode.get('mode')=='DAYTRADE'
+    return {
+        'mode':'DAYTRADE' if daytrade else 'NORMAL',
+        'tracker_seconds':5 if daytrade else 60,
+        'finder_seconds':30 if daytrade else 180,
+        'korea_tracker_seconds':10 if daytrade else 120,
+        'loop_seconds':2 if daytrade else 5,
+        'streaming':'ALWAYS_ON',
+    }
 
 # V4.6.2.3 warm diagnostics: in-memory operational state only.
 # This is intentionally not persisted and does not affect Finder scoring.
@@ -292,6 +313,7 @@ async def preopen_scheduler_forever():
 
 async def v4_engine_forever():
     last={'USA':0.0,'KOREA':0.0}
+    last_tracker={'USA':0.0,'KOREA':0.0}
     warmed_usa=set()
     bridge_warmed=set()
     bridge_warm_task=None
@@ -456,7 +478,11 @@ async def v4_engine_forever():
     while True:
         try:
             now=time.monotonic()
-            if now-last['USA']>=30:
+            profile=_runtime_profile()
+            if profile['mode']=='NORMAL':
+                await asyncio.sleep(profile['loop_seconds'])
+                continue
+            if now-last['USA']>=profile['finder_seconds']:
                 usa_candidates=screener_rows(db.quotes(),db.daily_metrics(),40)
                 finder=v4.build_usa_finder(
                     usa_candidates,
@@ -484,14 +510,27 @@ async def v4_engine_forever():
                 warmed_usa.intersection_update(active)
                 last['USA']=now
 
-            if now-last['KOREA']>=300:
+            if now-last['KOREA']>=max(300,profile['finder_seconds']):
                 v4.build_korea_finder(korea.discovery,5); last['KOREA']=now
 
-            v4.refresh_usa_tracker(db)
-            v4.refresh_korea_tracker(korea)
+            # Heavy analysis is cadence-controlled. Streaming and Kiwoom
+            # connectivity are NOT affected by runtime mode.
+            if now-last_tracker['USA']>=profile['tracker_seconds']:
+                await asyncio.to_thread(v4.refresh_usa_tracker,db)
+                last_tracker['USA']=time.monotonic()
+
+            # Do not burn CPU on the closed Korean market in NORMAL mode.
+            kr_open=False
+            try:
+                kr_open=bool(korea._kst_market_open())
+            except Exception:
+                pass
+            if (profile['mode']=='DAYTRADE' or kr_open) and now-last_tracker['KOREA']>=profile['korea_tracker_seconds']:
+                await asyncio.to_thread(v4.refresh_korea_tracker,korea)
+                last_tracker['KOREA']=time.monotonic()
         except Exception:
             logging.exception('V4 engine loop failed')
-        await asyncio.sleep(5)
+        await asyncio.sleep(_runtime_profile()['loop_seconds'])
 
 async def korea_discovery_forever():
     """Keep Korea discovery ready without requiring a browser button click.
@@ -551,6 +590,287 @@ load_dotenv(_BACKEND_ENV, override=True)
 
 app=FastAPI(title='DAY TRADER LIVE API',version='3.5',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['GET','POST'],allow_headers=['*'])
+
+
+@app.get('/api/v4/runtime-mode')
+async def get_runtime_mode():
+    return {'ok':True,**_runtime_profile(),'updated_at':runtime_mode.get('updated_at')}
+
+@app.post('/api/v4/runtime-mode/{mode}')
+async def set_runtime_mode(mode:str):
+    m=str(mode or '').upper()
+    if m not in ('NORMAL','DAYTRADE'):
+        raise HTTPException(status_code=400,detail='mode must be NORMAL or DAYTRADE')
+    runtime_mode['mode']=m
+    runtime_mode['updated_at']=datetime.now(timezone.utc).isoformat()
+    logging.warning('V4 runtime mode changed to %s',m)
+    return {'ok':True,**_runtime_profile(),'updated_at':runtime_mode['updated_at']}
+
+
+def _ensure_v5_holding_profile_table():
+    con=sqlite3.connect(s.db_path,timeout=15)
+    try:
+        con.execute('''CREATE TABLE IF NOT EXISTS v5_holding_profiles(
+            market TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            holding_type TEXT NOT NULL DEFAULT 'SHORT_TERM',
+            source TEXT NOT NULL DEFAULT 'MANUAL',
+            updated_at TEXT,
+            PRIMARY KEY(market,symbol)
+        )''')
+        con.commit()
+    finally:
+        con.close()
+
+
+def _get_holding_profile(market:str,symbol:str):
+    _ensure_v5_holding_profile_table()
+    con=sqlite3.connect(s.db_path,timeout=15)
+    con.row_factory=sqlite3.Row
+    try:
+        row=con.execute('SELECT * FROM v5_holding_profiles WHERE market=? AND symbol=?',
+                        (market.upper(),symbol.upper())).fetchone()
+        return dict(row) if row else {
+            'market':market.upper(),'symbol':symbol.upper(),
+            'holding_type':'SHORT_TERM','source':'LEGACY','updated_at':None
+        }
+    finally:
+        con.close()
+
+
+def _v5_pick_scalar(obj, keys):
+    if isinstance(obj,dict):
+        for k in keys:
+            if k in obj and obj.get(k) not in (None,''):
+                return obj.get(k)
+        for v in obj.values():
+            x=_v5_pick_scalar(v,keys)
+            if x not in (None,''):
+                return x
+    elif isinstance(obj,list):
+        for v in obj:
+            x=_v5_pick_scalar(v,keys)
+            if x not in (None,''):
+                return x
+    return None
+
+def _v5_num(v):
+    try:
+        return abs(float(str(v).replace(',','').replace('+','').strip()))
+    except Exception:
+        return 0.0
+
+def _v5_korea_quote_snapshot(code):
+    code=str(code or '').strip().upper()
+    q=korea.quote(code)
+    raw=(q or {}).get('raw') or {}
+    name=_v5_pick_scalar(raw,('stk_nm','stock_name','name')) or code
+    price=_v5_num(_v5_pick_scalar(raw,('cur_prc','cur_price','current_price','last','close')))
+    source='KIWOOM_KA10004'
+    # Some ka10004 responses are order-book centric and may omit cur_prc.
+    # In that case use the latest actual 1-minute close. This is also useful
+    # after market close because it returns the last recorded trade price.
+    if price<=0:
+        try:
+            bars=korea.minute_chart(code,1,1)
+            latest=(bars or {}).get('latest') or {}
+            price=_v5_num(latest.get('close'))
+            if price>0:
+                source='KIWOOM_KA10080_LAST_CLOSE'
+        except Exception:
+            pass
+    return {'ok':True,'valid':True,'market':'KOREA','symbol':code,
+            'name':str(name).strip() or code,'price':price,'source':source,
+            'checked_at':(q or {}).get('checked_at')}
+
+# V5.14: full Korean security master for human-friendly name/code search.
+# Kiwoom ka10099 returns market security lists including ETFs/ETNs.
+_v5_kr_master_cache={'ts':0.0,'rows':[]}
+
+def _v5_korea_master(force=False):
+    now=time.time()
+    cache=_v5_kr_master_cache
+    if (not force) and cache.get('rows') and now-float(cache.get('ts') or 0)<21600:
+        return cache['rows']
+    merged={}
+    # KOSPI / KOSDAQ / ETF / ETN
+    for mrkt_tp in ('0','10','8','60'):
+        try:
+            r=requests.post(
+                k.s.rest_base+'/api/dostk/stkinfo',
+                headers=k.headers('ka10099'),
+                json={'mrkt_tp':mrkt_tp},
+                timeout=30,
+            )
+            d=r.json()
+            if d.get('return_code') not in (None,0):
+                continue
+            raw=d.get('list') or d.get('result_list') or d.get('data') or []
+            if isinstance(raw,dict):
+                raw=list(raw.values())
+            for x in raw:
+                if not isinstance(x,dict):
+                    continue
+                sym=str(x.get('code') or x.get('stk_cd') or x.get('symbol') or '').strip().upper()
+                name=str(x.get('name') or x.get('stk_nm') or '').strip()
+                if '_' in sym:
+                    sym=sym.split('_',1)[0]
+                m=re.match(r'^([0-9A-Z]{6})',sym)
+                sym=m.group(1) if m else sym
+                if len(sym)!=6 or not re.fullmatch(r'[0-9A-Z]{6}',sym):
+                    continue
+                if sym not in merged or (not merged[sym].get('name') and name):
+                    merged[sym]={'symbol':sym,'name':name or sym,'market_type':mrkt_tp}
+        except Exception as e:
+            logging.warning('V5 korea master %s failed: %s',mrkt_tp,e)
+    rows=list(merged.values())
+    if rows:
+        cache['ts']=now; cache['rows']=rows
+        try:
+            meta=getattr(korea,'stock_meta',None)
+            if isinstance(meta,dict):
+                for row in rows:
+                    meta.setdefault(row['symbol'],row)
+        except Exception:
+            pass
+    return rows or cache.get('rows') or []
+
+def _v5_korea_detail_name(symbol):
+    sym=str(symbol or '').strip().upper()
+    if not re.fullmatch(r'[0-9A-Z]{6}',sym):
+        return ''
+    try:
+        r=requests.post(
+            k.s.rest_base+'/api/dostk/stkinfo',
+            headers=k.headers('ka10100'),
+            json={'stk_cd':sym},
+            timeout=15,
+        )
+        d=r.json()
+        if d.get('return_code') in (None,0):
+            return str(d.get('name') or d.get('stk_nm') or '').strip()
+    except Exception:
+        pass
+    return ''
+
+@app.get('/api/v5/korea-symbol-search')
+async def v5_korea_symbol_search(q:str,limit:int=12):
+    q=str(q or '').strip().upper()
+    if not q:
+        return {'ok':True,'rows':[]}
+    lim=max(1,min(int(limit),30))
+    rows=[]; seen=set()
+    master=await asyncio.to_thread(_v5_korea_master,False)
+    # Exact code first.
+    if re.fullmatch(r'[0-9A-Z]{6}',q):
+        for r in master:
+            if str(r.get('symbol') or '').upper()==q:
+                rows.append({'symbol':q,'name':r.get('name') or q}); seen.add(q); break
+        if q not in seen:
+            name=await asyncio.to_thread(_v5_korea_detail_name,q)
+            try:
+                snap=await asyncio.to_thread(_v5_korea_quote_snapshot,q)
+            except Exception:
+                snap={}
+            if name or snap.get('valid'):
+                rows.append({'symbol':q,'name':name or snap.get('name') or q}); seen.add(q)
+    # Human name / partial code search across the full Kiwoom master.
+    for r in master:
+        sym=str(r.get('symbol') or '').upper()
+        name=str(r.get('name') or '')
+        if not sym or sym in seen:
+            continue
+        if q in sym or q in name.upper():
+            rows.append({'symbol':sym,'name':name or sym}); seen.add(sym)
+            if len(rows)>=lim:
+                break
+    return {'ok':True,'rows':rows[:lim],'master_count':len(master)}
+
+@app.get('/api/v5/symbol-validate/{market}/{query}')
+async def validate_v5_symbol(market:str,query:str):
+    market=str(market or '').upper().strip()
+    q=str(query or '').strip().upper()
+    if market not in ('USA','KOREA'):
+        raise HTTPException(status_code=400,detail='market must be USA or KOREA')
+    if not q:
+        raise HTTPException(status_code=400,detail='symbol required')
+
+    if market=='USA':
+        import re as _re
+        if not _re.fullmatch(r'[A-Z][A-Z0-9.\\-]{0,9}',q):
+            return {'ok':False,'valid':False,'market':market,'query':q,'reason':'INVALID_US_SYMBOL_FORMAT'}
+        row=db.quote(q) or {}
+        if not row:
+            try:
+                ex=await asyncio.to_thread(k.active_exchange,q)
+                await asyncio.to_thread(k.quote,q,ex)
+                row=db.quote(q) or {}
+            except Exception:
+                row={}
+        price=float(row.get('price') or row.get('last') or row.get('close') or 0)
+        if price<=0:
+            return {'ok':False,'valid':False,'market':market,'query':q,'reason':'SYMBOL_NOT_CONFIRMED'}
+        return {'ok':True,'valid':True,'market':market,'symbol':q,'name':row.get('name') or q,'price':price}
+
+    import re as _re
+    if not _re.fullmatch(r'[0-9A-Z]{6}',q):
+        return {'ok':False,'valid':False,'market':market,'query':q,'reason':'KOREA_REQUIRES_6_CHAR_CODE'}
+
+    # Real Kiwoom validation: a valid listed code must be accepted even when it is
+    # absent from the local tracker/history cache or the market is closed.
+    try:
+        snap=await asyncio.to_thread(_v5_korea_quote_snapshot,q)
+    except Exception as e:
+        return {'ok':False,'valid':False,'market':market,'query':q,
+                'reason':'SYMBOL_NOT_CONFIRMED','detail':str(e)[:180]}
+    if not snap.get('valid'):
+        return {'ok':False,'valid':False,'market':market,'query':q,
+                'reason':'SYMBOL_NOT_CONFIRMED','detail':snap.get('error')}
+    return {'ok':True,'valid':True,'market':market,'symbol':q,
+            'name':snap.get('name') or q,'price':snap.get('price') or 0,
+            'source':snap.get('source') or 'KIWOOM'}
+
+@app.get('/api/v5/korea-quote/{symbol}')
+async def v5_korea_quote(symbol:str):
+    q=str(symbol or '').strip().upper()
+    import re as _re
+    if not _re.fullmatch(r'[0-9A-Z]{6}',q):
+        return {'ok':False,'valid':False,'symbol':q,'reason':'KOREA_REQUIRES_6_CHAR_CODE'}
+    try:
+        return await asyncio.to_thread(_v5_korea_quote_snapshot,q)
+    except Exception as e:
+        return {'ok':False,'valid':False,'symbol':q,'error':str(e)}
+
+@app.get('/api/v5/holding-profile/{market}/{symbol}')
+async def get_holding_profile(market:str,symbol:str):
+    return {'ok':True,**_get_holding_profile(market,symbol)}
+
+
+@app.post('/api/v5/holding-profile')
+async def set_holding_profile(payload:dict):
+    market=str(payload.get('market') or '').upper().strip()
+    symbol=str(payload.get('symbol') or '').upper().strip()
+    holding_type=str(payload.get('holding_type') or 'SHORT_TERM').upper().strip()
+    source=str(payload.get('source') or 'MANUAL').upper().strip()
+    if not market or not symbol:
+        raise HTTPException(status_code=400,detail='market and symbol required')
+    if holding_type not in ('SHORT_TERM','LONG_TERM'):
+        raise HTTPException(status_code=400,detail='holding_type must be SHORT_TERM or LONG_TERM')
+    _ensure_v5_holding_profile_table()
+    now=datetime.now(timezone.utc).isoformat()
+    con=sqlite3.connect(s.db_path,timeout=15)
+    try:
+        con.execute('''INSERT INTO v5_holding_profiles(market,symbol,holding_type,source,updated_at)
+                       VALUES(?,?,?,?,?)
+                       ON CONFLICT(market,symbol) DO UPDATE SET
+                         holding_type=excluded.holding_type,
+                         source=excluded.source,
+                         updated_at=excluded.updated_at''',
+                    (market,symbol,holding_type,source,now))
+        con.commit()
+    finally:
+        con.close()
+    return {'ok':True,**_get_holding_profile(market,symbol)}
 
 
 

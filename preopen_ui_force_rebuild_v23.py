@@ -83,18 +83,14 @@ def main():
 
 '''
     s = replace_between(s, r'def render_trading\(market\):\n', r'def render_portfolio\(market\):', render_trading, 'render_trading')
-
-    # Remove the duplicate second runtime mode control if it still exists.
     s = re.sub(r'^runtime_mode_bar\(\)\s*\n', '', s, count=1, flags=re.M)
 
-    # Force one deterministic header immediately before market state initialization.
     anchor = "if 'v5_market' not in st.session_state:\n"
     if anchor not in s:
         raise SystemExit('PATCH_TARGET_NOT_FOUND: market state anchor')
     idx=s.index(anchor)
     prefix=s[:idx]
     suffix=s[idx:]
-    # Remove the nearby legacy title/caption or prior custom title blocks only from the tail area.
     tail_start=max(0,len(prefix)-2200)
     head=prefix[:tail_start]
     tail=prefix[tail_start:]
@@ -105,28 +101,7 @@ def main():
     header="st.markdown('<div class=\"v23-header\"><span class=\"v23-bolt\">⚡</span><span>DAY TRADER V5</span><span class=\"v23-ver\">v23</span></div><div class=\"v23-tagline\">DECISION TERMINAL · MANUAL ORDER · 실시간 연결 유지 · 단타 분석은 필요할 때 가속</div>',unsafe_allow_html=True)\n"
     s=head+tail+header+suffix
 
-    css = r'''st.markdown('''
-<style>
-/* ===== V23 FORCED REBUILD ===== */
-.block-container{padding-top:1.15rem!important;padding-left:1rem!important;padding-right:1rem!important;max-width:1560px!important}
-.v23-header{display:flex;align-items:baseline;gap:.55rem;font-size:2rem;font-weight:950;letter-spacing:-.045em;line-height:1.15;margin:.15rem 0 .05rem;color:#f4f8ff}
-.v23-bolt{color:#ffc21c;font-size:1.8rem}.v23-ver{font-size:.65rem;color:#4d9cff;font-weight:850;letter-spacing:0}
-.v23-tagline{color:#8797ac;font-size:.72rem;margin-bottom:.42rem}
-.v23-badge{font-size:.67rem;color:#7d90a8;font-weight:800;margin-bottom:.05rem}
-.v23-title{font-size:1.22rem;font-weight:900;letter-spacing:-.025em;margin-bottom:.08rem}.v23-sub{font-size:.67rem;color:#788ba3;margin-bottom:.35rem}
-.v23-table{border:1px solid #203a59;border-radius:11px;overflow:hidden;background:#09121d;margin-bottom:.35rem}
-.v23-grid{display:grid;grid-template-columns:minmax(150px,2.2fr) minmax(68px,.7fr) minmax(88px,.9fr) minmax(65px,.68fr) minmax(72px,.72fr);align-items:center;column-gap:8px;padding:0 10px}
-.v23-grid-head{height:34px;background:#121a27;color:#8ea0b7;font-size:.67rem;font-weight:800;border-bottom:1px solid #2a3443}
-.v23-grid-row{min-height:38px;font-size:.78rem;font-weight:700;border-bottom:1px solid #222c39}.v23-grid-row:last-child{border-bottom:0}
-.v23-grid-row>div{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.v23-stock{font-weight:850;color:#f3f7ff}.v23-code{color:#a8b6c8;font-size:.72rem}.v23-positive{color:#20d87a}.v23-negative{color:#ff5267}
-[data-testid="stDataFrame"]{max-width:100%!important}
-[data-testid="stExpander"] summary{min-height:2rem!important}
-[data-testid="stHorizontalBlock"]{gap:.55rem!important}
-hr{margin:.38rem 0!important}
-@media(max-width:1050px){.v23-grid{grid-template-columns:1.8fr .72fr .88fr .65fr .72fr}.v23-header{font-size:1.75rem}}
-</style>
-''',unsafe_allow_html=True)
-'''
+    css = """st.markdown(r'''\n<style>\n/* ===== V23 FORCED REBUILD ===== */\n.block-container{padding-top:1.15rem!important;padding-left:1rem!important;padding-right:1rem!important;max-width:1560px!important}\n.v23-header{display:flex;align-items:baseline;gap:.55rem;font-size:2rem;font-weight:950;letter-spacing:-.045em;line-height:1.15;margin:.15rem 0 .05rem;color:#f4f8ff}\n.v23-bolt{color:#ffc21c;font-size:1.8rem}.v23-ver{font-size:.65rem;color:#4d9cff;font-weight:850;letter-spacing:0}\n.v23-tagline{color:#8797ac;font-size:.72rem;margin-bottom:.42rem}\n.v23-badge{font-size:.67rem;color:#7d90a8;font-weight:800;margin-bottom:.05rem}\n.v23-title{font-size:1.22rem;font-weight:900;letter-spacing:-.025em;margin-bottom:.08rem}.v23-sub{font-size:.67rem;color:#788ba3;margin-bottom:.35rem}\n.v23-table{border:1px solid #203a59;border-radius:11px;overflow:hidden;background:#09121d;margin-bottom:.35rem}\n.v23-grid{display:grid;grid-template-columns:minmax(150px,2.2fr) minmax(68px,.7fr) minmax(88px,.9fr) minmax(65px,.68fr) minmax(72px,.72fr);align-items:center;column-gap:8px;padding:0 10px}\n.v23-grid-head{height:34px;background:#121a27;color:#8ea0b7;font-size:.67rem;font-weight:800;border-bottom:1px solid #2a3443}\n.v23-grid-row{min-height:38px;font-size:.78rem;font-weight:700;border-bottom:1px solid #222c39}.v23-grid-row:last-child{border-bottom:0}\n.v23-grid-row>div{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.v23-stock{font-weight:850;color:#f3f7ff}.v23-code{color:#a8b6c8;font-size:.72rem}.v23-positive{color:#20d87a}.v23-negative{color:#ff5267}\n[data-testid=\"stDataFrame\"]{max-width:100%!important}\n[data-testid=\"stExpander\"] summary{min-height:2rem!important}\n[data-testid=\"stHorizontalBlock\"]{gap:.55rem!important}\nhr{margin:.38rem 0!important}\n@media(max-width:1050px){.v23-grid{grid-template-columns:1.8fr .72fr .88fr .65fr .72fr}.v23-header{font-size:1.75rem}}\n</style>\n''',unsafe_allow_html=True)\n"""
     if 'V23 FORCED REBUILD' not in s:
         api_anchor='def api(path, timeout=10):\n'
         if api_anchor not in s:

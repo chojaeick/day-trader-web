@@ -29,7 +29,6 @@ checks={
  'usa_gate':"str(market).upper()=='USA'" in S or 'str(market).upper()=="USA"' in S,
  'paper_enter':"self.paper.enter('USA'" in S or 'self.paper.enter("USA"' in S,
  'paper_exit':"self.paper.exit('USA'" in S or 'self.paper.exit("USA"' in S,
- 'no_forced_hold_in_frozen':'forced_min_hold':False if False else True,
 }
 # semantic frozen-spec checks
 checks['frozen_stop_1pct']='hard_stop_pct: float=-1.0' in M or 'hard_stop_pct:float=-1.0' in M
@@ -37,7 +36,6 @@ checks['frozen_combo2']='combo_bars: int=2' in M or 'combo_bars:int=2' in M
 checks['frozen_no_hold']="'forced_min_hold':False" in M or '"forced_min_hold":False' in M
 # inspect only V145 USA authority block for broker APIs
 start=S.find('V145_USA_FROZEN_PAPER_AUTHORITY')
-end=S.find('return None', start+1)
 block=S[start:start+2600] if start>=0 else ''
 checks['no_real_broker_in_usa_block']=not any(x in block for x in ['KiwoomMockBroker','send_order(','place_order(','broker.'])
 for k,v in checks.items(): print(k,'PASS' if v else 'FAIL')

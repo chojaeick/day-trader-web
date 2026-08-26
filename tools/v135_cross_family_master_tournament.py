@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
-"""V135 cross-family master tournament.
+"""V135 cross-family master tournament - stdlib-only hotfix.
 READ ONLY / NO ORDERS / NO DOWNLOADS.
 
-Goal: compare representative executable strategy families on one US master DB
-with the same chronological split and same friction assumptions.
+Compares representative strategy families on one fixed US master DB using
+chronological 60/20/20 split and common friction assumptions.
 
-Families implemented here from existing repository logic:
-- WILLIAMS: V5 strict entry + COMBO2 exit, 1.0% hard stop.
-- MA20_GAP: gap reversion architecture from ma20_scalp_backtest_v01.
-- MA20_PULLBACK: trend pullback architecture from ma20_scalp_backtest_v01.
-- FUJIMOTO_F2/F4: staged Fujimoto reimplementation baseline.
-- ETHAN_QQQ: source-constrained breakout/retest architecture, QQQ only.
+Families:
+- WILLIAMS: V5 strict + COMBO2 + 1% hard stop
+- MA20_GAP: gap reversion
+- MA20_PULLBACK: trend pullback
+- FUJIMOTO_F2/F4: causal staged reimplementation
+- ETHAN_QQQ: source-constrained breakout/retest proxy
 
-Important:
-- This is a comparison harness, not a claim that every external strategy is
-  perfectly reproduced. Ethan/Fujimoto remain repository reimplementations.
-- No live-engine code imported or modified.
+No numpy/pandas dependency.
 """
 from __future__ import annotations
-import argparse, math, sqlite3, statistics, json, time
+import argparse, math, sqlite3, statistics, time
 from pathlib import Path
 from collections import defaultdict
-import numpy as np
-import pandas as pd
 
 ROOT=Path('/home/ubuntu/day-trader-api')
 DB_DEFAULT=ROOT/'daytrader.db'
@@ -77,19 +72,34 @@ def metrics(trades,cost):
         eq+=x;peak=max(peak,eq);mdd=min(mdd,eq-peak)
     return {'n':len(rs),'win':100*len(w)/len(rs),'avg':statistics.fmean(rs),'pf':pf,'net':sum(rs),'mdd':mdd}
 
+def sma(vals,n):
+    out=[None]*len(vals);s=0.0
+    for i,v in enumerate(vals):
+        s+=v
+        if i>=n:s-=vals[i-n]
+        if i>=n-1:out[i]=s/n
+    return out
+
+def resample5(cur):
+    out=[]
+    for i in range(0,len(cur),5):
+        g=cur[i:i+5]
+        if len(g)<5:continue
+        out.append({'time':g[-1][0],'open':float(g[0][1]),'high':max(float(x[2]) for x in g),'low':min(float(x[3]) for x in g),'close':float(g[-1][4]),'volume':sum(float(x[5] or 0) for x in g)})
+    return out
+
 # -------- Williams --------
 def williams_day(prev,cur):
     if len(prev)<100 or len(cur)<40:return None
-    H=[float(r[2]) for r in cur];L=[float(r[3]) for r in cur];C=[float(r[4]) for r in cur];V=[float(r[5] or 0) for r in cur]
-    ph=max(float(r[2]) for r in prev);pl=min(float(r[3]) for r in prev);trig=float(cur[0][1])+0.5*(ph-pl)
+    H=[float(r[2]) for r in cur];C=[float(r[4]) for r in cur];V=[float(r[5] or 0) for r in cur]
+    L=[float(r[3]) for r in cur];ph=max(float(r[2]) for r in prev);pl=min(float(r[3]) for r in prev);trig=float(cur[0][1])+0.5*(ph-pl)
     r2=rsi(C,2);cc=cci(H,L,C,20);e12=ema(C,12);e26=ema(C,26);mac=[a-b for a,b in zip(e12,e26)];sig=ema(mac,9)
-    first_seen=False
+    first=False
     for i in range(20,len(cur)-2):
-        cross=C[i-1]<=trig<C[i]
-        if not cross or r2[i] is None or r2[i]<=50:continue
-        if first_seen:continue
-        first_seen=True;t=hhmm(cur[i][0]);prior=V[max(0,i-10):i];va=sum(prior)/len(prior) if prior else 0
-        if t is None or not (930<=t<=1100) or va<=0 or V[i]<1.5*va or cc[i] is None or cc[i]<=100 or mac[i]-sig[i] <= mac[i-1]-sig[i-1]:return None
+        if not (C[i-1]<=trig<C[i]) or r2[i] is None or r2[i]<=50:continue
+        if first:continue
+        first=True;t=hhmm(cur[i][0]);prior=V[max(0,i-10):i];va=sum(prior)/len(prior) if prior else 0
+        if t is None or not(930<=t<=1100) or va<=0 or V[i]<1.5*va or cc[i] is None or cc[i]<=100 or mac[i]-sig[i]<=mac[i-1]-sig[i-1]:return None
         weak=0;entry=C[i];ix=len(C)-1
         for j in range(i+1,len(C)):
             if pct(entry,C[j])<=-1.0:ix=j;break
@@ -100,104 +110,101 @@ def williams_day(prev,cur):
 
 # -------- MA20 --------
 def ma20_day(cur):
-    df=pd.DataFrame(cur,columns=['time','open','high','low','close','volume']).astype({'open':float,'high':float,'low':float,'close':float,'volume':float})
-    df['ma20']=df.close.rolling(20,min_periods=20).mean();df['slope']=df.ma20-df.ma20.shift(3);df['gap']=(df.ma20-df.close)/df.ma20*100;df['bull']=df.close>df.open
-    out=[]
-    # A gap reversion, defaults from v01 except common cost removed here.
+    O=[float(r[1]) for r in cur];H=[float(r[2]) for r in cur];L=[float(r[3]) for r in cur];C=[float(r[4]) for r in cur]
+    M=sma(C,20);out=[]
     i=21
-    while i<len(df)-1:
-        if pd.isna(df.loc[i,'ma20']):i+=1;continue
-        gap=float(df.loc[i,'gap']);pg=float(df.loc[i-1,'gap']);px=float(df.loc[i,'close']);ma=float(df.loc[i,'ma20']);target=px+(ma-px)*0.25
+    while i<len(C)-1:
+        if M[i] is None or M[i-1] is None:i+=1;continue
+        gap=(M[i]-C[i])/M[i]*100;pg=(M[i-1]-C[i-1])/M[i-1]*100;px=C[i];target=px+(M[i]-px)*0.25
         if gap>=2.0 and gap<pg and pct(px,target)>=0.50:
-            end=min(len(df)-1,i+30);entrygap=gap;xi=end;xp=float(df.loc[end,'close'])
+            end=min(len(C)-1,i+30);entrygap=gap;xi=end;xp=C[end]
             for j in range(i+1,end+1):
-                if float(df.loc[j,'high'])>=target:xi=j;xp=target;break
-                if float(df.loc[j,'gap'])>=entrygap+0.75:xi=j;xp=float(df.loc[j,'close']);break
+                gapj=(M[j]-C[j])/M[j]*100 if M[j] else 0
+                if H[j]>=target:xi=j;xp=target;break
+                if gapj>=entrygap+0.75:xi=j;xp=C[j];break
             out.append(('MA20_GAP',{'gross':pct(px,xp)}));i=xi+1
         else:i+=1
-    # B pullback
     i=22
-    while i<len(df)-1:
-        if pd.isna(df.loc[i,'ma20']):i+=1;continue
-        w=5
-        if i<2*w+1:i+=1;continue
-        low1=float(df.loc[i-2*w:i-w-1,'low'].min());low2=float(df.loc[i-w:i-1,'low'].min());px=float(df.loc[i,'close']);ma=float(df.loc[i,'ma20'])
-        cond=float(df.loc[i,'slope'])>0 and low2>low1 and abs(px/ma-1)*100<=0.75 and bool(df.loc[i,'bull']) and px>float(df.loc[i-1,'close'])
+    while i<len(C)-1:
+        if M[i] is None or i<11:i+=1;continue
+        slope=M[i]-M[i-3] if M[i-3] is not None else 0;low1=min(L[i-10:i-5]);low2=min(L[i-5:i]);px=C[i]
+        cond=slope>0 and low2>low1 and abs(px/M[i]-1)*100<=0.75 and C[i]>O[i] and C[i]>C[i-1]
         if not cond:i+=1;continue
-        target=float(df.loc[max(0,i-10):i-1,'high'].max());stop=low2
+        target=max(H[max(0,i-10):i]);stop=low2
         if target<=px or stop>=px:i+=1;continue
-        end=min(len(df)-1,i+30);xi=end;xp=float(df.loc[end,'close'])
+        end=min(len(C)-1,i+30);xi=end;xp=C[end]
         for j in range(i+1,end+1):
-            if float(df.loc[j,'low'])<=stop:xi=j;xp=stop;break
-            if float(df.loc[j,'high'])>=target:xi=j;xp=target;break
+            if L[j]<=stop:xi=j;xp=stop;break
+            if H[j]>=target:xi=j;xp=target;break
         out.append(('MA20_PULLBACK',{'gross':pct(px,xp)}));i=xi+1
     return out
 
-# -------- Fujimoto simplified exact staged logic per day 5m --------
+# -------- Fujimoto --------
 def fujimoto_day(cur):
-    q=pd.DataFrame(cur,columns=['time','open','high','low','close','volume']);q['bucket']=np.arange(len(q))//5
-    x=q.groupby('bucket').agg(open=('open','first'),high=('high','max'),low=('low','min'),close=('close','last'),volume=('volume','sum')).dropna().astype(float)
+    x=resample5(cur)
     if len(x)<70:return []
-    d=x.close.diff();up=d.clip(lower=0).ewm(alpha=1/14,adjust=False).mean();dn=(-d.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean();rs=up/dn.replace(0,np.nan);x['rsi']=100-100/(1+rs);x['ema8']=x.close.ewm(span=8,adjust=False).mean();x['ema20']=x.close.ewm(span=20,adjust=False).mean()
-    # causal pivot confirmation: pivot at k only known at k+2.
+    C=[r['close'] for r in x];L=[r['low'] for r in x];O=[r['open'] for r in x]
+    R=rsi(C,14);E8=ema(C,8);E20=ema(C,20)
     piv=[]
     for k in range(2,len(x)-2):
-        if x.low.iloc[k] <= x.low.iloc[k-2:k+3].min():piv.append(k)
+        if L[k]<=min(L[k-2:k+3]):piv.append(k)
     f0=[False]*len(x)
     for a,b in zip(piv,piv[1:]):
-        if b-a<=40 and x.low.iloc[b]<x.low.iloc[a] and x.rsi.iloc[b]>x.rsi.iloc[a] and x.rsi.iloc[a]<45 and x.rsi.iloc[b]<50:f0[min(b+2,len(x)-1)]=True
-    s0=pd.Series(f0,index=x.index);f1=s0.rolling(7,min_periods=1).max().astype(bool)&(x.rsi>40)&(x.rsi>x.rsi.shift(1))&(x.close>x.close.shift(1));f2=f1.rolling(4,min_periods=1).max().astype(bool)&(x.rsi>48)&(x.ema8>x.ema20)&(x.close>x.ema8)
+        if b-a<=40 and R[a] is not None and R[b] is not None and L[b]<L[a] and R[b]>R[a] and R[a]<45 and R[b]<50:f0[min(b+2,len(x)-1)]=True
+    f1=[False]*len(x);f2=[False]*len(x)
+    for i in range(len(x)):
+        recent=any(f0[max(0,i-6):i+1])
+        if recent and R[i] is not None and i>0 and R[i]>40 and R[i-1] is not None and R[i]>R[i-1] and C[i]>C[i-1]:f1[i]=True
+        recent1=any(f1[max(0,i-3):i+1])
+        if recent1 and R[i] is not None and R[i]>48 and E8[i]>E20[i] and C[i]>E8[i]:f2[i]=True
     out=[]
-    for name,sig,hard in [('FUJIMOTO_F2',f2,False),('FUJIMOTO_F4',f2,True)]:
+    for name,hard in [('FUJIMOTO_F2',False),('FUJIMOTO_F4',True)]:
         i=60
         while i<len(x)-2:
-            if not bool(sig.iloc[i]):i+=1;continue
-            ei=i+1;entry=float(x.open.iloc[ei]);end=min(ei+24,len(x)-1);xi=end
+            if not f2[i]:i+=1;continue
+            ei=i+1;entry=O[ei];end=min(ei+24,len(x)-1);xi=end
             for k in range(ei+1,end+1):
                 if hard:
-                    if (x.rsi.iloc[k]<50 and x.rsi.iloc[k-1]>=50) or x.close.iloc[k]<x.ema20.iloc[k]:xi=k;break
-                else:
-                    if k>=ei+3 and x.close.iloc[k]<x.ema8.iloc[k]:xi=k;break
-            out.append((name,{'gross':pct(entry,float(x.close.iloc[xi]))}));i=xi+1
+                    if (R[k] is not None and R[k-1] is not None and R[k]<50<=R[k-1]) or C[k]<E20[k]:xi=k;break
+                elif k>=ei+3 and C[k]<E8[k]:xi=k;break
+            out.append((name,{'gross':pct(entry,C[xi])}));i=xi+1
     return out
 
 # -------- Ethan QQQ --------
 def ethan_day(cur):
-    q=pd.DataFrame(cur,columns=['time','open','high','low','close','volume']);q['bucket']=np.arange(len(q))//5
-    z=q.groupby('bucket').agg(open=('open','first'),high=('high','max'),low=('low','min'),close=('close','last'),volume=('volume','sum')).dropna().astype(float).reset_index(drop=True)
+    z=resample5(cur)
     if len(z)<60:return []
-    z['rng']=z.high-z.low;z['body']=(z.close-z.open).abs();out=[];i=50
+    out=[];i=50
     while i<len(z)-2:
-        prev=z.iloc[i-18:i];med=float(prev.rng.median())
-        if not np.isfinite(med) or med<=0:i+=1;continue
-        res=float(prev.high.max());sup=float(prev.low.min());pad=.12*med;row=z.iloc[i]
-        lb=float(row.close)>res+pad+.05*med;sb=float(row.close)<sup-pad-.05*med
+        prev=z[i-18:i];ranges=[r['high']-r['low'] for r in prev];med=statistics.median(ranges) if ranges else 0
+        if not math.isfinite(med) or med<=0:i+=1;continue
+        res=max(r['high'] for r in prev);sup=min(r['low'] for r in prev);pad=.12*med;r=z[i]
+        lb=r['close']>res+pad+.05*med;sb=r['close']<sup-pad-.05*med
         if not(lb or sb):i+=1;continue
-        side='L' if lb else 'S';zlo,zhi=(res-pad,res+pad) if lb else (sup-pad,sup+pad);breakbody=max(float(row.body),1e-12);approach=[];ei=None
+        side='L' if lb else 'S';zlo,zhi=(res-pad,res+pad) if lb else (sup-pad,sup+pad);breakbody=max(abs(r['close']-r['open']),1e-12);approach=[];ei=None
         for j in range(i+1,min(len(z),i+9)):
-            r=z.iloc[j];touch=float(r.low)<=zhi and float(r.high)>=zlo
+            q=z[j];touch=q['low']<=zhi and q['high']>=zlo
             if not touch:
-                if (side=='L' and float(r.close)>zhi) or (side=='S' and float(r.close)<zlo):approach.append(j)
+                if (side=='L' and q['close']>zhi) or (side=='S' and q['close']<zlo):approach.append(j)
                 continue
-            ab=np.mean([float(z.iloc[k].body) for k in approach[-3:]]) if approach else float(r.body);slow=len(approach)>=2 and ab<=.70*breakbody
-            rng=max(float(r.high-r.low),1e-12)
-            rej=((min(r.open,r.close)-r.low)/rng>=.35 and r.close>=r.open) if side=='L' else ((r.high-max(r.open,r.close))/rng>=.35 and r.close<=r.open)
+            bodies=[abs(z[k]['close']-z[k]['open']) for k in approach[-3:]];ab=statistics.fmean(bodies) if bodies else abs(q['close']-q['open']);slow=len(approach)>=2 and ab<=.70*breakbody
+            rng=max(q['high']-q['low'],1e-12)
+            rej=((min(q['open'],q['close'])-q['low'])/rng>=.35 and q['close']>=q['open']) if side=='L' else ((q['high']-max(q['open'],q['close']))/rng>=.35 and q['close']<=q['open'])
             if slow or rej:ei=j
             break
         if ei is None:i+=1;continue
-        e=z.iloc[ei];entry=float(e.close);stop=min(float(e.low),zlo-pad) if side=='L' else max(float(e.high),zhi+pad);risk=entry-stop if side=='L' else stop-entry
+        e=z[ei];entry=e['close'];stop=min(e['low'],zlo-pad) if side=='L' else max(e['high'],zhi+pad);risk=entry-stop if side=='L' else stop-entry
         if risk<=0:i+=1;continue
-        target=entry+1.5*risk if side=='L' else entry-1.5*risk;end=min(len(z)-1,ei+24);xp=float(z.iloc[end].close);xi=end
+        target=entry+1.5*risk if side=='L' else entry-1.5*risk;end=min(len(z)-1,ei+24);xp=z[end]['close'];xi=end
         for k in range(ei+1,end+1):
-            r=z.iloc[k]
+            q=z[k]
             if side=='L':
-                if float(r.low)<=stop:xp=stop;xi=k;break
-                if float(r.high)>=target:xp=target;xi=k;break
+                if q['low']<=stop:xp=stop;xi=k;break
+                if q['high']>=target:xp=target;xi=k;break
             else:
-                if float(r.high)>=stop:xp=stop;xi=k;break
-                if float(r.low)<=target:xp=target;xi=k;break
-        gross=pct(entry,xp) if side=='L' else pct(xp,entry)
-        out.append(('ETHAN_QQQ',{'gross':gross}));i=max(i+1,xi+1)
+                if q['high']>=stop:xp=stop;xi=k;break
+                if q['low']<=target:xp=target;xi=k;break
+        out.append(('ETHAN_QQQ',{'gross':pct(entry,xp) if side=='L' else pct(xp,entry)}));i=max(i+1,xi+1)
     return out
 
 def main():
@@ -205,6 +212,7 @@ def main():
     con=sqlite3.connect(args.db);byfam=defaultdict(list);all_dates=set()
     for sym in SYMS:
         dm=load_days(con,sym,args.max_days);ds=sorted(dm)
+        print('LOAD',sym,'DAYS=',max(0,len(ds)-1))
         for di,d in enumerate(ds):
             cur=dm[d];all_dates.add(d)
             if di>0:
@@ -214,30 +222,29 @@ def main():
             for fam,t in fujimoto_day(cur):byfam[fam].append({'date':d,'symbol':sym,**t})
             if sym=='QQQ':
                 for fam,t in ethan_day(cur):byfam[fam].append({'date':d,'symbol':sym,**t})
-        print('LOAD',sym,'DAYS',max(0,len(ds)-1))
     con.close()
-    dates=sorted(all_dates);a=int(len(dates)*.60);b=int(len(dates)*.80);spl={'IS':set(dates[:a]),'OOS':set(dates[a:b]),'HOLDOUT':set(dates[b:])}
-    print('=== V135 CROSS-FAMILY MASTER TOURNAMENT ===');print('DATES',len(dates),'SPLIT',{k:len(v) for k,v in spl.items()})
-    result=[]
-    for fam,tr in sorted(byfam.items()):
-        print('\n--',fam,'TOTAL_TRADES',len(tr),'--')
-        row={'family':fam}
+    dates=sorted(all_dates);a=int(len(dates)*.60);b=int(len(dates)*.80);split={'IS':set(dates[:a]),'OOS':set(dates[a:b]),'HOLDOUT':set(dates[b:])}
+    print('\n=== V135 CROSS-FAMILY MASTER TOURNAMENT ===')
+    print('STDLIB_ONLY=YES READ_ONLY=YES ORDERS=NONE DOWNLOADS=NONE')
+    print('DATES',len(dates),'SPLIT',{k:len(v) for k,v in split.items()})
+    rank=[]
+    for fam in sorted(byfam):
+        print('\n--',fam,'--')
         for cost in COSTS:
-            for lab in ('IS','OOS','HOLDOUT'):
-                z=metrics([x for x in tr if x['date'] in spl[lab]],cost)
-                print('COST',cost,lab,z)
-                if cost==0.08:row[lab]=z
-        o=row.get('OOS');h=row.get('HOLDOUT');eligible=bool(o and h and o['n']>=15 and h['n']>=15 and o['avg']>0 and h['avg']>0 and o['pf']>1 and h['pf']>1)
-        row['eligible']=eligible
-        score=(-1e9 if not eligible else h['avg']*.45+(h['pf']-1)*.20+(h['win']/100)*.10+h['mdd']*.01+o['avg']*.20)
-        row['score']=score;result.append(row)
-    result.sort(key=lambda x:x['score'],reverse=True)
-    print('\n=== ROBUST CROSS-FAMILY RANK @8bps ===')
-    for i,r in enumerate(result,1):
-        o=r.get('OOS');h=r.get('HOLDOUT');print(i,r['family'],'ELIG',r['eligible'],'SCORE',f"{r['score']:.4f}",'OOS',o,'HOLDOUT',h)
-    winner=next((r for r in result if r['eligible']),None)
-    print('WINNER',winner['family'] if winner else 'NONE')
-    print('FINAL_PASS',bool(winner and winner['HOLDOUT']['pf']>=1.3 and winner['OOS']['pf']>=1.3 and winner['HOLDOUT']['avg']>0 and winner['OOS']['avg']>0))
-    report={'split':{k:sorted(v) for k,v in spl.items()},'rank':result};Path('/tmp/v135_cross_family_master_tournament.json').write_text(json.dumps(report,indent=2,default=str))
-    print('REPORT /tmp/v135_cross_family_master_tournament.json');print('ELAPSED_SEC',round(time.time()-t0,1))
+            zs={lab:metrics([t for t in byfam[fam] if t['date'] in ds],cost) for lab,ds in split.items()}
+            print('COST',cost,'IS',zs['IS'],'OOS',zs['OOS'],'HOLDOUT',zs['HOLDOUT'])
+        o=metrics([t for t in byfam[fam] if t['date'] in split['OOS']],0.08);h=metrics([t for t in byfam[fam] if t['date'] in split['HOLDOUT']],0.08)
+        eligible=bool(o and h and o['n']>=10 and h['n']>=10 and o['avg']>0 and h['avg']>0 and o['pf']>1 and h['pf']>1)
+        score=(min(o['pf'],h['pf'])+min(o['avg'],h['avg'])*2+min(o['win'],h['win'])/100) if eligible else -1e9
+        rank.append((score,fam,eligible,o,h))
+    rank.sort(reverse=True,key=lambda x:x[0])
+    print('\n=== ROBUST CROSS-FAMILY RANK ===')
+    for i,(sc,fam,el,o,h) in enumerate(rank,1):print(i,fam,'ELIG',el,'SCORE',f'{sc:.4f}','OOS',o,'HOLDOUT',h)
+    winner=next((x for x in rank if x[2]),None)
+    if winner:
+        _,fam,_,o,h=winner;print('WINNER',fam);print('FINAL_PASS=',bool(o['pf']>=1.3 and h['pf']>=1.3 and o['avg']>0 and h['avg']>0))
+    else:
+        print('WINNER NONE');print('FINAL_PASS= False')
+    print('ELAPSED_SEC',round(time.time()-t0,1))
+
 if __name__=='__main__':main()

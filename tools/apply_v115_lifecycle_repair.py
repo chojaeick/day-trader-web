@@ -21,7 +21,9 @@ import py_compile
 import re
 import shutil
 
-ROOT = Path(__file__).resolve().parents[1]
+# IMPORTANT: this script lives in ~/day-trader-api-repo but must patch the
+# live runtime tree in ~/day-trader-api.
+ROOT = Path("/home/ubuntu/day-trader-api")
 ENGINE = ROOT / "live_server" / "v4_engine.py"
 BROKER = ROOT / "live_server" / "kiwoom_mock_broker.py"
 
@@ -53,8 +55,6 @@ def patch_broker() -> None:
             fail("broker import anchor not found")
         s = s.replace(anchor, anchor + "import threading\n", 1)
 
-    # V114 may have comments/spacing/type annotation differences around
-    # _shared_token. Insert the lock immediately after that declaration.
     if "_token_lock = threading.Lock()" not in s:
         pat = re.compile(r"^(\s+_shared_token\s*(?::[^=\n]+)?=\s*None\s*)$", re.M)
         m = pat.search(s)
@@ -63,7 +63,6 @@ def patch_broker() -> None:
         indent = re.match(r"\s*", m.group(1)).group(0)
         s = s[:m.end()] + f"\n{indent}_token_lock = threading.Lock()" + s[m.end():]
 
-    # Replace only the get_token method body, bounded by the next method.
     if "with cls._token_lock:" not in s:
         start = s.find("    def get_token(self) -> str:\n")
         if start < 0:
@@ -117,6 +116,7 @@ def patch_engine() -> None:
 
 
 def main() -> None:
+    print(f"TARGET_ROOT {ROOT}")
     patch_broker()
     patch_engine()
     py_compile.compile(str(BROKER), doraise=True)

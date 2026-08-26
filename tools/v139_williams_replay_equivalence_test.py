@@ -6,8 +6,9 @@ Runs the V136 frozen Williams logic and the runtime frozen module on the same
 historical 1-minute bars. Requires exact agreement on entry/exit decisions.
 """
 from __future__ import annotations
-import importlib.util, sqlite3, statistics, sys
+import importlib.util, sqlite3, sys
 from pathlib import Path
+from datetime import datetime
 
 ROOT=Path('/home/ubuntu/day-trader-api')
 DB=ROOT/'daytrader.db'
@@ -50,15 +51,29 @@ def load_mod():
     spec=importlib.util.spec_from_file_location('williams_usa_frozen',MOD)
     m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m);return m
 
-def ts_et_string(raw):
-    s=str(raw)
-    # frozen module accepts pandas timestamps and assumes naive means UTC, so pass explicit NY offset.
-    if 'T' in s:return s
-    if len(s)>=5 and ':' in s:
-        return '2026-01-01T'+s[:8]+'-05:00'
+def raw_hhmm(raw):
+    s=str(raw).strip()
+    # et_time in this DB may be HH:MM[:SS], ISO, or compact digits.
+    if 'T' in s:
+        tail=s.split('T',1)[1]
+        if ':' in tail:
+            try:return int(tail[:2])*100+int(tail[3:5])
+            except Exception:pass
+    if ':' in s:
+        parts=s.split(':')
+        try:return int(parts[0][-2:])*100+int(parts[1][:2])
+        except Exception:pass
     d=''.join(ch for ch in s if ch.isdigit())
-    hhmm=d[-6:-2] if len(d)>=6 else '0930'
-    return f'2026-01-01T{hhmm[:2]}:{hhmm[2:]}:00-05:00'
+    if len(d)>=6:return int(d[-6:-2])
+    if len(d)>=4:return int(d[-4:])
+    return 0
+
+def ts_et_string(raw, trade_date):
+    hhmm=raw_hhmm(raw)
+    hh,mm=hhmm//100,hhmm%100
+    # Explicit ET wall-clock string; frozen module recognizes offset-aware ISO.
+    # DST offset is irrelevant for _et_minute because only local wall-clock hour/minute is used.
+    return f'{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}T{hh:02d}:{mm:02d}:00-04:00'
 
 def main():
     if not MOD.exists():
@@ -80,13 +95,12 @@ def main():
                 seen=True
                 prior=V[max(0,i-10):i];va=sum(prior)/len(prior) if prior else 0.0
                 raw_ok=(va>0 and V[i]>=1.5*va and cc[i] is not None and cc[i]>100 and hist[i]>hist[i-1])
-                # time window from raw et_time string
-                ss=str(cur[i][0]);digits=''.join(ch for ch in ss if ch.isdigit());hhmm=int(digits[-6:-2]) if len(digits)>=6 else 0
+                hhmm=raw_hhmm(cur[i][0])
                 raw_ok=raw_ok and (930<=hhmm<=1100)
-                mod=m.entry_signal(ts=ts_et_string(cur[i][0]),prev_crossed=False,cross_now=True,rsi2=r2[i],day_open=op,prev_high=ph,prev_low=pl,volume=V[i],prior10_volume_avg=va,cci20=cc[i],macd_hist=hist[i],prev_macd_hist=hist[i-1])
+                mod=m.entry_signal(ts=ts_et_string(cur[i][0],ds[di]),prev_crossed=False,cross_now=True,rsi2=r2[i],day_open=op,prev_high=ph,prev_low=pl,volume=V[i],prior10_volume_avg=va,cci20=cc[i],macd_hist=hist[i],prev_macd_hist=hist[i-1])
                 entry_total+=1
                 if bool(mod['signal'])==bool(raw_ok):entry_match+=1
-                else:mismatches.append(('ENTRY',sym,ds[di],i,raw_ok,mod))
+                else:mismatches.append(('ENTRY',sym,ds[di],i,raw_ok,mod,'raw_hhmm',hhmm,'raw_ts',cur[i][0]))
                 if raw_ok:entry_i=i
                 break
             if entry_i is None:continue

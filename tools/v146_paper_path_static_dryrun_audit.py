@@ -7,7 +7,7 @@ ledger to verify ENTRY/HOLD/EXIT, duplicate guard and max-position behavior.
 """
 from __future__ import annotations
 from pathlib import Path
-import ast, os, py_compile, types
+import ast, os, py_compile
 
 P=Path('/home/ubuntu/day-trader-api/live_server/v4_engine.py')
 S=P.read_text(errors='ignore')
@@ -15,16 +15,26 @@ S=P.read_text(errors='ignore')
 print('=== V146 PAPER PATH STATIC + DRYRUN AUDIT ===')
 print('ENGINE=',P,'EXISTS=',P.exists(),'BYTES=',len(S))
 
+# Inspect only the exact USA frozen authority branch, not unrelated legacy code later
+# in _paper_williams_step. Previous V146 used a fixed 3500-char slice and could sweep
+# into Korea/Kiwoom legacy code, causing a false broker-positive.
+start=S.find('V145_USA_FROZEN_PAPER_AUTHORITY')
+end=S.find('return None', start)
+# There are several returns in the branch; use the next method definition as hard end.
+method_end=S.find('\n    def ', start+1)
+if method_end < 0: method_end=len(S)
+authority_block=S[start:method_end] if start>=0 else ''
+
 checks={
  'v145_authority':'V145_USA_FROZEN_PAPER_AUTHORITY' in S,
- 'usa_gate':"str(market).upper()=='USA'" in S or 'str(market).upper()=="USA"' in S,
- 'paper_enter':"self.paper.enter('USA'" in S or 'self.paper.enter("USA"' in S,
- 'paper_exit':"self.paper.exit('USA'" in S or 'self.paper.exit("USA"' in S,
- 'paper_mark':"self.paper.mark('USA'" in S or 'self.paper.mark("USA"' in S,
- 'duplicate_guard':'any(str((p or {}).get' in S,
- 'max_positions':'WILLIAMS_USA_PAPER_MAX_POSITIONS' in S,
- 'frozen_strategy_id':'WILLIAMS_FROZEN_V136' in S,
- 'real_broker_added': not any(x in S[S.find('V145_USA_FROZEN_PAPER_AUTHORITY'):S.find('V145_USA_FROZEN_PAPER_AUTHORITY')+3500] for x in ['KiwoomMockBroker','send_order','place_order','broker.']),
+ 'usa_gate':"str(market).upper()=='USA'" in authority_block or 'str(market).upper()=="USA"' in authority_block,
+ 'paper_enter':"self.paper.enter('USA'" in authority_block or 'self.paper.enter("USA"' in authority_block,
+ 'paper_exit':"self.paper.exit('USA'" in authority_block or 'self.paper.exit("USA"' in authority_block,
+ 'paper_mark':"self.paper.mark('USA'" in authority_block or 'self.paper.mark("USA"' in authority_block,
+ 'duplicate_guard':'any(str((p or {}).get' in authority_block,
+ 'max_positions':'WILLIAMS_USA_PAPER_MAX_POSITIONS' in authority_block,
+ 'frozen_strategy_id':'WILLIAMS_FROZEN_V136' in authority_block,
+ 'real_broker_added': not any(x in authority_block for x in ['KiwoomMockBroker','send_order','place_order','broker.','kiwoom']),
 }
 for k,v in checks.items(): print(k, 'PASS' if v else 'FAIL')
 
@@ -34,11 +44,9 @@ except Exception as e:
     comp=False; print('COMPILE_ERROR',e)
 print('PY_COMPILE=', 'PASS' if comp else 'FAIL')
 
-# Extract method bodies directly from runtime source, then execute on a minimal fake self.
 mod=ast.parse(S)
 cls=next((n for n in mod.body if isinstance(n,ast.ClassDef) and n.name=='V4Engine'),None)
 if cls is None:
-    # tolerate class rename: find class containing the paper method
     for n in mod.body:
         if isinstance(n,ast.ClassDef) and any(isinstance(x,ast.FunctionDef) and x.name=='_paper_williams_step' for x in n.body):
             cls=n;break
@@ -60,7 +68,6 @@ class FakeSelf:
     def __init__(self): self.paper=FakePaper(); self.next_ev={'entry':False,'exit':False}
     def _v140_usa_frozen_williams_eval(self,row): return dict(self.next_ev)
 
-# Build a standalone function from the exact runtime method body.
 dryrun_ok=False
 results=[]
 if fn_paper:
@@ -75,13 +82,10 @@ if fn_paper:
     before=len(me.paper.calls); paper_step(me,'USA',row); results.append(('duplicate_no_new_enter',len(me.paper.calls)==before+1 and me.paper.calls[-1][0]=='MARK'))
     me.next_ev={'entry':False,'exit':False}; paper_step(me,'USA',row); results.append(('hold_mark',me.paper.calls[-1][0]=='MARK'))
     me.next_ev={'entry':False,'exit':True}; paper_step(me,'USA',row); results.append(('exit_call',me.paper.calls[-1][0]=='EXIT'))
-    # Max-position gate: fill five positions then attempt a sixth entry.
     me=FakeSelf()
     for i in range(5): me.paper.open[('USA',f'S{i}')]= {'market':'USA','symbol':f'S{i}','price':10}
     me.next_ev={'entry':True,'exit':False}; before=len(me.paper.calls); paper_step(me,'USA',{'market':'USA','symbol':'AMD','price':100.0})
     results.append(('max5_blocks_sixth',len(me.paper.calls)==before))
-    # Korea must fall through legacy body; do not execute full legacy branch in dry-run.
-    # Static USA early branch is what is being audited here.
     dryrun_ok=all(bool(v) if isinstance(v,bool) else v=='ENTER' for k,v in results)
 for k,v in results: print('DRYRUN',k,'PASS' if (v is True or v=='ENTER') else 'FAIL',v)
 

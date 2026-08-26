@@ -2,7 +2,7 @@
 """Apply DAY TRADER V115 mock lifecycle safety repair to the current runtime tree.
 
 This script intentionally patches the files already present on the server instead of
-replacing them with the older GitHub main-branch copies.
+replacing them with the older GitHub branch copies.
 
 V115 scope (mock investment only):
 - process-shared OAuth token lock + double-checked reuse
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import py_compile
+import re
 import shutil
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "live_server" / "v4_engine.py"
@@ -53,17 +53,28 @@ def patch_broker() -> None:
             fail("broker import anchor not found")
         s = s.replace(anchor, anchor + "import threading\n", 1)
 
-    cls_old = "class KiwoomMockBroker:\n    _shared_token: str | None = None\n"
-    cls_new = "class KiwoomMockBroker:\n    _shared_token: str | None = None\n    _token_lock = threading.Lock()\n"
-    if cls_old not in s:
-        fail("broker class token anchor not found")
-    s = s.replace(cls_old, cls_new, 1)
+    # V114 may have comments/spacing/type annotation differences around
+    # _shared_token. Insert the lock immediately after that declaration.
+    if "_token_lock = threading.Lock()" not in s:
+        pat = re.compile(r"^(\s+_shared_token\s*(?::[^=\n]+)?=\s*None\s*)$", re.M)
+        m = pat.search(s)
+        if not m:
+            fail("broker _shared_token declaration not found")
+        indent = re.match(r"\s*", m.group(1)).group(0)
+        s = s[:m.end()] + f"\n{indent}_token_lock = threading.Lock()" + s[m.end():]
 
-    old = '''    def get_token(self) -> str:\n        r = requests.post(\n            self.cfg.rest_base + "/oauth2/token",\n            json={\n                "grant_type": "client_credentials",\n                "appkey": self.cfg.app_key,\n                "secretkey": self.cfg.app_secret,\n            },\n            headers={"Content-Type": "application/json;charset=UTF-8"},\n            timeout=15,\n        )\n        r.raise_for_status()\n        d = r.json()\n        if d.get("return_code") not in (None, 0) or not d.get("token"):\n            raise RuntimeError(f"mock token failed: {d}")\n        self.token = d["token"]\n        type(self)._shared_token = self.token\n        return self.token\n'''
-    new = '''    def get_token(self) -> str:\n        cls = type(self)\n\n        if self.token:\n            return self.token\n        if cls._shared_token:\n            self.token = cls._shared_token\n            return self.token\n\n        with cls._token_lock:\n            if cls._shared_token:\n                self.token = cls._shared_token\n                return self.token\n\n            r = requests.post(\n                self.cfg.rest_base + "/oauth2/token",\n                json={\n                    "grant_type": "client_credentials",\n                    "appkey": self.cfg.app_key,\n                    "secretkey": self.cfg.app_secret,\n                },\n                headers={"Content-Type": "application/json;charset=UTF-8"},\n                timeout=15,\n            )\n            r.raise_for_status()\n            d = r.json()\n            if d.get("return_code") not in (None, 0) or not d.get("token"):\n                raise RuntimeError(f"mock token failed: {d}")\n            self.token = d["token"]\n            cls._shared_token = self.token\n            return self.token\n'''
-    if old not in s:
-        fail("broker get_token V114 body not found")
-    BROKER.write_text(s.replace(old, new, 1))
+    # Replace only the get_token method body, bounded by the next method.
+    if "with cls._token_lock:" not in s:
+        start = s.find("    def get_token(self) -> str:\n")
+        if start < 0:
+            fail("broker get_token start not found")
+        end = s.find("\n    def ", start + 5)
+        if end < 0:
+            fail("broker get_token end not found")
+        new = '''    def get_token(self) -> str:\n        cls = type(self)\n\n        if self.token:\n            return self.token\n        if cls._shared_token:\n            self.token = cls._shared_token\n            return self.token\n\n        with cls._token_lock:\n            if cls._shared_token:\n                self.token = cls._shared_token\n                return self.token\n\n            r = requests.post(\n                self.cfg.rest_base + "/oauth2/token",\n                json={\n                    "grant_type": "client_credentials",\n                    "appkey": self.cfg.app_key,\n                    "secretkey": self.cfg.app_secret,\n                },\n                headers={"Content-Type": "application/json;charset=UTF-8"},\n                timeout=15,\n            )\n            r.raise_for_status()\n            d = r.json()\n            if d.get("return_code") not in (None, 0) or not d.get("token"):\n                raise RuntimeError(f"mock token failed: {d}")\n            self.token = d["token"]\n            cls._shared_token = self.token\n            return self.token\n'''
+        s = s[:start] + new + s[end+1:]
+
+    BROKER.write_text(s)
     print("BROKER_PATCHED")
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 OUT=Path('/home/ubuntu/day-trader-api/live_server/williams_usa_frozen.py')
 CODE=r'''from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import re
 
@@ -27,37 +27,25 @@ class FrozenWilliamsSpec:
 
 SPEC=FrozenWilliamsSpec()
 
-def _parse_dt(ts):
-    if isinstance(ts, datetime):
-        x=ts
-    else:
-        s=str(ts).strip()
-        if s.endswith('Z'):
-            s=s[:-1]+'+00:00'
-        try:
-            x=datetime.fromisoformat(s)
-        except Exception:
-            digits=''.join(ch for ch in s if ch.isdigit())
-            if len(digits)>=14:
-                x=datetime.strptime(digits[:14],'%Y%m%d%H%M%S')
-            elif len(digits)>=12:
-                x=datetime.strptime(digits[:12],'%Y%m%d%H%M')
-            else:
-                m=re.search(r'(\d{1,2}):(\d{2})',s)
-                if not m:
-                    raise ValueError(f'unsupported timestamp: {ts!r}')
-                return None,int(m.group(1))*60+int(m.group(2))
-    return x,None
-
 def _et_minute(ts):
-    x,minute=_parse_dt(ts)
-    if minute is not None:
-        return minute
-    if x.tzinfo is None:
-        # historical DB et_time strings are already ET-local unless an offset is present
-        return int(x.hour)*60+int(x.minute)
-    x=x.astimezone(ET)
-    return int(x.hour)*60+int(x.minute)
+    s=str(ts).strip()
+    # historical replay feeds ET-local timestamps, sometimes with -0500/-0400 offset.
+    # For equivalence we must preserve the wall-clock HH:MM exactly and must NOT
+    # timezone-convert those already-local strings again.
+    m=re.search(r'[T ](\d{1,2}):(\d{2})',s)
+    if m:
+        return int(m.group(1))*60+int(m.group(2))
+    m=re.match(r'^(\d{1,2}):(\d{2})',s)
+    if m:
+        return int(m.group(1))*60+int(m.group(2))
+    digits=''.join(ch for ch in s if ch.isdigit())
+    if len(digits)>=12:
+        # YYYYMMDDHHMM[SS...] -> ET-local wall clock
+        return int(digits[8:10])*60+int(digits[10:12])
+    if isinstance(ts, datetime):
+        x=ts.astimezone(ET) if ts.tzinfo else ts
+        return x.hour*60+x.minute
+    raise ValueError(f'unsupported timestamp: {ts!r}')
 
 def entry_signal(*, ts, prev_crossed, cross_now, rsi2, day_open, prev_high, prev_low,
                  volume, prior10_volume_avg, cci20, macd_hist, prev_macd_hist):
@@ -88,6 +76,7 @@ OUT.write_text(CODE)
 print('=== V138 FROZEN USA REPLICATION BUILDER ===')
 print('WROTE',OUT)
 print('STDLIB_ONLY=YES')
+print('ET_WALLCLOCK_PRESERVED=YES')
 print('ISOLATED_FROM_KOREA_MOCK=YES')
 print('FORCED_MIN_HOLD=NONE')
 print('HARD_STOP=-1.0%')

@@ -18,12 +18,12 @@ from live_server.double_bollinger_v2 import DoubleBollingerV2, DoubleBollingerPa
 from live_server.strategy_core_v1 import Action, PositionPhase, PositionState
 from live_server.kiwoom_us_mock_broker import KiwoomUSMockBroker
 
-LIMITS = {"SOXL": 200000, "SOXS": 80000}
 EXCHANGE = {"SOXL": "NY", "SOXS": "NY"}
 STATE_PATH = Path(os.getenv("DBB_MOCK_STATE_PATH", str(ROOT / "dbb_pair_mock_state.json")))
 LOG_PATH = Path(os.getenv("DBB_MOCK_LOG_PATH", str(ROOT / "dbb_pair_mock_live.jsonl")))
 LOCK_PATH = Path(os.getenv("DBB_MOCK_LOCK_PATH", "/tmp/dbb_pair_mock_live.lock"))
 RECON_SEC = max(30, int(os.getenv("DBB_MOCK_RECON_SEC", "60") or 60))
+BAR_LIMITS = (5000, 12000, 24000)
 
 
 def truthy(name: str, default: str = "0") -> bool:
@@ -52,9 +52,21 @@ def load_state() -> dict[str, Any]:
 
 
 def completed_bars(sym: str):
-    ticks = db.ticks(sym, LIMITS[sym])
-    bars = ticks_to_bars(ticks, 1)
+    """Build only the history DBB actually needs.
+
+    Williams needed very deep history. DBB does not. Reading 200k/80k ticks on
+    every loop delayed evaluation by minutes, so use an adaptive small window.
+    """
+    bars = None
+    used = None
+    for lim in BAR_LIMITS:
+        ticks = db.ticks(sym, lim)
+        bars = ticks_to_bars(ticks, 1)
+        used = lim
+        if bars is not None and len(bars) >= 50:
+            break
     if bars is None or len(bars) < 40:
+        log("BAR_DATA_SHORT", symbol=sym, tick_limit=used, bars=0 if bars is None else len(bars))
         return None
     x = bars.copy().reset_index(drop=True)
     try:
@@ -65,15 +77,23 @@ def completed_bars(sym: str):
             x = x.iloc[:-1].reset_index(drop=True)
     except Exception:
         pass
-    return x if len(x) >= 40 else None
+    if len(x) < 40:
+        return None
+    # Keep indicator work bounded too.
+    return x.tail(300).reset_index(drop=True)
 
 
-def balance_with_backoff(broker: KiwoomUSMockBroker, sym: str, retries: int = 4):
+def fresh_broker() -> KiwoomUSMockBroker:
+    """Use the exact fresh-broker pattern proven by the successful roundtrip."""
+    return KiwoomUSMockBroker()
+
+
+def balance_with_backoff(sym: str, retries: int = 4):
     delay = 2.0
     last = None
     for attempt in range(1, retries + 1):
         try:
-            return broker.balance(sym, EXCHANGE[sym])
+            return fresh_broker().balance(sym, EXCHANGE[sym])
         except Exception as e:
             last = e
             if "429" not in repr(e) or attempt >= retries:
@@ -84,8 +104,8 @@ def balance_with_backoff(broker: KiwoomUSMockBroker, sym: str, retries: int = 4)
     raise last
 
 
-def holding(broker: KiwoomUSMockBroker, sym: str) -> dict[str, Any] | None:
-    r = balance_with_backoff(broker, sym)
+def holding(sym: str) -> dict[str, Any] | None:
+    r = balance_with_backoff(sym)
     for x in r.get("result_list") or []:
         if str(x.get("stk_cd") or "").upper() == sym:
             qty = int(str(x.get("sell_alowq") or x.get("poss_qty") or "0") or "0")
@@ -100,10 +120,10 @@ def holding(broker: KiwoomUSMockBroker, sym: str) -> dict[str, Any] | None:
     return None
 
 
-def pair_holdings(broker: KiwoomUSMockBroker):
+def pair_holdings():
     out = []
     for idx, sym in enumerate(("SOXL", "SOXS")):
-        h = holding(broker, sym)
+        h = holding(sym)
         if h:
             out.append(h)
         if idx == 0:
@@ -117,23 +137,23 @@ def marketable_price(price: float, side: str) -> float:
     return round(px, 2 if px >= 1 else 4)
 
 
-def order_with_retry(broker: KiwoomUSMockBroker, side: str, sym: str, qty: int, px: float):
-    """Send order through the same proven broker path as the round-trip test.
-    One fresh-token retry is allowed for transient Kiwoom mock context errors.
-    """
+def order_with_retry(side: str, sym: str, qty: int, px: float):
+    """Every attempt uses a new broker/token, matching the proven V252C path."""
     last = None
     for attempt in (1, 2):
         try:
+            b = fresh_broker()
             if side == "BUY":
-                return broker.buy_limit(sym, qty, px, EXCHANGE[sym]), broker
-            return broker.sell_limit(sym, qty, px, EXCHANGE[sym]), broker
+                ack = b.buy_limit(sym, qty, px, EXCHANGE[sym])
+            else:
+                ack = b.sell_limit(sym, qty, px, EXCHANGE[sym])
+            return ack
         except Exception as e:
             last = e
             log("ORDER_RETRY", side=side, symbol=sym, qty=qty, limit=px, attempt=attempt, error=repr(e))
             if attempt == 2:
                 raise
             time.sleep(1.5)
-            broker = KiwoomUSMockBroker()  # new instance => fresh token/context
     raise last
 
 
@@ -189,7 +209,6 @@ def main() -> int:
     except BlockingIOError:
         raise SystemExit("another DBB mock runner is already active")
 
-    broker = KiwoomUSMockBroker()
     eng = DoubleBollingerV2()
     pair = DoubleBollingerPairV2(eng)
     qty_default = max(2, int(os.getenv("DBB_MOCK_QTY", "2") or 2))
@@ -197,10 +216,11 @@ def main() -> int:
     last_eval_bar = None
     last_recon = 0.0
 
-    log("START", qty=qty_default, recon_sec=RECON_SEC, state=str(STATE_PATH), log=str(LOG_PATH), account_polling="60S_RECON_PLUS_EVENT")
+    log("START", qty=qty_default, recon_sec=RECON_SEC, state=str(STATE_PATH), log=str(LOG_PATH), account_polling="60S_RECON_PLUS_EVENT", bar_limits=list(BAR_LIMITS), fresh_broker_orders=True)
 
     while True:
         try:
+            t0 = time.monotonic()
             bars = {s: completed_bars(s) for s in ("SOXL", "SOXS")}
             if any(v is None for v in bars.values()):
                 log("WAIT_DATA", soxl=bars["SOXL"] is not None, soxs=bars["SOXS"] is not None)
@@ -209,10 +229,8 @@ def main() -> int:
 
             bar_key = max(str(bars[s].iloc[-1]["time"]) for s in bars)
 
-            # Reconcile real mock-account holdings every 60s. This catches manual
-            # trades without hammering Kiwoom on every loop.
             if time.monotonic() - last_recon >= RECON_SEC:
-                hs = pair_holdings(broker)
+                hs = pair_holdings()
                 last_recon = time.monotonic()
                 if len(hs) > 1:
                     log("ERROR_BOTH_SIDES_HELD", holdings=hs)
@@ -230,22 +248,23 @@ def main() -> int:
                     log("ACCOUNT_FLAT_CONFIRMED")
 
             if bar_key == last_eval_bar:
-                time.sleep(3)
+                time.sleep(2)
                 continue
             last_eval_bar = bar_key
 
             if not persisted:
                 r = pair.evaluate_flat_pair(bars)
-                log("FLAT_EVAL", bar=bar_key, symbol=r.symbol, action=r.action.value, reason=r.reason, price=r.price, score=r.score)
+                log("FLAT_EVAL", bar=bar_key, symbol=r.symbol, action=r.action.value, reason=r.reason, price=r.price, score=r.score, eval_ms=round((time.monotonic()-t0)*1000,1))
                 if r.action != Action.ENTER:
                     continue
 
                 sym = r.symbol
                 px = marketable_price(float(r.price), "BUY")
-                ack, broker = order_with_retry(broker, "BUY", sym, qty_default, px)
+                log("BUY_TRIGGER", symbol=sym, qty=qty_default, limit=px, score=r.score, reason=r.reason)
+                ack = order_with_retry("BUY", sym, qty_default, px)
                 log("BUY_SENT", symbol=sym, qty=qty_default, limit=px, score=r.score, reason=r.reason, ack=ack)
                 time.sleep(3)
-                h = holding(broker, sym)
+                h = holding(sym)
                 if h:
                     stop = float(r.stop or (h["avg"] * 0.99))
                     st = PositionState(symbol=sym)
@@ -261,10 +280,10 @@ def main() -> int:
             sym = st.symbol.upper()
             r = eng.evaluate_open(st, bars[sym])
             current_qty = int(persisted.get("current_qty") or persisted.get("initial_qty") or qty_default)
-            log("OPEN_EVAL", bar=bar_key, symbol=sym, qty=current_qty, action=r.action.value, reason=r.reason, price=r.price)
+            log("OPEN_EVAL", bar=bar_key, symbol=sym, qty=current_qty, action=r.action.value, reason=r.reason, price=r.price, eval_ms=round((time.monotonic()-t0)*1000,1))
 
             if r.action == Action.PARTIAL_EXIT:
-                h = holding(broker, sym)
+                h = holding(sym)
                 if not h:
                     persisted = {}
                     STATE_PATH.unlink(missing_ok=True)
@@ -272,10 +291,11 @@ def main() -> int:
                     continue
                 sell_qty = max(1, min(h["qty"] - 1 if h["qty"] > 1 else 1, int(round(h["qty"] * float(r.exit_fraction or 0.5)))))
                 px = marketable_price(float(r.price), "SELL")
-                ack, broker = order_with_retry(broker, "SELL", sym, sell_qty, px)
+                log("PARTIAL_SELL_TRIGGER", symbol=sym, qty=sell_qty, limit=px, reason=r.reason)
+                ack = order_with_retry("SELL", sym, sell_qty, px)
                 log("PARTIAL_SELL_SENT", symbol=sym, qty=sell_qty, limit=px, reason=r.reason, ack=ack)
                 time.sleep(3)
-                h2 = holding(broker, sym)
+                h2 = holding(sym)
                 if h2:
                     st.partial_exit(float(r.exit_fraction or 0.5))
                     persisted = state_to_dict(st, int(persisted.get("initial_qty") or qty_default), h2["qty"], bar_key)
@@ -287,17 +307,18 @@ def main() -> int:
                     log("POSITION_CLOSED_AFTER_PARTIAL", symbol=sym)
 
             elif r.action == Action.FULL_EXIT:
-                h = holding(broker, sym)
+                h = holding(sym)
                 if not h:
                     persisted = {}
                     STATE_PATH.unlink(missing_ok=True)
                     log("POSITION_ALREADY_FLAT", symbol=sym)
                     continue
                 px = marketable_price(float(r.price), "SELL")
-                ack, broker = order_with_retry(broker, "SELL", sym, h["qty"], px)
+                log("FULL_SELL_TRIGGER", symbol=sym, qty=h["qty"], limit=px, reason=r.reason)
+                ack = order_with_retry("SELL", sym, h["qty"], px)
                 log("FULL_SELL_SENT", symbol=sym, qty=h["qty"], limit=px, reason=r.reason, ack=ack)
                 time.sleep(3)
-                h2 = holding(broker, sym)
+                h2 = holding(sym)
                 if not h2:
                     persisted = {}
                     STATE_PATH.unlink(missing_ok=True)

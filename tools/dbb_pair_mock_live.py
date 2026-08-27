@@ -67,8 +67,30 @@ def completed_bars(sym: str):
     return x if len(x) >= 40 else None
 
 
+def balance_with_backoff(broker: KiwoomUSMockBroker, sym: str, retries: int = 4):
+    """Critical account read with 429-aware exponential backoff.
+
+    The runner deliberately avoids routine account polling. This helper is used
+    only at startup reconciliation, immediately before a new BUY, and before a
+    SELL/after an order acknowledgement.
+    """
+    delay = 2.0
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            return broker.balance(sym, EXCHANGE[sym])
+        except Exception as e:
+            last = e
+            if "429" not in repr(e) or attempt >= retries:
+                raise
+            log("ACCOUNT_429_BACKOFF", symbol=sym, attempt=attempt, sleep_sec=delay)
+            time.sleep(delay)
+            delay *= 2.0
+    raise last  # pragma: no cover
+
+
 def holding(broker: KiwoomUSMockBroker, sym: str) -> dict[str, Any] | None:
-    r = broker.balance(sym, EXCHANGE[sym])
+    r = balance_with_backoff(broker, sym)
     for x in r.get("result_list") or []:
         if str(x.get("stk_cd") or "").upper() == sym:
             qty = int(str(x.get("sell_alowq") or x.get("poss_qty") or "0") or "0")
@@ -85,11 +107,12 @@ def holding(broker: KiwoomUSMockBroker, sym: str) -> dict[str, Any] | None:
 
 def pair_holdings(broker: KiwoomUSMockBroker):
     out = []
-    for sym in ("SOXL", "SOXS"):
+    for idx, sym in enumerate(("SOXL", "SOXS")):
         h = holding(broker, sym)
         if h:
             out.append(h)
-        time.sleep(0.3)
+        if idx == 0:
+            time.sleep(1.2)
     return out
 
 
@@ -127,6 +150,17 @@ def state_to_dict(st: PositionState, initial_qty: int, current_qty: int, last_ba
     }
 
 
+def rebuild_from_holding(h: dict[str, Any], bar_key: str, qty_default: int) -> dict[str, Any]:
+    sym = h["symbol"]
+    avg = float(h["avg"] or h["price"])
+    st = PositionState(symbol=sym)
+    st.open(avg, avg * 0.99, opened_at=bar_key)
+    d = state_to_dict(st, max(qty_default, h["qty"]), h["qty"], bar_key)
+    save_state(d)
+    log("STATE_REBUILT", holding=h)
+    return d
+
+
 def main() -> int:
     if not truthy("DBB_MOCK_AUTO"):
         raise SystemExit("DBB_MOCK_AUTO is not enabled")
@@ -148,7 +182,28 @@ def main() -> int:
     persisted = load_state()
     last_eval_bar = None
 
-    log("START", qty=qty_default, state=str(STATE_PATH), log=str(LOG_PATH))
+    log("START", qty=qty_default, state=str(STATE_PATH), log=str(LOG_PATH), account_polling="EVENT_DRIVEN")
+
+    # One account reconciliation at process startup only. After this, a flat
+    # runner does zero account reads until an ENTER signal actually appears.
+    try:
+        startup_holdings = pair_holdings(broker)
+        if len(startup_holdings) > 1:
+            log("ERROR_BOTH_SIDES_HELD", holdings=startup_holdings)
+            raise SystemExit("both SOXL and SOXS are held; manual cleanup required")
+        if startup_holdings:
+            h0 = startup_holdings[0]
+            if not persisted or persisted.get("symbol") != h0["symbol"]:
+                persisted = rebuild_from_holding(h0, "STARTUP_RECONCILE", qty_default)
+        elif persisted:
+            persisted = {}
+            STATE_PATH.unlink(missing_ok=True)
+            log("STALE_STATE_CLEARED")
+        else:
+            log("ACCOUNT_FLAT_CONFIRMED")
+    except Exception as e:
+        log("STARTUP_RECONCILE_ERROR", error=repr(e))
+        time.sleep(5)
 
     while True:
         try:
@@ -164,48 +219,56 @@ def main() -> int:
                 continue
             last_eval_bar = bar_key
 
-            hs = pair_holdings(broker)
-            if len(hs) > 1:
-                log("ERROR_BOTH_SIDES_HELD", holdings=hs)
-                time.sleep(10)
-                continue
-
-            if not hs:
-                persisted = {}
-                if STATE_PATH.exists():
-                    STATE_PATH.unlink(missing_ok=True)
+            # FLAT: evaluate the DBB pair first. There are no Kiwoom account
+            # calls on ordinary HOLD bars. Account reconciliation is performed
+            # only when the strategy is actually about to send a BUY.
+            if not persisted:
                 r = pair.evaluate_flat_pair(bars)
                 log("FLAT_EVAL", bar=bar_key, symbol=r.symbol, action=r.action.value, reason=r.reason, price=r.price, score=r.score)
-                if r.action == Action.ENTER:
-                    sym = r.symbol
-                    px = marketable_price(float(r.price), "BUY")
-                    ack = broker.buy_limit(sym, qty_default, px, EXCHANGE[sym])
-                    log("BUY_SENT", symbol=sym, qty=qty_default, limit=px, score=r.score, reason=r.reason, ack=ack)
-                    time.sleep(3)
-                    h = holding(broker, sym)
-                    if h:
-                        stop = float(r.stop or (h["avg"] * 0.99))
-                        st = PositionState(symbol=sym)
-                        st.open(h["avg"], stop, opened_at=bar_key)
-                        persisted = state_to_dict(st, qty_default, h["qty"], bar_key)
-                        save_state(persisted)
-                        log("BUY_FILLED", holding=h, stop=stop)
+                if r.action != Action.ENTER:
+                    continue
+
+                hs = pair_holdings(broker)
+                if len(hs) > 1:
+                    log("ERROR_BOTH_SIDES_HELD", holdings=hs)
+                    continue
+                if hs:
+                    persisted = rebuild_from_holding(hs[0], bar_key, qty_default)
+                    continue
+
+                sym = r.symbol
+                px = marketable_price(float(r.price), "BUY")
+                ack = broker.buy_limit(sym, qty_default, px, EXCHANGE[sym])
+                log("BUY_SENT", symbol=sym, qty=qty_default, limit=px, score=r.score, reason=r.reason, ack=ack)
+                time.sleep(3)
+                h = holding(broker, sym)
+                if h:
+                    stop = float(r.stop or (h["avg"] * 0.99))
+                    st = PositionState(symbol=sym)
+                    st.open(h["avg"], stop, opened_at=bar_key)
+                    persisted = state_to_dict(st, qty_default, h["qty"], bar_key)
+                    save_state(persisted)
+                    log("BUY_FILLED", holding=h, stop=stop)
+                else:
+                    log("BUY_NOT_YET_VISIBLE", symbol=sym, ack=ack)
                 continue
 
-            h = hs[0]
-            sym = h["symbol"]
-            if not persisted or persisted.get("symbol") != sym:
-                st = PositionState(symbol=sym)
-                avg = float(h["avg"] or h["price"])
-                st.open(avg, avg * 0.99, opened_at=bar_key)
-                persisted = state_to_dict(st, h["qty"], h["qty"], bar_key)
-                save_state(persisted)
-                log("STATE_REBUILT", holding=h)
+            # OPEN: evaluate entirely from local state and market data. No
+            # account request is made on HOLD bars. We query Kiwoom only when
+            # an actual sell decision has been produced.
             st = state_from_dict(persisted)
+            sym = st.symbol.upper()
             r = eng.evaluate_open(st, bars[sym])
-            log("OPEN_EVAL", bar=bar_key, symbol=sym, qty=h["qty"], action=r.action.value, reason=r.reason, price=r.price)
+            current_qty = int(persisted.get("current_qty") or persisted.get("initial_qty") or qty_default)
+            log("OPEN_EVAL", bar=bar_key, symbol=sym, qty=current_qty, action=r.action.value, reason=r.reason, price=r.price)
 
             if r.action == Action.PARTIAL_EXIT:
+                h = holding(broker, sym)
+                if not h:
+                    STATE_PATH.unlink(missing_ok=True)
+                    persisted = {}
+                    log("POSITION_ALREADY_FLAT", symbol=sym)
+                    continue
                 sell_qty = max(1, min(h["qty"] - 1 if h["qty"] > 1 else 1, int(round(h["qty"] * float(r.exit_fraction or 0.5)))))
                 px = marketable_price(float(r.price), "SELL")
                 ack = broker.sell_limit(sym, sell_qty, px, EXCHANGE[sym])
@@ -223,6 +286,12 @@ def main() -> int:
                     log("POSITION_CLOSED_AFTER_PARTIAL", symbol=sym)
 
             elif r.action == Action.FULL_EXIT:
+                h = holding(broker, sym)
+                if not h:
+                    STATE_PATH.unlink(missing_ok=True)
+                    persisted = {}
+                    log("POSITION_ALREADY_FLAT", symbol=sym)
+                    continue
                 px = marketable_price(float(r.price), "SELL")
                 ack = broker.sell_limit(sym, h["qty"], px, EXCHANGE[sym])
                 log("FULL_SELL_SENT", symbol=sym, qty=h["qty"], limit=px, reason=r.reason, ack=ack)
@@ -233,6 +302,8 @@ def main() -> int:
                     persisted = {}
                     log("FULL_SELL_FILLED", symbol=sym)
                 else:
+                    persisted["current_qty"] = h2["qty"]
+                    save_state(persisted)
                     log("FULL_SELL_PENDING", holding=h2)
             else:
                 persisted["high_watermark"] = st.high_watermark

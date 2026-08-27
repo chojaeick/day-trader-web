@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
-from tools.v240d_precomputed_fast_validate import load_1m_bars, run_williams, run_dbb
+from tools.v240d_precomputed_fast_validate import load_1m_bars, prep_symbol, replay_williams, replay_dbb, SYMBOLS
 from tools.v240_validate_soxl_soxs_two_engines import metrics
 
 
@@ -38,9 +38,10 @@ def main():
     bars,table=load_1m_bars(a.db,0)
     dates=sorted(bars["date_et"].unique())[-a.max_days:]
     bars=bars[bars["date_et"].isin(dates)].copy().reset_index(drop=True)
+    data={sym:prep_symbol(bars[bars["symbol"]==sym].copy()) for sym in SYMBOLS}
     print(f"V240E SOURCE={table} DAYS={len(dates)} BARS={len(bars)}",flush=True)
-    wt=run_williams(bars,a.cost_bps,a.fallback_risk_pct,a.max_swing_risk_pct)
-    dt=run_dbb(bars,a.cost_bps,a.fallback_risk_pct,a.max_swing_risk_pct)
+    wt=replay_williams(data,a.fallback_risk_pct,a.max_swing_risk_pct,a.cost_bps)
+    dt=replay_dbb(data,a.fallback_risk_pct,a.max_swing_risk_pct,a.cost_bps)
     wm=metrics(wt); dm=metrics(dt)
     print("WILLIAMS_METRICS=",json.dumps(wm,ensure_ascii=False),flush=True)
     print("DOUBLE_BOLLINGER_METRICS=",json.dumps(dm,ensure_ascii=False),flush=True)

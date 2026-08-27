@@ -19,10 +19,11 @@ from live_server.strategy_core_v1 import Action, PositionPhase, PositionState
 from live_server.kiwoom_us_mock_broker import KiwoomUSMockBroker
 
 LIMITS = {"SOXL": 200000, "SOXS": 80000}
-EXCHANGE = {"SOXL": "NY", "SOXS": "NY"}  # tested Kiwoom mock route
+EXCHANGE = {"SOXL": "NY", "SOXS": "NY"}
 STATE_PATH = Path(os.getenv("DBB_MOCK_STATE_PATH", str(ROOT / "dbb_pair_mock_state.json")))
 LOG_PATH = Path(os.getenv("DBB_MOCK_LOG_PATH", str(ROOT / "dbb_pair_mock_live.jsonl")))
 LOCK_PATH = Path(os.getenv("DBB_MOCK_LOCK_PATH", "/tmp/dbb_pair_mock_live.lock"))
+RECON_SEC = max(30, int(os.getenv("DBB_MOCK_RECON_SEC", "60") or 60))
 
 
 def truthy(name: str, default: str = "0") -> bool:
@@ -68,12 +69,6 @@ def completed_bars(sym: str):
 
 
 def balance_with_backoff(broker: KiwoomUSMockBroker, sym: str, retries: int = 4):
-    """Critical account read with 429-aware exponential backoff.
-
-    The runner deliberately avoids routine account polling. This helper is used
-    only at startup reconciliation, immediately before a new BUY, and before a
-    SELL/after an order acknowledgement.
-    """
     delay = 2.0
     last = None
     for attempt in range(1, retries + 1):
@@ -86,7 +81,7 @@ def balance_with_backoff(broker: KiwoomUSMockBroker, sym: str, retries: int = 4)
             log("ACCOUNT_429_BACKOFF", symbol=sym, attempt=attempt, sleep_sec=delay)
             time.sleep(delay)
             delay *= 2.0
-    raise last  # pragma: no cover
+    raise last
 
 
 def holding(broker: KiwoomUSMockBroker, sym: str) -> dict[str, Any] | None:
@@ -122,6 +117,26 @@ def marketable_price(price: float, side: str) -> float:
     return round(px, 2 if px >= 1 else 4)
 
 
+def order_with_retry(broker: KiwoomUSMockBroker, side: str, sym: str, qty: int, px: float):
+    """Send order through the same proven broker path as the round-trip test.
+    One fresh-token retry is allowed for transient Kiwoom mock context errors.
+    """
+    last = None
+    for attempt in (1, 2):
+        try:
+            if side == "BUY":
+                return broker.buy_limit(sym, qty, px, EXCHANGE[sym]), broker
+            return broker.sell_limit(sym, qty, px, EXCHANGE[sym]), broker
+        except Exception as e:
+            last = e
+            log("ORDER_RETRY", side=side, symbol=sym, qty=qty, limit=px, attempt=attempt, error=repr(e))
+            if attempt == 2:
+                raise
+            time.sleep(1.5)
+            broker = KiwoomUSMockBroker()  # new instance => fresh token/context
+    raise last
+
+
 def state_from_dict(d: dict[str, Any]) -> PositionState:
     st = PositionState(symbol=str(d["symbol"]))
     st.phase = PositionPhase(str(d.get("phase") or "OPEN"))
@@ -151,9 +166,8 @@ def state_to_dict(st: PositionState, initial_qty: int, current_qty: int, last_ba
 
 
 def rebuild_from_holding(h: dict[str, Any], bar_key: str, qty_default: int) -> dict[str, Any]:
-    sym = h["symbol"]
     avg = float(h["avg"] or h["price"])
-    st = PositionState(symbol=sym)
+    st = PositionState(symbol=h["symbol"])
     st.open(avg, avg * 0.99, opened_at=bar_key)
     d = state_to_dict(st, max(qty_default, h["qty"]), h["qty"], bar_key)
     save_state(d)
@@ -181,29 +195,9 @@ def main() -> int:
     qty_default = max(2, int(os.getenv("DBB_MOCK_QTY", "2") or 2))
     persisted = load_state()
     last_eval_bar = None
+    last_recon = 0.0
 
-    log("START", qty=qty_default, state=str(STATE_PATH), log=str(LOG_PATH), account_polling="EVENT_DRIVEN")
-
-    # One account reconciliation at process startup only. After this, a flat
-    # runner does zero account reads until an ENTER signal actually appears.
-    try:
-        startup_holdings = pair_holdings(broker)
-        if len(startup_holdings) > 1:
-            log("ERROR_BOTH_SIDES_HELD", holdings=startup_holdings)
-            raise SystemExit("both SOXL and SOXS are held; manual cleanup required")
-        if startup_holdings:
-            h0 = startup_holdings[0]
-            if not persisted or persisted.get("symbol") != h0["symbol"]:
-                persisted = rebuild_from_holding(h0, "STARTUP_RECONCILE", qty_default)
-        elif persisted:
-            persisted = {}
-            STATE_PATH.unlink(missing_ok=True)
-            log("STALE_STATE_CLEARED")
-        else:
-            log("ACCOUNT_FLAT_CONFIRMED")
-    except Exception as e:
-        log("STARTUP_RECONCILE_ERROR", error=repr(e))
-        time.sleep(5)
+    log("START", qty=qty_default, recon_sec=RECON_SEC, state=str(STATE_PATH), log=str(LOG_PATH), account_polling="60S_RECON_PLUS_EVENT")
 
     while True:
         try:
@@ -214,31 +208,41 @@ def main() -> int:
                 continue
 
             bar_key = max(str(bars[s].iloc[-1]["time"]) for s in bars)
+
+            # Reconcile real mock-account holdings every 60s. This catches manual
+            # trades without hammering Kiwoom on every loop.
+            if time.monotonic() - last_recon >= RECON_SEC:
+                hs = pair_holdings(broker)
+                last_recon = time.monotonic()
+                if len(hs) > 1:
+                    log("ERROR_BOTH_SIDES_HELD", holdings=hs)
+                    time.sleep(5)
+                    continue
+                if hs:
+                    h0 = hs[0]
+                    if not persisted or persisted.get("symbol") != h0["symbol"] or int(persisted.get("current_qty") or 0) != h0["qty"]:
+                        persisted = rebuild_from_holding(h0, bar_key, qty_default)
+                elif persisted:
+                    persisted = {}
+                    STATE_PATH.unlink(missing_ok=True)
+                    log("ACCOUNT_FLAT_STATE_CLEARED")
+                else:
+                    log("ACCOUNT_FLAT_CONFIRMED")
+
             if bar_key == last_eval_bar:
                 time.sleep(3)
                 continue
             last_eval_bar = bar_key
 
-            # FLAT: evaluate the DBB pair first. There are no Kiwoom account
-            # calls on ordinary HOLD bars. Account reconciliation is performed
-            # only when the strategy is actually about to send a BUY.
             if not persisted:
                 r = pair.evaluate_flat_pair(bars)
                 log("FLAT_EVAL", bar=bar_key, symbol=r.symbol, action=r.action.value, reason=r.reason, price=r.price, score=r.score)
                 if r.action != Action.ENTER:
                     continue
 
-                hs = pair_holdings(broker)
-                if len(hs) > 1:
-                    log("ERROR_BOTH_SIDES_HELD", holdings=hs)
-                    continue
-                if hs:
-                    persisted = rebuild_from_holding(hs[0], bar_key, qty_default)
-                    continue
-
                 sym = r.symbol
                 px = marketable_price(float(r.price), "BUY")
-                ack = broker.buy_limit(sym, qty_default, px, EXCHANGE[sym])
+                ack, broker = order_with_retry(broker, "BUY", sym, qty_default, px)
                 log("BUY_SENT", symbol=sym, qty=qty_default, limit=px, score=r.score, reason=r.reason, ack=ack)
                 time.sleep(3)
                 h = holding(broker, sym)
@@ -253,9 +257,6 @@ def main() -> int:
                     log("BUY_NOT_YET_VISIBLE", symbol=sym, ack=ack)
                 continue
 
-            # OPEN: evaluate entirely from local state and market data. No
-            # account request is made on HOLD bars. We query Kiwoom only when
-            # an actual sell decision has been produced.
             st = state_from_dict(persisted)
             sym = st.symbol.upper()
             r = eng.evaluate_open(st, bars[sym])
@@ -265,13 +266,13 @@ def main() -> int:
             if r.action == Action.PARTIAL_EXIT:
                 h = holding(broker, sym)
                 if not h:
-                    STATE_PATH.unlink(missing_ok=True)
                     persisted = {}
+                    STATE_PATH.unlink(missing_ok=True)
                     log("POSITION_ALREADY_FLAT", symbol=sym)
                     continue
                 sell_qty = max(1, min(h["qty"] - 1 if h["qty"] > 1 else 1, int(round(h["qty"] * float(r.exit_fraction or 0.5)))))
                 px = marketable_price(float(r.price), "SELL")
-                ack = broker.sell_limit(sym, sell_qty, px, EXCHANGE[sym])
+                ack, broker = order_with_retry(broker, "SELL", sym, sell_qty, px)
                 log("PARTIAL_SELL_SENT", symbol=sym, qty=sell_qty, limit=px, reason=r.reason, ack=ack)
                 time.sleep(3)
                 h2 = holding(broker, sym)
@@ -281,25 +282,25 @@ def main() -> int:
                     save_state(persisted)
                     log("PARTIAL_SELL_FILLED", holding=h2)
                 else:
-                    STATE_PATH.unlink(missing_ok=True)
                     persisted = {}
+                    STATE_PATH.unlink(missing_ok=True)
                     log("POSITION_CLOSED_AFTER_PARTIAL", symbol=sym)
 
             elif r.action == Action.FULL_EXIT:
                 h = holding(broker, sym)
                 if not h:
-                    STATE_PATH.unlink(missing_ok=True)
                     persisted = {}
+                    STATE_PATH.unlink(missing_ok=True)
                     log("POSITION_ALREADY_FLAT", symbol=sym)
                     continue
                 px = marketable_price(float(r.price), "SELL")
-                ack = broker.sell_limit(sym, h["qty"], px, EXCHANGE[sym])
+                ack, broker = order_with_retry(broker, "SELL", sym, h["qty"], px)
                 log("FULL_SELL_SENT", symbol=sym, qty=h["qty"], limit=px, reason=r.reason, ack=ack)
                 time.sleep(3)
                 h2 = holding(broker, sym)
                 if not h2:
-                    STATE_PATH.unlink(missing_ok=True)
                     persisted = {}
+                    STATE_PATH.unlink(missing_ok=True)
                     log("FULL_SELL_FILLED", symbol=sym)
                 else:
                     persisted["current_qty"] = h2["qty"]
@@ -315,8 +316,6 @@ def main() -> int:
         except Exception as e:
             log("LOOP_ERROR", error=repr(e))
             time.sleep(5)
-
-    return 0
 
 
 if __name__ == "__main__":

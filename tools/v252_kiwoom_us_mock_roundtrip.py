@@ -8,9 +8,14 @@ import sys
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# Runtime credentials already used by the live server. Load them without printing secrets.
+load_dotenv('/home/ubuntu/day-trader-api/.env', override=False)
 
 from live_server.kiwoom_us_mock_broker import KiwoomUSMockBroker
 

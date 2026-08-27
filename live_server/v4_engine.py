@@ -5,6 +5,15 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from .analytics import ticks_to_bars, multi_timeframe_signal
 
+# V140 frozen USA Williams paper evaluator (V139 replay-equivalent)
+try:
+    from . import williams_usa_frozen as _wuf
+except Exception:
+    _wuf=None
+from .paper_trading import PaperBroker
+from .rebound_engine import evaluate_rebound
+from .position_intelligence import build_position_intelligence, load_portfolio_config
+
 SEMI={'SOXL','SOXS','SMH','NVDA','AMD','AVGO','MU','ARM','TSM','ASML','INTC','QCOM'}
 TRACK_LIMIT=5
 POWER_ALERT_DELTA=12
@@ -294,6 +303,10 @@ def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta
 
     # ENTRY is NOT loosened in V4.7.3.
 
+    # V4.8.13: price/volume confirmation drives live ENTRY.
+
+    # Power acceleration remains diagnostic only.
+
     trigger_core=bool(
 
         trigger_checks.get('green_1m')
@@ -302,7 +315,7 @@ def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta
 
         and trigger_checks.get('volume_expansion')
 
-        and trigger_checks.get('power_acceleration')
+        and trigger_checks.get('one_min_impulse')
 
     )
 
@@ -310,13 +323,13 @@ def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta
 
     entry=bool(
 
-        setup_ok
+        setup_count>=4
+
+        and nonpower_trigger_count>=4
 
         and trigger_core
 
-        and power>=68
-
-        and delta>=4
+        and power>=50
 
         and chase_ok
 
@@ -390,7 +403,7 @@ def _usa_entry_trigger(price,vwap,ema9,ema20,rsi,over_vwap,vol_ratio,power,delta
 
         'ready_power_min':40,
 
-        'entry_power_min':68,
+        'entry_power_min':50,
 
 
 
@@ -1038,11 +1051,143 @@ class V4Store:
 
 class CleanEngine:
     def __init__(self,db_path):
-        self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._kr_gate_cache={}; self._lock=threading.RLock()
+        self.store=V4Store(db_path); self.finder={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self.tracker={m:{'rows':[],'updated_at':None} for m in ('USA','KOREA')}; self._last={}; self._snap={}; self._rank={}; self._kr_gate_cache={}; self._lock=threading.RLock(); self._williams_mock_account_synced=False; self.paper=PaperBroker(db_path)
     def build_usa_finder(self,candidates,discovery,limit=5,db=None,commit=True,shadow_allow_unknown_quality=False,shadow_min_recent_bars=0):
         qmap={str(r.get('symbol') or '').upper():r for r in (discovery.get('rows') or [])}
         rows=[]
         inverse_syms={'SOXS','SQQQ'}
+
+
+
+        # V4.8.11 ETF PAIR BRIDGE LIVE
+
+        # Give benchmark, leveraged, and inverse ETFs an equal chance
+
+        # to enter the existing Finder scoring pipeline.
+
+        if db is not None and _session('USA')=='REGULAR':
+
+            try:
+
+                _existing={
+
+                    str(x.get('symbol') or '').upper()
+
+                    for x in (candidates or [])
+
+                }
+
+                _qmap={
+
+                    str(x.get('symbol') or '').upper():x
+
+                    for x in db.quotes()
+
+                }
+
+                _mmap={
+
+                    str(x.get('symbol') or '').upper():x
+
+                    for x in db.daily_metrics()
+
+                }
+
+
+
+                candidates=list(candidates or [])
+
+
+
+                for _sym in ('QQQ','TQQQ','SQQQ','SMH','SOXL','SOXS'):
+
+                    if _sym in _existing:
+
+                        continue
+
+
+
+                    _q=_qmap.get(_sym) or {}
+
+                    _m=_mmap.get(_sym) or {}
+
+
+
+                    _price=_f(_q.get('price'))
+
+                    _chg=_f(_q.get('change_pct'))
+
+                    _vol=_f(_q.get('volume'))
+
+
+
+                    _atr=_f(
+
+                        _m.get('atr_pct')
+
+                        or _m.get('atr5_pct')
+
+                        or _m.get('atr')
+
+                    )
+
+
+
+                    _avgvol=_f(
+
+                        _m.get('avg_volume')
+
+                        or _m.get('avg5_volume')
+
+                        or _m.get('avg20_volume')
+
+                    )
+
+
+
+                    if _price<=0 or _vol<=0:
+
+                        continue
+
+
+
+                    if _atr<=0:
+
+                        _atr=2.0
+
+
+
+                    _rvol=(_vol/_avgvol) if _avgvol>0 else 1.0
+
+
+
+                    candidates.append({
+
+                        'symbol':_sym,
+
+                        'price':_price,
+
+                        'change_pct':_chg,
+
+                        'dollar_volume':_price*_vol,
+
+                        'rvol':_rvol,
+
+                        'atr_pct':_atr,
+
+                        'score':50.0,
+
+                        'eligible':True,
+
+                        'core_etf_bridge':True,
+
+                    })
+
+            except Exception:
+
+                pass
+
+
         regime='NEUTRAL'
         for c in candidates or []:
             if c.get('market_regime'):
@@ -1225,8 +1370,9 @@ class CleanEngine:
                 else:
                     continue
             price=_f(c.get('price')); dv=_f(c.get('dollar_volume')); rvol=_f(c.get('rvol')); atr=abs(_f(c.get('atr_pct'))); chg=_f(c.get('change_pct'))
-            if price<5 or dv<20_000_000 or atr<=0 or atr>12:continue
-
+            # V4.8.12 Leveraged ETF ATR Cap
+            atr_cap=18 if sym in {'SOXL','SOXS'} else 12
+            if price<5 or dv<20_000_000 or atr<=0 or atr>atr_cap:continue
             liq=_clip((math.log10(max(dv,1))-7.3)/2*25,0,25)
             act=_clip((rvol-.5)/2.5*25,0,25)
             vol=20 if 2<=atr<=7 else 14 if 1<=atr<=10 else 7
@@ -1375,7 +1521,8 @@ class CleanEngine:
             ),
             reverse=True
         )
-        light_rows=rows[:20]
+        heavy_light_rows=rows[:20]
+        light_rows=rows[:40]
         for i,r in enumerate(light_rows,1):
             r['light_rank']=i
 
@@ -1383,7 +1530,7 @@ class CleanEngine:
         # C_HIGH_RISK names remain visible in Light20; they can enter Heavy5 only
         # while the strict continuation test is true.
         heavy_pool=[
-            r for r in light_rows
+            r for r in heavy_light_rows
             if r.get('quality')!='C_HIGH_RISK' or r.get('extreme_continue')
         ]
         # V4.6.2.1 fair-comparison guard:
@@ -1453,11 +1600,446 @@ class CleanEngine:
             if s and s not in out:out.append(s)
             if len(out)>=TRACK_LIMIT:break
         return out
+    # ========================================================
+
+    # V4.9.0C-4D FULL UNIVERSE Q2 LOGGER
+
+    #
+
+    # Shadow only.
+
+    # Scans DB-resident USA universe once per minute.
+
+    # Does NOT change Heavy Tracker, live ENTRY or Kakao.
+
+    # ========================================================
+
+    def _scan_q2_universe_shadow(
+
+        self,
+
+        db,
+
+        dmap,
+
+        qmap,
+
+        market_context,
+
+    ):
+
+        minute = _now()[:16]
+
+
+
+        if getattr(
+
+            self,
+
+            '_q2_universe_scan_minute',
+
+            None
+
+        ) == minute:
+
+            return
+
+
+
+        self._q2_universe_scan_minute = minute
+
+
+
+        states = getattr(
+
+            self,
+
+            '_q2_universe_states',
+
+            {}
+
+        )
+
+
+
+        scanned = 0
+
+        evaluated = 0
+
+        q2_good = 0
+
+        entries = 0
+
+        errors = 0
+
+
+
+        for sym, metric in dmap.items():
+
+
+
+            sym = str(sym or '').upper()
+
+
+
+            if not sym:
+
+                continue
+
+
+
+            if not metric.get('daily_history_ok'):
+
+                continue
+
+
+
+            scanned += 1
+
+
+
+            try:
+
+                ticks = db.ticks(sym, 3000)
+
+
+
+                if not ticks:
+
+                    continue
+
+
+
+                b1 = ticks_to_bars(ticks, 1)
+
+                b5 = ticks_to_bars(ticks, 5)
+
+
+
+                if b1 is None or b5 is None:
+
+                    continue
+
+
+
+                if len(b1) < 20 or len(b5) < 4:
+
+                    continue
+
+
+
+                shadow = evaluate_rebound(
+
+                    sym,
+
+                    b1,
+
+                    b5,
+
+                    qmap.get(sym) or {},
+
+                    metric,
+
+                    market_context,
+
+                )
+
+
+
+                evaluated += 1
+
+
+
+                q2_score = _f(
+
+                    shadow.get(
+
+                        'quality2_shadow_score'
+
+                    )
+
+                )
+
+
+
+                q2_state = shadow.get(
+
+                    'rebound_state_q2_shadow'
+
+                )
+
+
+
+                if q2_score >= 75:
+
+                    q2_good += 1
+
+
+
+                prev_state = states.get(sym)
+
+
+
+                # First observation only seeds state.
+
+                # No false ENTRY event after service restart.
+
+                if (
+
+                    prev_state is not None
+
+                    and prev_state != q2_state
+
+                    and q2_state == 'REBOUND_ENTRY'
+
+                ):
+
+                    payload = {
+
+                        'market': 'USA',
+
+                        'symbol': sym,
+
+                        'price': shadow.get('price'),
+
+                        'state': q2_state,
+
+                        'quality2_shadow_score': q2_score,
+
+                        'quality2_grade':
+
+                            shadow.get('quality2_grade'),
+
+                        'pullback_score':
+
+                            shadow.get('pullback_score'),
+
+                        'rebound_score':
+
+                            shadow.get('rebound_score'),
+
+                        'risk_pct':
+
+                            shadow.get('risk_pct'),
+
+                        'rebound_shadow': shadow,
+
+                        'source':
+
+                            'Q2_FULL_UNIVERSE_SHADOW',
+
+                    }
+
+
+
+                    self.store.event(
+
+                        'USA',
+
+                        sym,
+
+                        'Q2_REBOUND_ENTRY_SHADOW',
+
+                        prev_state,
+
+                        q2_state,
+
+                        power=None,
+
+                        message=(
+
+                            f'{sym} Q2 '
+
+                            f'{prev_state}→{q2_state}'
+
+                        ),
+
+                        payload=payload,
+
+                    )
+
+
+
+                    entries += 1
+
+
+
+                states[sym] = q2_state
+
+
+
+            except Exception:
+
+                errors += 1
+
+
+
+        self._q2_universe_states = states
+
+
+
+        self._q2_universe_scan_stats = {
+
+            'minute': minute,
+
+            'scanned': scanned,
+
+            'evaluated': evaluated,
+
+            'quality2_75plus': q2_good,
+
+            'new_entries': entries,
+
+            'errors': errors,
+
+        }
+
+
+
+
+
     def refresh_usa_tracker(self,db):
-        syms=self.tracked_symbols('USA'); fmap={r['symbol']:r for r in self.finder['USA']['rows']}; pmap={p['symbol']:p for p in self.store.positions('USA')}; qmap={q.get('symbol'):q for q in db.quotes()}; rows=[]
-        for sym in syms:rows.append(self._usa_row(sym,db.ticks(sym,40000),multi_timeframe_signal(sym,db.ticks(sym,40000),db.quotes()),qmap,fmap.get(sym),pmap.get(sym)))
-        rows.sort(key=_tracker_sort_key); self._finalize('USA',rows); return self.tracker['USA']
-    def _usa_row(self,sym,ticks,sig,qmap,finder,pos):
+
+        # V4.9.0C-2D LIVE REBOUND SHADOW
+
+        syms = self.tracked_symbols('USA')
+
+        fmap = {
+
+            r['symbol']: r
+
+            for r in self.finder['USA']['rows']
+
+        }
+
+        pmap = {
+
+            p['symbol']: p
+
+            for p in self.store.positions('USA')
+
+        }
+
+        qmap = {
+
+            q.get('symbol'): q
+
+            for q in db.quotes()
+
+        }
+
+    
+
+        daily_rows = db.daily_metrics() or []
+
+        dmap = {
+
+            str(r.get('symbol') or '').upper(): r
+
+            for r in daily_rows
+
+            if r.get('symbol')
+
+        }
+
+    
+
+        spy_metric = dmap.get('SPY') or {}
+
+        qqq_metric = dmap.get('QQQ') or {}
+
+        smh_metric = dmap.get('SMH') or {}
+
+    
+
+        market_context = {
+
+            'spy_return_20d_pct':
+
+                _f(spy_metric.get('return_20d_pct')),
+
+            'qqq_return_20d_pct':
+
+                _f(qqq_metric.get('return_20d_pct')),
+
+            'smh_return_20d_pct':
+
+                _f(smh_metric.get('return_20d_pct')),
+
+        }
+
+    
+
+        self._scan_q2_universe_shadow(
+
+            db,
+
+            dmap,
+
+            qmap,
+
+            market_context,
+
+        )
+
+
+
+        rows = []
+
+    
+
+        for sym in syms:
+
+            ticks = db.ticks(sym,40000)
+            if ticks:
+                _last_et_date = pd.to_datetime(ticks[-1]["ts"], utc=True).tz_convert("America/New_York").date()
+                ticks = [t for t in ticks if pd.to_datetime(t["ts"], utc=True).tz_convert("America/New_York").date() == _last_et_date]
+
+            sig = multi_timeframe_signal(
+
+                sym,
+
+                ticks,
+
+                db.quotes(),
+
+            )
+
+    
+
+            rows.append(
+
+                self._usa_row(
+
+                    sym,
+
+                    ticks,
+
+                    sig,
+
+                    qmap,
+
+                    fmap.get(sym),
+
+                    pmap.get(sym),
+
+                    dmap.get(sym) or {},
+
+                    market_context,
+
+                )
+
+            )
+
+    
+
+        rows.sort(key=_tracker_sort_key)
+
+        self._finalize('USA',rows)
+
+        return self.tracker['USA']
+
+    def _usa_row(self,sym,ticks,sig,qmap,finder,pos,metric=None,market_context=None):
         b1=ticks_to_bars(ticks,1); b5=ticks_to_bars(ticks,5); price=_f((qmap.get(sym) or {}).get('price') or (finder or {}).get('price')); sess=_session('USA'); integrity=_data_integrity_usa(price,b1,b5,sess); ind=sig.get('indicators') or {}; vwap=_f(ind.get('vwap')); ema9=_f(ind.get('ema9')); ema20=_f(ind.get('ema20')); rvol=_f(ind.get('rvol')); rsi=_f(ind.get('rsi14'),50)
         # Power V1: 5분 추세를 중심으로 하고 1분은 Trigger/순간 힘으로 사용.
         structure=(8 if price and vwap and price>vwap else -8 if price and vwap else 0)+(8 if ema9 and ema20 and ema9>ema20 else -8 if ema9 and ema20 else 0)
@@ -1520,7 +2102,706 @@ class CleanEngine:
             final_reason=f"SETUP · 5분 조건 {entry_gate['setup_count']}/{entry_gate['setup_total']} · 1분 파동 대기"
         else:
             final_reason=' · '.join(reason[:3]) or '뚜렷한 실시간 힘 없음'
-        return {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'entry_gate':entry_gate,'position_gate':position_gate,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
+        row = {'market':'USA','symbol':sym,'name':(finder or {}).get('name') or sym,'finder_rank':(finder or {}).get('rank'),'finder_score':(finder or {}).get('finder_score'),'position_open':bool(pos),'qty':_f((pos or {}).get('qty')),'avg_entry':_f((pos or {}).get('avg_entry')),'price':price,'direction':'LONG' if power>=18 else 'SHORT' if power<=-18 else 'NEUTRAL','power':power,'power_delta':delta,'power_label':('강한 상승' if power>=70 else '상승 우세' if power>=30 else '중립' if power>-30 else '하락 우세' if power>-70 else '강한 하락'),'state':state,'risk':risk,'data_integrity':integrity,'entry_gate':entry_gate,'position_gate':position_gate,'raw_power_before_gate':raw_power,'components':{'structure':round(structure,1),'volume':round(volume,1),'momentum':round(momentum,1),'market_sector':round(market,1),'risk_penalty':round(penalty,1),'rvol':round(rvol,2),'volume_ratio':round(vol_ratio,2),'vwap':vwap or None,'ema9':ema9 or None,'ema20':ema20 or None,'rsi':round(rsi,1)},'warning_floor':warn,'hard_floor':hard,'target1':t1,'target2':t2,'floor_mode':mode,'reason':final_reason,'session':sess,'updated_at':_now()}
+
+
+
+
+        # V4.9 POSITION INTELLIGENCE
+
+        # Advisory only · MANUAL ORDER ONLY · NO AUTO ORDER
+
+        try:
+
+            if pos and price and integrity.get('valid'):
+
+                _pcfg = load_portfolio_config()
+
+
+
+                row['position_intelligence'] = build_position_intelligence(
+
+                    price=price,
+
+                    entry=_f(pos.get('avg_entry')),
+
+                    qty=_f(pos.get('qty')),
+
+                    power=power,
+
+                    power_delta=delta,
+
+                    entry_power=_f(pos.get('entry_power'), power),
+
+                    peak_power=max(_f(pos.get('entry_power'), power), power),
+
+
+
+                    current_floor=_f(pos.get('current_floor')),
+
+                    warning_floor=_f(warn),
+
+                    hard_floor=_f(hard),
+
+                    high_watermark=_f(pos.get('high_watermark'), price),
+
+
+
+                    target1=_f(t1),
+
+                    target2=_f(t2),
+
+                    vwap=_f(vwap),
+
+
+
+                    total_capital=_pcfg.get('total_capital', 0),
+
+                    available_cash=_pcfg.get('available_cash'),
+
+                    max_position_pct=_pcfg.get('max_position_pct', 15),
+
+                    max_add_pct=_pcfg.get('max_add_pct', 5),
+
+                    risk_per_trade_pct=_pcfg.get('risk_per_trade_pct', 0.75),
+
+                    average_down_enabled=_pcfg.get('average_down_enabled', False),
+
+                )
+
+            else:
+
+                row['position_intelligence'] = {
+
+                    'enabled': False,
+
+                    'action': 'DATA_WAIT',
+
+                    'reason': 'Live data integrity invalid - no trading advice',
+
+                    'guards': {
+
+                        'manual_order_only': True,
+
+                        'auto_order': False
+
+                    }
+
+                }
+
+
+
+        except Exception as _pi_err:
+
+            row['position_intelligence'] = {
+
+                'enabled': False,
+
+                'error': str(_pi_err),
+
+                'guards': {
+
+                    'manual_order_only': True,
+
+                    'auto_order': False
+
+                }
+
+            }
+
+
+
+
+        # V4.9.0C-2D LIVE REBOUND SHADOW
+
+        # Shadow only. Existing Power/state/ENTRY remains authoritative.
+
+        try:
+
+            shadow = evaluate_rebound(
+
+                sym,
+
+                b1,
+
+                b5,
+
+                qmap.get(sym) or {},
+
+                metric or {},
+
+                market_context or {},
+
+            )
+
+        
+
+            row['quality_version'] = shadow.get('quality_version')
+
+            row['quality2_ready'] = shadow.get('quality2_ready')
+
+            row['quality2_shadow_score'] = shadow.get(
+
+                'quality2_shadow_score'
+
+            )
+
+            row['quality2_grade'] = shadow.get('quality2_grade')
+
+            row['quality2_watch'] = shadow.get('quality2_watch')
+
+            row['quality2_priority'] = shadow.get(
+
+                'quality2_priority'
+
+            )
+
+            row['quality2_parts'] = shadow.get('quality2_parts')
+
+            row['quality2_flags'] = shadow.get('quality2_flags')
+
+            row['quality2_daily'] = shadow.get('quality2_daily')
+
+        
+
+            row['rebound_state_shadow'] = shadow.get('state')
+
+            row['pullback_score_shadow'] = shadow.get(
+
+                'pullback_score'
+
+            )
+
+            row['rebound_score_shadow'] = shadow.get(
+
+                'rebound_score'
+
+            )
+
+            row['rebound_total_shadow'] = shadow.get(
+
+                'rebound_total'
+
+            )
+
+        
+
+            # Keep complete engine result for Replay/Audit.
+
+            row['rebound_shadow'] = shadow
+
+        
+
+        except Exception as e:
+
+            # Never break the live V4 tracker because Shadow failed.
+
+            row['rebound_shadow_error'] = str(e)[:300]
+
+        
+
+        # V161_FROZEN_CTX_WIRING: replay-equivalent USA paper context only.
+        row['williams_frozen_ctx']=self._v161_wire_usa_frozen_ctx(row,b1)
+        return row
+
+
+    def _williams_structure_state(self,b1,entry_price=None,start_time=None):
+        """Frozen Williams STRUCT0 live state candidate.
+
+        Causal only:
+        - confirm swing-low with 2 bars to the right
+        - support may only ratchet upward
+        - HOLD while latest close >= confirmed support
+        - EXIT_READY when latest close < support
+        No RSI/CCI/MACD exit and no re-entry logic.
+        """
+        out={
+            'mode':'STRUCT0_FROZEN_V92',
+            'state':'WATCH',
+            'support':None,
+            'support_updates':0,
+            'break':False,
+            'entry_price':_f(entry_price) if entry_price else None,
+            'last_close':None,
+            'bars':0,
+        }
+        if b1 is None or len(b1)<7:
+            return out
+        try:
+            b=b1.copy().reset_index(drop=True)
+            for col in ('open','high','low','close'):
+                b[col]=pd.to_numeric(b[col],errors='coerce')
+
+            # V118: only bars strictly after the BUY minute belong to this position.
+            # This discards all pre-entry STRUCT0 support and also excludes the partial
+            # entry minute. Kiwoom minute timestamps are YYYYMMDDHHMMSS-like strings.
+            if start_time and 'time' in b.columns:
+                start_digits=''.join(ch for ch in str(start_time) if ch.isdigit())
+                if len(start_digits)>=12:
+                    b['_v118_time']=b['time'].astype(str).str.replace(r'\D','',regex=True)
+                    b=b[b['_v118_time'].str.len()>=12]
+                    b=b[b['_v118_time'].str[:12] > start_digits[:12]]
+                    b=b.sort_values('_v118_time').reset_index(drop=True)
+
+            b=b.dropna(subset=['high','low','close']).reset_index(drop=True)
+            out['bars']=len(b)
+            out['structure_start_time']=start_time
+            if len(b)<7:return out
+
+            support=None; updates=0
+            # A swing at j is only usable when j+2 exists: fully causal.
+            for i in range(4,len(b)):
+                j=i-2
+                lo=_f(b.iloc[j]['low'])
+                if lo<=0:continue
+                window=[_f(b.iloc[k]['low'],float('inf')) for k in range(j-2,j+3)]
+                if lo<=min(window):
+                    if support is None:
+                        support=lo
+                    elif lo>support:
+                        support=lo; updates+=1
+            last=_f(b.iloc[-1]['close'])
+            out['last_close']=last or None
+            out['support']=support
+            out['support_updates']=updates
+            if support is None or last<=0:
+                return out
+            br=bool(last<support)
+            out['break']=br
+            out['state']='EXIT_READY' if br else 'HOLD'
+            return out
+        except Exception as e:
+            out['state']='DATA_INVALID'
+            out['error']=type(e).__name__
+            return out
+
+
+    def _kr_minute_chart_cached(self,sym,korea,interval=1,cache_seconds=8.0,min_spacing=0.24):
+        """Shared KR chart cache + throttle for ka10080.
+
+        Keeps the frozen Williams/shadow logic unchanged while avoiding burst
+        duplicate requests that exceed Kiwoom's per-API flow limit.
+        """
+        import time as _time
+        key=(str(sym),int(interval))
+        cache=getattr(self,'_kr_chart_cache_v104',None)
+        if cache is None:
+            cache={}
+            self._kr_chart_cache_v104=cache
+        now=_time.monotonic()
+        hit=cache.get(key)
+        if hit and (now-hit[0]) < float(cache_seconds):
+            return hit[1]
+
+        last=float(getattr(self,'_kr_chart_last_call_v104',0.0) or 0.0)
+        wait=float(min_spacing)-(now-last)
+        if wait>0:
+            _time.sleep(wait)
+        data=korea.minute_chart(sym,int(interval),max_pages=1)
+        self._kr_chart_last_call_v104=_time.monotonic()
+        cache[key]=(self._kr_chart_last_call_v104,data)
+        return data
+
+    def _williams_entry_from_gate(self,sym,gate,finder_rank=None):
+        empty={
+            'signal':False,
+            'stage':'DATA_WAIT',
+            'raw_cross':False,
+            'trigger':None,
+            'rsi2':None,
+            'finder_rank':finder_rank,
+            'source':'KOREA_SHADOW_GATE_REUSE',
+        }
+        try:
+            raw=(gate or {}).get('williams_signal_bars') or []
+            if len(raw)<3:
+                return empty
+            x=pd.DataFrame(raw)
+            need={'time','open','high','low','close'}
+            if not need.issubset(set(x.columns)):
+                empty['stage']='DATA_INVALID'
+                empty['columns']=[str(c) for c in x.columns]
+                return empty
+
+            # Kiwoom minute time is normally YYYYMMDDHHMMSS. Keep only valid numeric rows.
+            x=x.copy()
+            x['time']=x['time'].astype(str).str.replace(r'\\D','',regex=True)
+            for c in ('open','high','low','close'):
+                x[c]=pd.to_numeric(x[c],errors='coerce').abs()
+            x=x.dropna(subset=['open','high','low','close'])
+            x=x[x['time'].str.len()>=8]
+            if len(x)<3:
+                return empty
+            x=x.sort_values('time').reset_index(drop=True)
+            x['day']=x['time'].str[:8]
+            days=[d for d in x['day'].drop_duplicates().tolist() if d]
+            if len(days)<2:
+                empty['stage']='NEED_PREV_DAY'
+                return empty
+
+            cur_day=days[-1]
+            prev_day=days[-2]
+            prev=x[x['day']==prev_day]
+            cur=x[x['day']==cur_day]
+            if prev.empty or len(cur)<2:
+                return empty
+
+            prev_day_high=float(prev['high'].max())
+            prev_day_low=float(prev['low'].min())
+            day_open=float(cur.iloc[0]['open'])
+            prev_price=float(cur.iloc[-2]['close'])
+            current_price=float(cur.iloc[-1]['close'])
+            recent_closes=[float(v) for v in cur['close'].tail(30).tolist()]
+
+            # V110: causal same-day recovery for symbols that enter the live candidate pool
+            # after the actual Williams CrossUp already happened. Scan only bars that existed
+            # at each historical minute, compute RSI2 causally, and recover only a cross that
+            # is still inside the original 30-minute confirmation window.
+            trigger=day_open + 0.5*(prev_day_high-prev_day_low)
+            now_kst=_dt.now(_WILLIAMS_KST)
+            st=_WILLIAMS_STATE[(str(sym),now_kst.strftime('%Y%m%d'))]
+            recovered_cross_time=None
+            recovered_cross_age_min=None
+            recovered_cross_rsi2=None
+
+            if not st.get('signal_sent') and st.get('armed_at') is None and len(cur)>=2:
+                candidates=[]
+                closes_all=[float(v) for v in cur['close'].tolist()]
+                for i in range(1,len(cur)):
+                    p0=float(cur.iloc[i-1]['close'])
+                    p1=float(cur.iloc[i]['close'])
+                    if not (p0 <= trigger < p1):
+                        continue
+                    rsi_i=_williams_rsi2(closes_all[:i+1])
+                    if rsi_i is None or rsi_i <= 50.0:
+                        continue
+                    ts=str(cur.iloc[i]['time'])
+                    try:
+                        digits=''.join(ch for ch in ts if ch.isdigit())
+                        if len(digits)>=14:
+                            cross_dt=_dt.strptime(digits[:14],'%Y%m%d%H%M%S').replace(tzinfo=_WILLIAMS_KST)
+                        elif len(digits)>=12:
+                            cross_dt=_dt.strptime(digits[:12],'%Y%m%d%H%M').replace(tzinfo=_WILLIAMS_KST)
+                        else:
+                            continue
+                    except Exception:
+                        continue
+                    age=(now_kst-cross_dt).total_seconds()/60.0
+                    if 0.0 <= age <= 30.0:
+                        candidates.append((cross_dt,age,float(rsi_i)))
+
+                if candidates:
+                    cross_dt,age,rsi_i=max(candidates,key=lambda z:z[0])
+                    st['armed_at']=cross_dt
+                    recovered_cross_time=cross_dt.isoformat()
+                    recovered_cross_age_min=round(age,3)
+                    recovered_cross_rsi2=round(rsi_i,4)
+
+            out=williams_live_evaluate_v23(
+                symbol=sym,
+                prev_day_high=prev_day_high,
+                prev_day_low=prev_day_low,
+                day_open=day_open,
+                prev_price=prev_price,
+                current_price=current_price,
+                recent_closes=recent_closes,
+                finder_rank=finder_rank,
+                now=now_kst,
+            )
+            out['source']='KOREA_SHADOW_GATE_REUSE'
+            out['historical_cross_recovered']=bool(recovered_cross_time)
+            out['recovered_cross_time']=recovered_cross_time
+            out['recovered_cross_age_min']=recovered_cross_age_min
+            out['recovered_cross_rsi2']=recovered_cross_rsi2
+
+            # V111 STRUCT5 paper-entry trigger.
+            # Window = current 1m bar + previous 4 completed 1m bars.
+            # Resistance is the highest HIGH of the previous four bars.
+            # Entry fires only on a fresh close breakout, RSI2>50, and no lower-low
+            # deterioration across the most recent two bars. No future bars are used.
+            struct5_signal=False
+            struct5_resistance=None
+            struct5_higher_low=False
+            struct5_rsi2=None
+            struct5_reason='NEED_5_BARS'
+            if len(cur)>=5:
+                w5=cur.tail(5).reset_index(drop=True)
+                prev4=w5.iloc[:4]
+                nowbar=w5.iloc[4]
+                prevbar=w5.iloc[3]
+                struct5_resistance=float(prev4['high'].max())
+                struct5_rsi2=_williams_rsi2([float(v) for v in cur['close'].tail(30).tolist()])
+                # Latest two-bar low structure must not undercut the preceding two-bar low structure.
+                old_low=float(w5.iloc[:2]['low'].min())
+                new_low=float(w5.iloc[2:4]['low'].min())
+                struct5_higher_low=bool(new_low >= old_low)
+                fresh_break=bool(float(prevbar['close']) <= struct5_resistance < float(nowbar['close']))
+                rank_ok=bool(finder_rank is not None and int(finder_rank) <= 20)
+                rsi_ok=bool(struct5_rsi2 is not None and float(struct5_rsi2) > 50.0)
+                day_key=now_kst.strftime('%Y%m%d')
+                s5=_WILLIAMS_STATE[(str(sym),day_key)]
+                already=bool(s5.get('struct5_order_sent'))
+                struct5_signal=bool(fresh_break and struct5_higher_low and rank_ok and rsi_ok and not already)
+                if struct5_signal:
+                    # Detection only. Do NOT consume the signal here.
+                    # Broker acknowledgement in _williams_mock_auto_step owns struct5_order_sent.
+                    s5['struct5_last_detected_at']=now_kst
+                    out['signal']=True
+                    out['stage']='ENTRY_CANDIDATE'
+                    struct5_reason='FRESH_5BAR_BREAKOUT_PENDING_ORDER'
+                elif already:
+                    struct5_reason='ORDER_ACKED'
+                elif not fresh_break:
+                    struct5_reason='WAIT_BREAKOUT'
+                elif not struct5_higher_low:
+                    struct5_reason='LOW_STRUCTURE_WEAK'
+                elif not rank_ok:
+                    struct5_reason='RANK_FAIL'
+                elif not rsi_ok:
+                    struct5_reason='RSI2_FAIL'
+
+            out['struct5_signal']=bool(struct5_signal)
+            out['struct5_resistance']=struct5_resistance
+            out['struct5_higher_low']=bool(struct5_higher_low)
+            out['struct5_rsi2']=struct5_rsi2
+            out['struct5_reason']=struct5_reason
+            out['prev_day']=prev_day
+            out['current_day']=cur_day
+            out['prev_day_high']=prev_day_high
+            out['prev_day_low']=prev_day_low
+            out['day_open']=day_open
+            out['prev_price']=prev_price
+            out['current_price']=current_price
+
+            # V234_MTF_ENTRY_GUARD: 5m decides direction, 1m decides timing.
+            # Applies only to a fresh Williams entry signal; no order side effect here.
+            if bool(out.get('signal')):
+                try:
+                    _m=cur.copy()
+                    _m['_dt']=pd.to_datetime(_m['time'].astype(str).str[:14],format='%Y%m%d%H%M%S',errors='coerce')
+                    _m=_m.dropna(subset=['_dt']).sort_values('_dt').reset_index(drop=True)
+                    _c=pd.to_numeric(_m['close'],errors='coerce').astype(float)
+                    _h=pd.to_numeric(_m['high'],errors='coerce').astype(float)
+                    _l=pd.to_numeric(_m['low'],errors='coerce').astype(float)
+
+                    def _rsi14(_s):
+                        _d=_s.diff(); _g=_d.clip(lower=0); _dn=(-_d.clip(upper=0))
+                        _ag=_g.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+                        _ad=_dn.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+                        _rs=_ag/_ad.replace(0,pd.NA)
+                        return (100-(100/(1+_rs))).astype(float)
+
+                    def _macd(_s):
+                        _mac=_s.ewm(span=12,adjust=False).mean()-_s.ewm(span=26,adjust=False).mean()
+                        _sig=_mac.ewm(span=9,adjust=False).mean(); return _mac,_sig,_mac-_sig
+
+                    def _cci9(_h,_l,_c):
+                        _tp=(_h+_l+_c)/3.0; _ma=_tp.rolling(9).mean()
+                        _md=_tp.rolling(9).apply(lambda z: float((z-z.mean()).abs().mean()),raw=False)
+                        return (_tp-_ma)/(0.015*_md.replace(0,pd.NA))
+
+                    _r1=_rsi14(_c); _mac1,_sig1,_hist1=_macd(_c); _cci1=_cci9(_h,_l,_c)
+                    _r1n=float(_r1.iloc[-1]) if len(_r1) and pd.notna(_r1.iloc[-1]) else None
+                    _r1p=float(_r1.iloc[-2]) if len(_r1)>1 and pd.notna(_r1.iloc[-2]) else None
+                    _h1n=float(_hist1.iloc[-1]) if len(_hist1) and pd.notna(_hist1.iloc[-1]) else None
+                    _h1p=float(_hist1.iloc[-2]) if len(_hist1)>1 and pd.notna(_hist1.iloc[-2]) else None
+                    _c1n=float(_cci1.iloc[-1]) if len(_cci1) and pd.notna(_cci1.iloc[-1]) else None
+                    _c1p=float(_cci1.iloc[-2]) if len(_cci1)>1 and pd.notna(_cci1.iloc[-2]) else None
+                    _improve=sum([
+                        bool(_r1n is not None and _r1p is not None and _r1n>=_r1p),
+                        bool(_h1n is not None and _h1p is not None and _h1n>=_h1p),
+                        bool(_c1n is not None and _c1p is not None and _c1n>=_c1p),
+                    ])
+                    _rsi70_exit=bool(_r1p is not None and _r1n is not None and _r1p>=70.0 and _r1n<70.0)
+                    _cci_dump=bool(_c1p is not None and _c1n is not None and ((_c1p-_c1n)>=100.0 or (_c1p>=100.0 and _c1n<100.0)))
+                    _one_ok=bool(_improve>=2 and not _rsi70_exit and not _cci_dump)
+
+                    # Build completed 5m candles only; current incomplete 5m bucket is excluded.
+                    _m2=_m.set_index('_dt')[['open','high','low','close']].apply(pd.to_numeric,errors='coerce')
+                    _bucket=_m['_dt'].iloc[-1].floor('5min')
+                    _m2=_m2[_m2.index < _bucket]
+                    _b5=_m2.resample('5min').agg({'open':'first','high':'max','low':'min','close':'last'}).dropna().reset_index()
+                    _five_ok=False; _r5n=_h5n=_h5p=_ema5=_cl5=None
+                    if len(_b5)>=20:
+                        _c5=pd.to_numeric(_b5['close'],errors='coerce').astype(float)
+                        _r5=_rsi14(_c5); _mac5,_sig5,_hist5=_macd(_c5); _ema20=_c5.ewm(span=20,adjust=False).mean()
+                        _r5n=float(_r5.iloc[-1]) if pd.notna(_r5.iloc[-1]) else None
+                        _h5n=float(_hist5.iloc[-1]) if pd.notna(_hist5.iloc[-1]) else None
+                        _h5p=float(_hist5.iloc[-2]) if len(_hist5)>1 and pd.notna(_hist5.iloc[-2]) else None
+                        _m5n=float(_mac5.iloc[-1]); _s5n=float(_sig5.iloc[-1]); _ema5=float(_ema20.iloc[-1]); _cl5=float(_c5.iloc[-1])
+                        # V238_MTF_SCORE_GATE: simulation calibration.
+                        # 5m is a direction filter, not an exact timing trigger.
+                        _five_score=sum([
+                            bool(_r5n is not None and _r5n>=45.0),
+                            bool((_m5n>=_s5n) or (_h5n is not None and _h5p is not None and _h5n>=_h5p)),
+                            bool(_cl5 is not None and _ema5 is not None and _cl5>=_ema5),
+                        ])
+                        _five_hard_bear=bool(
+                            _r5n is not None and _r5n<40.0 and
+                            _h5n is not None and _h5p is not None and _h5n<_h5p and
+                            _cl5 is not None and _ema5 is not None and _cl5<_ema5
+                        )
+                        # Strong 1m momentum (3/3 improving) needs only one 5m support.
+                        # Normal 1m momentum (2/3) still needs two 5m supports.
+                        _five_ok=bool((not _five_hard_bear) and ((_improve>=3 and _five_score>=1) or (_improve>=2 and _five_score>=2)))
+
+                    _mtf_ok=bool(_one_ok and _five_ok)
+                    out['v234_mtf_guard']={
+                        'ok':_mtf_ok,'one_min_ok':_one_ok,'five_min_ok':_five_ok,'one_improve_count':_improve,
+                        'rsi1':_r1n,'rsi1_prev':_r1p,'cci1':_c1n,'cci1_prev':_c1p,'hist1':_h1n,'hist1_prev':_h1p,
+                        'rsi70_exit':_rsi70_exit,'cci_dump':_cci_dump,'rsi5':_r5n,'hist5':_h5n,'hist5_prev':_h5p,
+                        'close5':_cl5,'ema20_5':_ema5
+                    }
+                    # V235_MTF_TELEMETRY: record only fresh Williams signals reaching this guard.
+                    # No strategy/order authority change.
+                    try:
+                        _etype='WILLIAMS_MTF_PASS' if _mtf_ok else 'WILLIAMS_MTF_BLOCK'
+                        _msg=(f'{sym} MTF ' + ('PASS' if _mtf_ok else 'BLOCK') +
+                              f' 1m={_one_ok} 5m={_five_ok} improve={_improve}')
+                        self.store.event('KOREA',str(sym),_etype,None,
+                                         'ENTRY_CANDIDATE' if _mtf_ok else 'BLOCKED_MTF',
+                                         power=None,message=_msg,payload={
+                            'price':current_price,'finder_rank':finder_rank,
+                            'trigger':out.get('trigger'),'rsi2':out.get('rsi2'),
+                            'raw_cross':out.get('raw_cross'),
+                            'historical_cross_recovered':out.get('historical_cross_recovered'),
+                            'struct5_signal':out.get('struct5_signal'),
+                            'struct5_resistance':out.get('struct5_resistance'),
+                            'struct5_reason':out.get('struct5_reason'),
+                            'mtf':out.get('v234_mtf_guard'),
+                        })
+                    except Exception:
+                        pass
+                    if not _mtf_ok:
+                        out['signal']=False
+                        out['stage']='BLOCKED_MTF'
+                    else:
+                        # V237_MTF_PASS_BRIDGE_SYNC: make the guarded PASS authoritative
+                        # for downstream row/order aliases. Mock-only order path still
+                        # applies V233 live-price guard before buy submission.
+                        out['signal']=True
+                        out['williams_entry']=True
+                        out['williams_signal_entry']=True
+                        out['stage']='ENTRY_CANDIDATE'
+                except Exception as _e:
+                    # Fail closed for new mock entries if the MTF guard cannot be evaluated.
+                    out['signal']=False
+                    out['stage']='BLOCKED_MTF_DATA'
+                    out['v234_mtf_guard']={'ok':False,'error':f'{type(_e).__name__}: {_e}'[:180]}
+
+            return out
+        except Exception as e:
+            empty['stage']='DATA_INVALID'
+            empty['error']=f'{type(e).__name__}: {e}'[:240]
+            return empty
+
+    def _williams_structure_from_gate(self,gate,entry_price=None,start_time=None):
+        """Build frozen STRUCT0 state from already-fetched KR gate bars.
+
+        No API call. No order side effect. Reuses gate['bars_raw'].
+        """
+        empty={
+            'mode':'STRUCT0_FROZEN_V92',
+            'state':'DATA_WAIT',
+            'support':None,
+            'support_updates':0,
+            'break':False,
+            'entry_price':_f(entry_price) if entry_price else None,
+            'last_close':None,
+            'bars':0,
+            'shadow_only':True,
+            'orders_enabled':False,
+        }
+        try:
+            raw=gate.get('bars_raw') if isinstance(gate,dict) else None
+            if not raw:
+                return empty
+            b1=pd.DataFrame(raw)
+            if b1.empty:
+                return empty
+            need={'open','high','low','close'}
+            if not need.issubset(set(b1.columns)):
+                empty['state']='DATA_INVALID'
+                empty['columns']=[str(x) for x in list(b1.columns)[:30]]
+                return empty
+            out=self._williams_structure_state(b1,entry_price=entry_price,start_time=start_time)
+            out['shadow_only']=True
+            out['orders_enabled']=False
+            out['source']='KOREA_SHADOW_GATE_REUSE'
+            return out
+        except Exception as e:
+            empty['state']='DATA_INVALID'
+            empty['error']=type(e).__name__
+            empty['error_msg']=str(e)[:200]
+            return empty
+
+    def _williams_structure_shadow(self,sym,korea,entry_price=None):
+        """Shadow-only adapter for frozen Williams STRUCT0 state.
+
+        Reads KR 1m bars and returns HOLD / EXIT_READY telemetry.
+        Never places orders and never changes production state.
+        """
+        empty={
+            'mode':'STRUCT0_FROZEN_V92',
+            'state':'DATA_WAIT',
+            'support':None,
+            'support_updates':0,
+            'break':False,
+            'entry_price':_f(entry_price) if entry_price else None,
+            'last_close':None,
+            'bars':0,
+            'shadow_only':True,
+            'orders_enabled':False,
+        }
+        try:
+            d=self._kr_minute_chart_cached(sym,korea,1)
+            if isinstance(d,pd.DataFrame):
+                b1=d.copy()
+            else:
+                raw=d
+                if isinstance(d,dict):
+                    raw=(d.get('rows') or d.get('data') or d.get('output2') or
+                         d.get('output') or d.get('items') or [])
+                b1=pd.DataFrame(raw or [])
+            if b1.empty:
+                return empty
+
+            # Normalize common Kiwoom/engine field names without assuming one response shape.
+            aliases={
+                'open':['open','stck_oprc','시가'],
+                'high':['high','stck_hgpr','고가'],
+                'low':['low','stck_lwpr','저가'],
+                'close':['close','stck_prpr','현재가','price'],
+            }
+            ren={}
+            for dst,cands in aliases.items():
+                if dst in b1.columns: continue
+                for c in cands:
+                    if c in b1.columns:
+                        ren[c]=dst; break
+            if ren:b1=b1.rename(columns=ren)
+            need={'open','high','low','close'}
+            if not need.issubset(set(b1.columns)):
+                empty['state']='DATA_INVALID'
+                empty['columns']=[str(x) for x in list(b1.columns)[:30]]
+                return empty
+
+            # If a time-like column exists, force chronological order.
+            for tc in ('datetime','timestamp','ts','time','체결시간','stck_cntg_hour'):
+                if tc in b1.columns:
+                    try:b1=b1.sort_values(tc).reset_index(drop=True)
+                    except Exception:pass
+                    break
+
+            out=self._williams_structure_state(b1,entry_price=entry_price)
+            out['shadow_only']=True
+            out['orders_enabled']=False
+            return out
+        except Exception as e:
+            empty['state']='DATA_INVALID'
+            empty['error']=type(e).__name__
+            return empty
+
     def _korea_shadow_gate(self,sym,korea,cache_seconds=45):
 
         """V4.7.1 observational KR 5m Setup + 1m Trigger gate.
@@ -1595,7 +2876,7 @@ class CleanEngine:
 
         try:
 
-            d=korea.minute_chart(sym,1,max_pages=1)
+            d=self._kr_minute_chart_cached(sym,korea,1)
 
             raw=d.get('bars') or []
 
@@ -1921,6 +3202,13 @@ class CleanEngine:
 
                 'latest_1m':str(a.get('time')),
 
+                'latest_price':_f(a.get('close')),
+
+                # V125: preserve time so V118 can filter strictly post-entry bars.
+                'bars_raw':b[[c for c in ('time','open','high','low','close') if c in b.columns]].tail(240).to_dict('records'),
+
+                'williams_signal_bars':b[[c for c in ('time','open','high','low','close') if c in b.columns]].tail(900).to_dict('records'),
+
                 'latest_5m':five.iloc[-1]['dt'].isoformat(),
 
                 'data_ok':True,
@@ -1955,19 +3243,63 @@ class CleanEngine:
 
     def refresh_korea_tracker(self,korea):
 
-        syms=self.tracked_symbols('KOREA')
-
-        fmap={r['symbol']:r for r in self.finder['KOREA']['rows']}
+        # V108: separate Williams ENTRY discovery from legacy/open-position tracking.
+        # Paper-entry candidates must not be displaced by existing portfolio positions.
+        finder_rows=list(self.finder['KOREA'].get('rows') or [])
+        fmap={str(r.get('symbol') or ''):r for r in finder_rows if str(r.get('symbol') or '')}
 
         pmap={p['symbol']:p for p in self.store.positions('KOREA')}
 
+        pulse_rows=list(korea.intraday_pulse.get('rows') or [])
         pulse={
-
             str(r.get('symbol') or ''):r
-
-            for r in (korea.intraday_pulse.get('rows') or [])
-
+            for r in pulse_rows
+            if str(r.get('symbol') or '')
         }
+
+        # Candidate pool: Finder rank first, then live pulse strength/score.
+        # Explicitly exclude legacy/open positions so Williams ENTRY scans fresh symbols.
+        pos_syms=set(str(x) for x in pmap.keys())
+        candidate_syms=[]
+
+        for r in sorted(
+            finder_rows,
+            key=lambda x:(
+                int(x.get('rank')) if str(x.get('rank') or '').isdigit() else 999999,
+                -_f(x.get('finder_score'))
+            )
+        ):
+            sym=str(r.get('symbol') or '')
+            if sym and sym not in pos_syms and sym not in candidate_syms:
+                candidate_syms.append(sym)
+
+        for r in sorted(
+            pulse_rows,
+            key=lambda x:max(
+                _f(x.get('live_score')),
+                _f(x.get('strength_composite')),
+                _f(x.get('change_pct')),
+                _f(x.get('rate'))
+            ),
+            reverse=True
+        ):
+            sym=str(r.get('symbol') or '')
+            if sym and sym not in pos_syms and sym not in candidate_syms:
+                candidate_syms.append(sym)
+
+        # V120: holdings FIRST so _finalize rows[:TRACK_LIMIT] cannot drop them.
+        # Current mock max positions is 5, matching the final tracker safety window.
+        _held_syms=self._williams_mock_held_symbols()
+        syms=list(_held_syms)
+        for _cand_sym in candidate_syms:
+            if _cand_sym not in syms:
+                syms.append(_cand_sym)
+            if len(syms)>=8:
+                break
+
+        # Paper-validation attention rank. Finder rank remains authoritative when present;
+        # otherwise use the order of the bounded live candidate pool (1..8).
+        pulse_candidate_rank={sym:i+1 for i,sym in enumerate(syms)}
 
         rows=[]
 
@@ -2047,6 +3379,23 @@ class CleanEngine:
 
             gate=self._korea_shadow_gate(sym,korea)
 
+            # WILLIAMS STRUCT0 V94 SHADOW ONLY: no state/order authority.
+            _wpos=pmap.get(sym) or {}
+            _wentry=_f(_wpos.get('avg_entry')) or None
+            _wmock_st=self._last.get(("WILLIAMS_MOCK",str(sym).zfill(6)),{})
+            _wmock_start=(
+                _wmock_st.get("entered_bar_time")
+                if isinstance(_wmock_st,dict) and _wmock_st.get("in_pos")
+                else None
+            )
+            williams_struct=self._williams_structure_from_gate(
+                gate,entry_price=_wentry,start_time=_wmock_start
+            )
+            _finder_rank=f.get('rank')
+            _williams_rank=_finder_rank if _finder_rank is not None else pulse_candidate_rank.get(sym)
+            _williams_rank_source='FINDER' if _finder_rank is not None else 'LIVE_CANDIDATE_POOL'
+            williams_entry_eval=self._williams_entry_from_gate(sym,gate,finder_rank=_williams_rank)
+
 
 
             # V4.7.2: Attention Power is diagnostic only.
@@ -2125,15 +3474,62 @@ class CleanEngine:
 
 
 
+
+            # KR_SHADOW_PROTO_V2
+            # Prototype-only decision layer. Production state/direction stay unchanged.
+            proto_action='WATCH'
+            proto_reason='Shadow Gate 조건 대기'
+            data_ok=bool(gate.get('data_ok'))
+            setup_n=int(_f(gate.get('setup_count')))
+            trigger_n=int(_f(gate.get('trigger_count')))
+            proto_conf=round(_clip(
+                (setup_n/4.0)*35 +
+                (trigger_n/4.0)*45 +
+                min(abs(power),100)/100.0*20,
+                0,100
+            ),1)
+
+            has_pos=bool(pmap.get(sym))
+            if not data_ok:
+                proto_action='DATA_WAIT'
+                proto_reason='1분/5분 Shadow Gate 데이터 준비 중'
+            elif has_pos:
+                if gate_ready and shadow_direction=='SHORT':
+                    proto_action='EXIT_REVIEW'
+                    proto_reason='보유중 + SHORT Shadow Gate READY · 수동 청산 검토'
+                elif gate_ready and shadow_direction=='LONG' and power>=40 and delta>=0:
+                    proto_action='ADD_REVIEW'
+                    proto_reason='보유중 + LONG Gate READY + Power 유지/상승 · 추매 검토'
+                elif shadow_direction=='LONG':
+                    proto_action='HOLD'
+                    proto_reason='LONG 구조 유지 · 보유 관찰'
+                else:
+                    proto_action='HOLD_WATCH'
+                    proto_reason='보유중 · 방향 확정 전 관찰'
+            else:
+                if gate_ready and shadow_direction=='LONG':
+                    proto_action='BUY_REVIEW'
+                    proto_reason='LONG Shadow Gate READY · 수동 진입 검토'
+                elif gate_ready and shadow_direction=='SHORT':
+                    proto_action='AVOID'
+                    proto_reason='SHORT Shadow Gate READY · 신규매수 회피'
+                else:
+                    proto_action='WATCH'
+                    proto_reason='Setup/Trigger 추가 확인 대기'
+
             rows.append({
 
                 'market':'KOREA',
 
                 'symbol':sym,
 
+                'williams_candidate':True,
+                'tracker_role':'WILLIAMS_ENTRY_CANDIDATE',
+
                 'name':f.get('name') or sym,
 
-                'finder_rank':f.get('rank'),
+                'finder_rank':_williams_rank,
+                'williams_rank_source':_williams_rank_source,
 
                 'finder_score':f.get('finder_score'),
 
@@ -2145,7 +3541,7 @@ class CleanEngine:
 
                 'avg_entry':_f((pmap.get(sym) or {}).get('avg_entry')),
 
-                'price':_f(p.get('price',f.get('price'))),
+                'price':(_f(p.get('price')) or _f(f.get('price')) or _f(gate.get('latest_price'))),
 
 
 
@@ -2168,6 +3564,34 @@ class CleanEngine:
                 'risk':risk,
 
 
+
+
+                'prototype_engine':'KR_SHADOW_PROTO_V2',
+                'prototype_action':proto_action,
+                'prototype_confidence':proto_conf,
+                'prototype_reason':proto_reason,
+
+                # Williams STRUCT0 shadow telemetry (diagnostic only).
+                'williams_entry':bool(williams_entry_eval.get('signal')),
+                'williams_signal_entry':bool(williams_entry_eval.get('signal')),
+                'williams_entry_stage':williams_entry_eval.get('stage'),
+                'williams_entry_trigger':williams_entry_eval.get('trigger'),
+                'williams_entry_rsi2':williams_entry_eval.get('rsi2'),
+                'williams_entry_raw_cross':bool(williams_entry_eval.get('raw_cross')),
+                'williams_cross_recovered':bool(williams_entry_eval.get('historical_cross_recovered')),
+                'williams_cross_time':williams_entry_eval.get('recovered_cross_time'),
+                'williams_cross_age_min':williams_entry_eval.get('recovered_cross_age_min'),
+                'williams_struct5_signal':bool(williams_entry_eval.get('struct5_signal')),
+                'williams_struct5_resistance':williams_entry_eval.get('struct5_resistance'),
+                'williams_struct5_higher_low':bool(williams_entry_eval.get('struct5_higher_low')),
+                'williams_struct5_reason':williams_entry_eval.get('struct5_reason'),
+                'williams_struct5_order_acked':bool(_WILLIAMS_STATE[(str(sym),_dt.now(_WILLIAMS_KST).strftime('%Y%m%d'))].get('struct5_order_sent')),
+                'williams_entry_eval':williams_entry_eval,
+                'williams_struct_state':williams_struct.get('state'),
+                'williams_support':williams_struct.get('support'),
+                'williams_support_updates':williams_struct.get('support_updates'),
+                'williams_exit_ready':bool(williams_struct.get('break')),
+                'williams_structure_shadow':williams_struct,
 
                 'components':{
 
@@ -2309,15 +3733,663 @@ class CleanEngine:
         else:
             risk=max(price-hard,price*.004); t1=price+2*risk; t2=price+3*risk
         return round(hard,4),round(warn,4),round(t1,4),round(t2,4),mode
+
+
+    def _v141_build_usa_frozen_ctx(self, row, gate=None, b1=None):
+        """Construct frozen Williams USA context from causal live data only."""
+        try:
+            if str((row or {}).get('market','')).upper()!='USA': return None
+            g=gate or {}
+            bars=b1
+            if bars is None or len(bars)<21: return {'ready':False,'reason':'BARS_LT_21'}
+            closes=[_f(v) for v in bars['close'].tolist()]
+            highs=[_f(v) for v in bars['high'].tolist()]
+            lows=[_f(v) for v in bars['low'].tolist()]
+            vols=[_f(v) for v in bars['volume'].tolist()] if 'volume' in bars.columns else [0.0]*len(bars)
+            if not closes or min(len(closes),len(highs),len(lows))<21: return {'ready':False,'reason':'BARS_INVALID'}
+            i=len(closes)-1
+            # Prefer already-computed causal Williams diagnostics from gate/row. V141 does not invent strategy logic.
+            ctx={
+                'ts': (bars.iloc[-1].get('time') if 'time' in bars.columns else (bars.iloc[-1].get('ts') if 'ts' in bars.columns else None)),
+                'prev_crossed': bool((row or {}).get('williams_cross_seen') or g.get('williams_cross_seen')),
+                'cross_now': bool((row or {}).get('williams_entry_raw_cross') or g.get('williams_raw_cross')),
+                'rsi2': (row or {}).get('williams_entry_rsi2'),
+                'day_open': g.get('williams_day_open') or (row or {}).get('williams_day_open'),
+                'prev_high': g.get('williams_prev_high') or (row or {}).get('williams_prev_high'),
+                'prev_low': g.get('williams_prev_low') or (row or {}).get('williams_prev_low'),
+                'volume': vols[i],
+                'prior10_volume_avg': (sum(vols[max(0,i-10):i])/len(vols[max(0,i-10):i])) if i>0 and vols[max(0,i-10):i] else 0.0,
+                'cci20': g.get('williams_cci20') or (row or {}).get('williams_cci20'),
+                'macd_hist': g.get('williams_macd_hist') or (row or {}).get('williams_macd_hist'),
+                'prev_macd_hist': g.get('williams_prev_macd_hist') or (row or {}).get('williams_prev_macd_hist'),
+            }
+            missing=[k for k,v in ctx.items() if v is None]
+            out={'ready':not missing,'missing':missing,'entry_args':ctx if not missing else None}
+            pos=(row or {}).get('position') or {}
+            exit_args={
+                'entry_price': (row or {}).get('avg_entry') or pos.get('avg_entry'),
+                'price': (row or {}).get('price'),
+                'macd': g.get('macd') or (row or {}).get('macd'),
+                'signal': g.get('macd_signal') or (row or {}).get('macd_signal'),
+                'cci20': ctx.get('cci20'),
+                'prev_cci20': g.get('williams_prev_cci20') or (row or {}).get('williams_prev_cci20'),
+                'weak_run': (row or {}).get('williams_combo_weak_run') or 0,
+            }
+            if exit_args['entry_price'] and all(exit_args.get(k) is not None for k in ('price','macd','signal','cci20','prev_cci20')):
+                out['exit_args']=exit_args
+            else:
+                out['exit_args']=None
+            return out
+        except Exception as e:
+            return {'ready':False,'reason':'ERROR','error':str(e)}
+
+
+    def _v142_build_usa_frozen_ctx(self, row, b1, prev_day=None):
+        """Build frozen USA Williams context. USA only; no order authority."""
+        try:
+            if str((row or {}).get('market','')).upper()!='USA' or b1 is None or len(b1)<25:
+                return None
+            # Required columns must exist on live 1m bars.
+            need=('time','open','high','low','close','volume')
+            if any(c not in b1.columns for c in need):
+                return None
+            closes=[_f(v) for v in b1['close'].tolist()]
+            highs=[_f(v) for v in b1['high'].tolist()]
+            lows=[_f(v) for v in b1['low'].tolist()]
+            vols=[_f(v) for v in b1['volume'].tolist()]
+            if len(closes)<21:return None
+            # Reuse engine's frozen Williams helpers where available.
+            rsi2=_williams_rsi2(closes[-60:])
+            # CCI20 causal on completed/current 1m bars.
+            tp=[(h+l+c)/3.0 for h,l,c in zip(highs,lows,closes)]
+            cci20=None
+            if len(tp)>=20:
+                w=tp[-20:]; m=sum(w)/20.0; md=sum(abs(x-m) for x in w)/20.0
+                cci20=0.0 if md==0 else (tp[-1]-m)/(0.015*md)
+            # EMA12/26 + signal9, same recurrence as replay.
+            def _ema(vals,span):
+                if not vals:return []
+                a=2.0/(span+1.0);o=[float(vals[0])]
+                for v in vals[1:]:o.append(a*float(v)+(1-a)*o[-1])
+                return o
+            e12=_ema(closes,12);e26=_ema(closes,26);mac=[a-b for a,b in zip(e12,e26)];sg=_ema(mac,9)
+            hist=[a-b for a,b in zip(mac,sg)]
+            if len(hist)<2 or rsi2 is None or cci20 is None:return None
+            prior=vols[-11:-1]
+            va=(sum(prior)/len(prior)) if prior else 0.0
+            cur=closes[-1]; prv=closes[-2]
+            # prev-day OHLC must be supplied by row/gate context; do not invent it.
+            day_open=_f((row or {}).get('day_open') or (row or {}).get('session_open'))
+            ph=_f((row or {}).get('prev_day_high'))
+            pl=_f((row or {}).get('prev_day_low'))
+            if not (day_open and ph and pl):return None
+            trigger=day_open+0.5*(ph-pl)
+            cross_now=bool(prv<=trigger<cur)
+            prev_crossed=bool((row or {}).get('williams_frozen_cross_seen'))
+            ts=b1.iloc[-1]['time']
+            return {
+                'entry_args':{
+                    'ts':ts,'prev_crossed':prev_crossed,'cross_now':cross_now,'rsi2':rsi2,
+                    'day_open':day_open,'prev_high':ph,'prev_low':pl,'volume':vols[-1],
+                    'prior10_volume_avg':va,'cci20':cci20,'macd_hist':hist[-1],
+                    'prev_macd_hist':hist[-2],
+                },
+                'feature_snapshot':{'rsi2':rsi2,'cci20':cci20,'macd_hist':hist[-1],
+                                    'prev_macd_hist':hist[-2],'volume_ratio':(vols[-1]/va if va else 0.0),
+                                    'trigger':trigger,'cross_now':cross_now}
+            }
+        except Exception as e:
+            return {'error':str(e)}
+
+
+    def _v161_wire_usa_frozen_ctx(self, row, b1):
+        """Build replay-equivalent frozen USA entry+exit context from live 1m bars."""
+        try:
+            if str((row or {}).get('market','')).upper()!='USA' or b1 is None or len(b1)<25:
+                return None
+            need=('time','open','high','low','close','volume')
+            if any(c not in b1.columns for c in need):
+                return None
+            x=b1.copy().reset_index(drop=True)
+            # Parse timestamps. Aware timestamps are converted to ET; naive timestamps are
+            # treated as already ET-local, matching the frozen replay wall-clock semantics.
+            ts=pd.to_datetime(x['time'],errors='coerce')
+            if ts.isna().all(): return None
+            try:
+                if getattr(ts.dt,'tz',None) is not None:
+                    et=ts.dt.tz_convert('America/New_York')
+                else:
+                    et=ts.dt.tz_localize('America/New_York',ambiguous='NaT',nonexistent='shift_forward')
+            except Exception:
+                et=ts
+            mins=et.dt.hour*60+et.dt.minute
+            dates=et.dt.strftime('%Y-%m-%d')
+            reg=(mins>=570)&(mins<960)
+            if not bool(reg.any()): return None
+            current_date=str(dates.iloc[-1])
+            cur_idx=x.index[reg & (dates==current_date)].tolist()
+            if not cur_idx:
+                # Premarket: current regular-session open does not yet exist. No fake context.
+                return None
+            prior_dates=sorted(set(str(d) for d in dates[reg & (dates<current_date)].dropna().tolist()))
+            if not prior_dates:return None
+            prev_date=prior_dates[-1]
+            prev_idx=x.index[reg & (dates==prev_date)].tolist()
+            if not prev_idx:return None
+            day_open=_f(x.loc[cur_idx[0],'open'])
+            prev_high=max(_f(x.loc[i,'high']) for i in prev_idx)
+            prev_low=min(_f(x.loc[i,'low']) for i in prev_idx)
+            if not (day_open and prev_high and prev_low):return None
+
+            closes=[_f(v) for v in x['close'].tolist()]
+            highs=[_f(v) for v in x['high'].tolist()]
+            lows=[_f(v) for v in x['low'].tolist()]
+            vols=[_f(v) for v in x['volume'].tolist()]
+            if len(closes)<21:return None
+            rsi2=_williams_rsi2(closes[-60:])
+            tp=[(h+l+c)/3.0 for h,l,c in zip(highs,lows,closes)]
+            def _cci_at(end):
+                if end<19:return None
+                w=tp[end-19:end+1]; m=sum(w)/20.0; md=sum(abs(v-m) for v in w)/20.0
+                return 0.0 if md==0 else (tp[end]-m)/(0.015*md)
+            cci20=_cci_at(len(tp)-1); prev_cci20=_cci_at(len(tp)-2)
+            if rsi2 is None or cci20 is None or prev_cci20 is None:return None
+            def _ema(vals,span):
+                if not vals:return []
+                a=2.0/(span+1.0); out=[float(vals[0])]
+                for v in vals[1:]:out.append(a*float(v)+(1-a)*out[-1])
+                return out
+            e12=_ema(closes,12); e26=_ema(closes,26); mac=[a-b for a,b in zip(e12,e26)]; sig=_ema(mac,9)
+            hist=[a-b for a,b in zip(mac,sig)]
+            if len(hist)<2:return None
+            prior=vols[-11:-1]; va=(sum(prior)/len(prior)) if prior else 0.0
+            trigger=day_open+0.5*(prev_high-prev_low)
+            prv=closes[-2]; cur=closes[-1]; cross_now=bool(prv<=trigger<cur)
+            sym=str((row or {}).get('symbol') or '').upper()
+            day=current_date.replace('-','')
+            cross_key=('WUF_CROSS',sym,day)
+            cross_state=self._last.get(cross_key,{}) if sym else {}
+            prev_crossed=bool((cross_state or {}).get('seen'))
+            entry_args={
+                'ts':x.iloc[-1]['time'],'prev_crossed':prev_crossed,'cross_now':cross_now,
+                'rsi2':rsi2,'day_open':day_open,'prev_high':prev_high,'prev_low':prev_low,
+                'volume':vols[-1],'prior10_volume_avg':va,'cci20':cci20,
+                'macd_hist':hist[-1],'prev_macd_hist':hist[-2],
+            }
+            # Mark first cross after capturing prev_crossed=False for this exact evaluation.
+            if sym and cross_now:self._last[cross_key]={'seen':True}
+            out={'entry_args':entry_args,'feature_snapshot':{
+                'day_open':day_open,'prev_high':prev_high,'prev_low':prev_low,
+                'rsi2':rsi2,'cci20':cci20,'prev_cci20':prev_cci20,
+                'macd':mac[-1],'signal':sig[-1],'macd_hist':hist[-1],
+                'prev_macd_hist':hist[-2],'volume_ratio':(vols[-1]/va if va else 0.0),
+                'trigger':trigger,'cross_now':cross_now,'prev_crossed':prev_crossed,
+                'trade_date':current_date}}
+            try:
+                ppos=self.paper.position('USA',sym) if sym and hasattr(self.paper,'position') else None
+            except Exception:
+                ppos=None
+            if not ppos:
+                if sym:self._last[('WUF_WEAK',sym)]={'run':0}
+                out['exit_args']=None
+                return out
+            ep=_f((ppos or {}).get('avg_entry') or (ppos or {}).get('entry_price') or (ppos or {}).get('price'))
+            weak_state=self._last.get(('WUF_WEAK',sym),{}) if sym else {}
+            if ep:
+                out['exit_args']={
+                    'entry_price':ep,'price':_f((row or {}).get('price') or closes[-1]),
+                    'macd':mac[-1],'signal':sig[-1],'cci20':cci20,'prev_cci20':prev_cci20,
+                    'prev_macd':mac[-2] if len(mac)>=2 else None,
+                    'prev_signal':sig[-2] if len(sig)>=2 else None,
+                    'weak_run':int((weak_state or {}).get('run') or 0),
+                }
+            else:
+                out['exit_args']=None
+            return out
+        except Exception as e:
+            return {'error':str(e)}
+
+    def _v140_usa_frozen_williams_eval(self, row):
+        """USA-only frozen Williams paper evaluator. No broker authority."""
+        if _wuf is None or str((row or {}).get('market','')).upper()!='USA':
+            return {'entry':False,'exit':False,'reason':'NOT_USA_OR_MODULE_MISSING'}
+        try:
+            ctx=(row or {}).get('williams_frozen_ctx') or {}
+            out={'entry':False,'exit':False,'reason':'NO_CTX'}
+            if ctx.get('entry_args'):
+                e=_wuf.entry_signal(**ctx['entry_args'])
+                out.update({'entry':bool(e.get('signal')),'entry_eval':e,'reason':'ENTRY_EVAL'})
+            if ctx.get('exit_args'):
+                x=_wuf.exit_signal(**ctx['exit_args'])
+                out.update({'exit':bool(x.get('exit')),'exit_eval':x,'reason':'EXIT_EVAL'})
+            return out
+        except Exception as e:
+            return {'entry':False,'exit':False,'reason':'ERROR','error':str(e)}
+
+    def _usa_mock_order_step(self, action, row):
+
+        """V253: mirror USA frozen Williams decisions to Kiwoom US mock only."""
+
+        import os, logging
+
+        flag=(os.getenv("WILLIAMS_KIWOOM_US_MOCK_AUTO") or "0").lower()
+
+        if flag not in ("1","true","yes","on"):
+
+            return None
+
+
+
+        from live_server.kiwoom_us_mock_broker import KiwoomUSMockBroker
+
+
+
+        sym=str((row or {}).get("symbol") or "").upper().strip()
+
+        if not sym:
+
+            return None
+
+
+
+        price=_f((row or {}).get("price"))
+
+        if price <= 0:
+
+            return None
+
+
+
+        ex=str((row or {}).get("exchange") or "").upper().strip()
+
+        if ex=="AM":
+
+            ex="NA"
+
+        if ex not in ("NY","ND","NA"):
+
+            _map={"SOXL":"NY","SOXS":"NY","SPY":"NY","TSM":"NY","ORCL":"NY",
+
+                  "NVDA":"ND","AMD":"ND","AVGO":"ND","QQQ":"ND","TQQQ":"ND",
+
+                  "SQQQ":"ND","PLTR":"ND","ARM":"ND","INTC":"ND","SMH":"ND"}
+
+            ex=_map.get(sym,"NY")
+
+
+
+        qty=max(1,int(os.getenv("WILLIAMS_KIWOOM_US_MOCK_QTY","1") or 1))
+
+        cross=max(0.001,float(os.getenv("WILLIAMS_KIWOOM_US_MOCK_CROSS_PCT","0.01") or 0.01))
+
+        b=KiwoomUSMockBroker()
+
+
+
+        if action=="BUY":
+
+            limit=round(price*(1.0+cross),2 if price>=1 else 4)
+
+            r=b.buy_limit(sym,qty,limit,ex)
+
+        elif action=="SELL":
+
+            bal=b.balance(sym,ex)
+
+            rows=bal.get("result_list") or []
+
+            held=0
+
+            for x in rows:
+
+                if str(x.get("stk_cd") or "").upper()==sym:
+
+                    try:
+
+                        held=int(str(x.get("sell_alowq") or x.get("poss_qty") or "0"))
+
+                    except Exception:
+
+                        held=0
+
+            if held <= 0:
+
+                logging.warning("USA_MOCK_SELL_SKIP no holding sym=%s",sym)
+
+                return None
+
+            qty=min(qty,held)
+
+            limit=round(price*(1.0-cross),2 if price>=1 else 4)
+
+            r=b.sell_limit(sym,qty,limit,ex)
+
+        else:
+
+            return None
+
+
+
+        logging.warning("USA_MOCK_%s_ACCEPTED sym=%s ex=%s qty=%s price=%s resp=%s",
+
+                        action,sym,ex,qty,price,r)
+
+        return r
+
+
+
+    def _paper_williams_step(self, market, row):
+        """Paper-only Williams execution bridge. Never calls a real broker."""
+        # V145_USA_FROZEN_PAPER_AUTHORITY: isolated frozen USA paper path.
+        if str(market).upper()=='USA':
+            ev=self._v140_usa_frozen_williams_eval(row)
+            row['williams_frozen_eval']=ev
+            sym=str((row or {}).get('symbol') or '').upper()
+            price=_f((row or {}).get('price'))
+            # V161_FROZEN_WEAK_RUN_STATE: carry causal 2-bar combo state across refreshes.
+            if sym and isinstance(ev,dict) and isinstance(ev.get('exit_eval'),dict):
+                self._last[('WUF_WEAK',sym)]={'run':int(ev['exit_eval'].get('weak_run') or 0)}
+            if not sym or price<=0:
+                return None
+            # Existing paper ledger only; never broker/Kiwoom.
+            pos=self.paper.position('USA',sym) if hasattr(self.paper,'position') else None
+            if pos:
+                if bool(ev.get('exit')):
+                    try:
+                        self._usa_mock_order_step("SELL", row)
+                    except Exception as e:
+                        import logging as _logging
+                        _logging.exception("USA_MOCK_SELL_ERROR sym=%s err=%s", sym, e)
+                    return self.paper.exit('USA',sym,price,reason='WILLIAMS_FROZEN_EXIT')
+                return self.paper.mark('USA',sym,price,state='HOLD')
+            if bool(ev.get('entry')):
+                # hard safety: no duplicate open symbol and cap open paper positions.
+                try:
+                    opens=self.paper.positions('USA') if hasattr(self.paper,'positions') else []
+                except Exception:
+                    opens=[]
+                if any(str((p or {}).get('symbol','')).upper()==sym for p in (opens or [])):
+                    return None
+                max_pos=max(1,int(os.getenv('WILLIAMS_USA_PAPER_MAX_POSITIONS','5') or 5))
+                if len(opens or [])>=max_pos:
+                    return None
+                try:
+                    self._usa_mock_order_step("BUY", row)
+                except Exception as e:
+                    import logging as _logging
+                    _logging.exception("USA_MOCK_BUY_ERROR sym=%s err=%s", sym, e)
+                return self.paper.enter('USA',sym,price,strategy_id='WILLIAMS_FROZEN_V136',reason='WILLIAMS_FROZEN_ENTRY')
+            return None
+        market=market.upper(); sym=str(row.get('symbol') or '')
+        if not sym:return None
+        price=_f(row.get('price'))
+        if price<=0:return None
+        try:
+            pos=next((p for p in self.paper.account(market).get('positions',[]) if str(p.get('symbol'))==sym),None)
+            # Existing paper position: mark structure and close only on frozen STRUCT0 break.
+            if pos:
+                support=row.get('williams_support')
+                st=row.get('williams_struct_state') or 'HOLD'
+                self.paper.mark(market,sym,price,support=support,support_updates=row.get('williams_support_updates'),state=st)
+                if bool(row.get('williams_exit_ready')):
+                    return self.paper.exit(market,sym,price,reason='SUPPORT_BREAK_EXIT',support=support)
+                return {'ok':True,'action':'HOLD','market':market,'symbol':sym,'price':price,'support':support}
+            # New paper entry only when Williams exact evaluator has produced a fresh ENTRY signal on the row.
+            wentry=bool(row.get('williams_entry') or row.get('williams_signal_entry'))
+            if wentry and row.get('session')=='REGULAR':
+                # V233: pre-entry STRUCT0 support is diagnostic only.  A long position
+                # must never inherit a support at/above the entry price.  Post-entry
+                # structure will establish/ratchet support from subsequent bars.
+                _pre_support=_f(row.get('williams_support'))
+                _entry_support=_pre_support if (0 < _pre_support < price) else None
+                return self.paper.enter(market,sym,price,strategy_id='WILLIAMS_STRUCT0',reason='WILLIAMS_ENTRY',support=_entry_support)
+        except Exception as e:
+            return {'ok':False,'action':'ERROR','reason':f'{type(e).__name__}: {e}'}
+        return None
+
+    def _williams_mock_sync_account(self, broker):
+        """V115: restore current Kiwoom mock holdings once per process."""
+        if getattr(self, "_williams_mock_account_synced", False):
+            return
+
+        from datetime import datetime as _dt
+
+        bal = broker.request_account(
+            "kt00004",
+            {"qry_tp":"0", "dmst_stex_tp":"KRX"},
+        )
+        fills = broker.request_account(
+            "ka10076",
+            {"qry_tp":"0", "sell_tp":"0", "stex_tp":"1"},
+        )
+
+        latest_buy = {}
+        for x in fills.get("cntr", []) or []:
+            if "+매수" not in str(x.get("io_tp_nm") or ""):
+                continue
+            sym = str(x.get("stk_cd") or "").replace("A", "").zfill(6)
+            tm = str(x.get("ord_tm") or "").strip()
+            if sym and tm and sym not in latest_buy:
+                latest_buy[sym] = tm
+
+        now = _dt.now(_WILLIAMS_KST)
+        restored = 0
+        for x in bal.get("stk_acnt_evlt_prst", []) or []:
+            sym = str(x.get("stk_cd") or "").replace("A", "").zfill(6)
+            try:
+                qty = int(str(x.get("rmnd_qty") or "0").replace(",", ""))
+            except Exception:
+                qty = 0
+            if not sym or qty <= 0:
+                continue
+            try:
+                avg = float(str(x.get("avg_prc") or "0").replace(",", ""))
+            except Exception:
+                avg = 0.0
+
+            entered_ts = 0.0
+            tm = latest_buy.get(sym)
+            if tm and len(tm) >= 6:
+                try:
+                    entered = now.replace(
+                        hour=int(tm[0:2]),
+                        minute=int(tm[2:4]),
+                        second=int(tm[4:6]),
+                        microsecond=0,
+                    )
+                    entered_ts = entered.timestamp()
+                except Exception:
+                    entered_ts = 0.0
+
+            entered_bar_time=(now.strftime('%Y%m%d') + tm) if tm and len(tm)>=6 else now.strftime('%Y%m%d%H%M%S')
+            self._last[("WILLIAMS_MOCK", sym)] = {
+                "in_pos": True,
+                "qty": qty,
+                "entry_price": avg,
+                "entered_ts": entered_ts,
+                "entered_bar_time": entered_bar_time,
+                "synced_from_account": True,
+            }
+            restored += 1
+
+        self._williams_mock_account_synced = True
+        import logging as _logging
+        _logging.warning("WILLIAMS_MOCK_ACCOUNT_SYNC open_positions=%s", restored)
+
+    def _williams_mock_held_symbols(self):
+        """V119: currently open Kiwoom mock lifecycle symbols."""
+        out=[]
+        for k,st in list(self._last.items()):
+            if not (isinstance(k,tuple) and len(k)==2 and k[0]=="WILLIAMS_MOCK"):
+                continue
+            if not isinstance(st,dict) or not st.get("in_pos"):
+                continue
+            sym=str(k[1] or '').replace('A','').zfill(6)
+            if sym and sym not in out:
+                out.append(sym)
+        return out
+
+    def _williams_mock_auto_step(self, row):
+        import os
+        auto_flag=(os.getenv("WILLIAMS_KIWOOM_MOCK_AUTO") or os.getenv("KIWOOM_MOCK_AUTO_ENABLED") or "0").lower()
+        if auto_flag not in ("1","true","yes","on"):
+            return
+        if (row.get("session") or "") != "REGULAR":
+            return
+        sym=str(row.get("symbol") or "").zfill(6)
+        if not sym:
+            return
+        try:
+            from live_server.kiwoom_mock_broker import KiwoomMockBroker
+            b=KiwoomMockBroker()
+            if not b.cfg.order_enable:
+                return
+            self._williams_mock_sync_account(b)
+            key=("WILLIAMS_MOCK",sym)
+            st=self._last.get(key,{})
+            in_pos=bool(st.get("in_pos"))
+            entry=bool(row.get("williams_entry") or row.get("williams_signal_entry"))
+            exit_ready=bool(row.get("williams_exit_ready"))
+            # V233_STRUCT5_PRICE_GUARD: order-time price must still be above the detected STRUCT5 resistance.
+            if entry and not in_pos and bool(row.get("williams_struct5_signal")):
+                _s5_res=_f(row.get("williams_struct5_resistance"))
+                _live_px=_f(row.get("price"))
+                if _s5_res>0 and _live_px<=_s5_res:
+                    return
+            if entry and not in_pos:
+                # V118: pre-entry whole-day EXIT telemetry does not veto a fresh ENTRY.
+                # Once BUY is accepted, subsequent rows use only post-entry structure.
+                # Retry guard: avoid hammering Kiwoom if a pending breakout survives multiple refreshes.
+                import time as _time
+                retry_key=("WILLIAMS_MOCK_RETRY",sym)
+                last_try=self._last.get(retry_key) or {}
+                if (_time.time()-_f(last_try.get("ts"),0)) < 15.0:
+                    return
+                self._last[retry_key]={"ts":_time.time()}
+                import time as _time
+                capital=float(os.getenv("WILLIAMS_MOCK_CAPITAL_KRW","1000000") or 1000000)
+                max_positions=max(1,int(os.getenv("WILLIAMS_MOCK_MAX_POSITIONS","5") or 5))
+                price=_f(row.get("price"))
+                if price<=0:
+                    return
+
+                # V233: STRUCT5 is a fresh 5-bar resistance breakout.  Never submit a
+                # mock BUY if the live order price has already fallen back to/below the
+                # resistance that generated the signal.  This prevents stale/misaligned
+                # chart-vs-quote snapshots such as signal resistance 6400 with order 6360.
+                if bool(row.get('williams_struct5_signal')):
+                    _s5_res=_f(row.get('williams_struct5_resistance'))
+                    if _s5_res > 0 and price <= _s5_res:
+                        import logging as _logging
+                        _logging.warning("WILLIAMS_MOCK_ENTRY_BLOCKED_STRUCT5_PRICE sym=%s price=%s resistance=%s",sym,price,_s5_res)
+                        self.store.event("KOREA",sym,"WILLIAMS_MOCK_ENTRY_BLOCKED",None,"BLOCKED",power=_f(row.get("power")),message=f'{sym} STRUCT5 live price no longer above resistance',payload={"row":row,"price":price,"resistance":_s5_res})
+                        return
+
+                # Reserve capital for positions opened by this bridge in the current process.
+                reserved=0.0
+                open_count=0
+                for _k,_st in list(self._last.items()):
+                    if not (isinstance(_k,tuple) and len(_k)>=2 and _k[0]=="WILLIAMS_MOCK"):
+                        continue
+                    if not isinstance(_st,dict) or not _st.get("in_pos"):
+                        continue
+                    open_count+=1
+                    reserved += _f(_st.get("entry_price"))*_f(_st.get("qty"),1)
+                if open_count>=max_positions:
+                    return
+                available=max(0.0,capital-reserved)
+                if available < price:
+                    return
+                slot_budget=min(capital/max_positions,available)
+                qty=int(slot_budget//price)
+                if qty<1:
+                    qty=1
+                if qty*price>available:
+                    return
+
+                # V233_STRUCT5_LIVE_PRICE_GUARD: fail closed if live price no longer confirms breakout.
+                if bool(row.get("williams_struct5_signal")):
+                    resistance=_f(row.get("williams_struct5_resistance"))
+                    if resistance>0 and not (price>resistance):
+                        import logging as _logging
+                        _logging.warning("WILLIAMS_MOCK_BUY_BLOCKED_STRUCT5_PRICE_SYNC sym=%s price=%s resistance=%s",sym,price,resistance)
+                        self.store.event("KOREA",sym,"WILLIAMS_MOCK_BUY_BLOCKED",None,"BLOCKED",power=_f(row.get("power")),message=f'{sym} STRUCT5 price-sync blocked',payload={"row":row,"price":price,"resistance":resistance})
+                        return
+
+                r=b.buy_market(sym,qty)
+                order_no=r.get("ord_no") or r.get("order_no")
+                self._last[key]={
+                    "in_pos":True,
+                    "buy_order_no":order_no,
+                    "qty":qty,
+                    "entry_price":price,
+                    "entered_ts":_time.time(),
+                    "entered_bar_time":_dt.now(_WILLIAMS_KST).strftime('%Y%m%d%H%M%S'),
+                }
+                if row.get("williams_struct5_signal"):
+                    day_key=_dt.now(_WILLIAMS_KST).strftime('%Y%m%d')
+                    s5=_WILLIAMS_STATE[(str(sym),day_key)]
+                    s5['struct5_order_sent']=True
+                    s5['struct5_order_no']=order_no
+                    s5['struct5_order_acked_at']=_dt.now(_WILLIAMS_KST)
+                import logging as _logging
+                _logging.warning("WILLIAMS_MOCK_BUY_ACCEPTED sym=%s qty=%s price=%s order_no=%s struct5=%s",sym,qty,price,order_no,bool(row.get("williams_struct5_signal")))
+                self.store.event("KOREA",sym,"WILLIAMS_MOCK_BUY",None,"ORDER_SENT",power=_f(row.get("power")),message=f'{sym} Williams mock BUY {qty}',payload={"order":r,"row":row,"qty":qty,"entry_price":price})
+            elif in_pos:
+                import time as _time
+                qty=max(1,int(_f(st.get("qty"),1)))
+                entry_price=_f(st.get("entry_price"))
+                price=_f(row.get("price"))
+                entered_ts=_f(st.get("entered_ts"))
+                hold_sec=(_time.time()-entered_ts) if entered_ts else 999999.0
+                hard_stop=bool(entry_price and price and price<=entry_price*0.985)
+
+                # V118: row EXIT_READY is now computed from bars strictly after
+                # this position's BUY minute. Pre-entry support cannot trigger this exit.
+                # Emergency -1.5% hard stop remains independent and immediate.
+                if not hard_stop:
+                    if not exit_ready:
+                        return
+                    if hold_sec < 300.0:
+                        return
+
+                r=b.sell_market(sym,qty)
+                sell_order_no=r.get("ord_no") or r.get("order_no")
+                self._last[key]={"in_pos":False,"sell_order_no":sell_order_no,"qty":qty,"entry_price":entry_price,"entered_ts":entered_ts}
+                import logging as _logging
+                _logging.warning("WILLIAMS_MOCK_SELL_ACCEPTED sym=%s qty=%s price=%s hold_sec=%.1f hard_stop=%s order_no=%s",sym,qty,price,hold_sec,hard_stop,sell_order_no)
+                self.store.event("KOREA",sym,"WILLIAMS_MOCK_SELL","HOLD","ORDER_SENT",power=_f(row.get("power")),message=f'{sym} Williams mock SELL {qty}',payload={"order":r,"row":row,"qty":qty,"entry_price":entry_price,"hold_sec":hold_sec,"hard_stop":hard_stop})
+        except Exception as e:
+            import logging as _logging
+            _logging.exception("WILLIAMS_MOCK_ERROR sym=%s error=%s",sym,e)
+            self.store.event("KOREA",sym,"WILLIAMS_MOCK_ERROR",None,"ERROR",power=_f(row.get("power")),message=str(e),payload={"row":row})
+
     def _finalize(self,market,rows):
         rows=rows[:TRACK_LIMIT]
         for trank,r in enumerate(rows,1):
             r['tracker_rank']=trank
             sym=r['symbol']; state=r['state']; power=_f(r['power']); prev=self._last.get((market,sym),{}); ps=prev.get('state'); pp=_f(prev.get('power')); pr=self._rank.get((market,sym))
+            # V4.9.0C-4C Q2 SHADOW ENTRY LOGGER SAFE3
+            q2_shadow=r.get('rebound_shadow') or {}
+            q2_state=q2_shadow.get('rebound_state_q2_shadow')
+            prev_q2_state=prev.get('q2_state')
             if ps and ps!=state:self.store.event(market,sym,'STATE_CHANGE',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} {ps}→{state}',payload=r)
             elif prev and abs(power-pp)>=POWER_ALERT_DELTA:self.store.event(market,sym,'POWER_JUMP',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} Power {pp:.0f}→{power:.0f}',payload=r)
             elif pr is not None and abs(pr-trank)>=RANK_ALERT_DELTA:self.store.event(market,sym,'TRACKER_RANK_MOVE',ps,state,power=power,rank_from=pr,rank_to=trank,message=f'{sym} 실시간 순위 {pr}→{trank}',payload=r)
-            self._last[(market,sym)]={'state':state,'power':power}; self._last[('POWER',market,sym)]={'power':power}; self._rank[(market,sym)]=trank; minute=r['updated_at'][:16]
+            if market=='USA' and prev_q2_state and prev_q2_state!=q2_state and q2_state=='REBOUND_ENTRY':
+                self.store.event(
+                    market,
+                    sym,
+                    'Q2_REBOUND_ENTRY_SHADOW',
+                    prev_q2_state,
+                    q2_state,
+                    power=power,
+                    rank_from=pr,
+                    rank_to=trank,
+                    message=f'{sym} Q2 {prev_q2_state}→{q2_state}',
+                    payload=r
+                )
+            self._last[(market,sym)]={'state':state,'power':power,'q2_state':q2_state}; self._last[('POWER',market,sym)]={'power':power}; self._rank[(market,sym)]=trank; minute=r['updated_at'][:16]
             if self._snap.get((market,sym))!=minute:
                 self.store.snapshot(r)
                 if market=='USA' and r.get('session')=='REGULAR' and (r.get('data_integrity') or {}).get('valid'):
@@ -2329,7 +4401,133 @@ class CleanEngine:
                 self.store.update_validation_outcomes(market,sym,_f(r.get('price')))
             elif market=='KOREA' and r.get('session')=='REGULAR':
                 self.store.update_validation_outcomes(market,sym,_f(r.get('price')))
+                self._williams_mock_auto_step(r)
+            # V171_SINGLE_USA_PAPER_AUTHORITY: dedicated frozen19 loop owns USA paper evaluation.
+            paper_result=None if (market=='USA' and getattr(self,'_frozen_universe_loop_enabled',False)) else self._paper_williams_step(market,r)
+            if paper_result is not None:r['paper_williams']=paper_result
         sess=_session(market)
         self.tracker[market]={'rows':rows,'updated_at':_now(),'session':sess,'tracked_count':len(rows),'max_tracked':TRACK_LIMIT,'is_live':sess=='REGULAR','power_basis':'LIVE_REGULAR' if sess=='REGULAR' else 'LAST_AVAILABLE_REFERENCE','policy':'OPEN POSITIONS first; remaining slots use live readiness/power, then Finder rank. Maximum 5 heavy-tracked symbols.'}
+        # V4.9.0C-4D.1 Q2 SCAN STATS OUTPUT SAFE2
+        if market=='USA':
+            self.tracker[market]['q2_universe_scan']=getattr(self,'_q2_universe_scan_stats',None)
     def status(self,market):
-        market=market.upper(); return {'market':market,'session':_session(market),'finder':self.finder.get(market),'tracker':self.tracker.get(market),'positions':self.store.positions(market),'events':self.store.events(market,20),'version':'V4_CLEAN_ENGINE_ALPHA'}
+        market=market.upper(); return {'market':market,'session':_session(market),'finder':self.finder.get(market),'tracker':self.tracker.get(market),'positions':self.store.positions(market),'paper_account':self.paper.account(market),'paper_trades':self.paper.trades(market,20),'events':self.store.events(market,20),'version':'V4_CLEAN_ENGINE_ALPHA'}
+
+
+# === WILLIAMS LIVE EVALUATOR V23 ===
+from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+from collections import defaultdict as _dd
+
+_WILLIAMS_KST = _tz(_td(hours=9))
+_WILLIAMS_STATE = _dd(dict)
+
+def _williams_rsi2(closes):
+    if len(closes) < 3:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, 3):
+        d = closes[i] - closes[i-1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    ag = sum(gains) / 2.0
+    al = sum(losses) / 2.0
+    r = 100.0 if al == 0 else 100.0 - (100.0 / (1.0 + ag / al))
+    for i in range(3, len(closes)):
+        d = closes[i] - closes[i-1]
+        g = max(d, 0.0)
+        l = max(-d, 0.0)
+        ag = (ag + g) / 2.0
+        al = (al + l) / 2.0
+        r = 100.0 if al == 0 else 100.0 - (100.0 / (1.0 + ag / al))
+    return r
+
+def williams_live_evaluate_v23(
+    symbol,
+    prev_day_high,
+    prev_day_low,
+    day_open,
+    prev_price,
+    current_price,
+    recent_closes,
+    finder_rank=None,
+    now=None,
+):
+    """
+    Returns a pure evaluation dict.
+    Does not place orders and does not mutate broker state.
+    """
+    now = now or _dt.now(_WILLIAMS_KST)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=_WILLIAMS_KST)
+    else:
+        now = now.astimezone(_WILLIAMS_KST)
+
+    day_key = now.strftime("%Y%m%d")
+    trigger = float(day_open) + 0.5 * (float(prev_day_high) - float(prev_day_low))
+    rsi2 = _williams_rsi2([float(x) for x in recent_closes])
+
+    st = _WILLIAMS_STATE[(str(symbol), day_key)]
+    armed_at = st.get("armed_at")
+    sent = bool(st.get("signal_sent"))
+
+    raw_cross = (
+        float(prev_price) <= trigger < float(current_price)
+        and rsi2 is not None
+        and rsi2 > 50.0
+    )
+
+    if raw_cross and armed_at is None and not sent:
+        armed_at = now
+        st["armed_at"] = now
+
+    age_min = None
+    if armed_at is not None:
+        age_min = (now - armed_at).total_seconds() / 60.0
+        if age_min > 30.0 and not sent:
+            st.pop("armed_at", None)
+            armed_at = None
+            age_min = None
+
+    finder_ok = finder_rank is not None and int(finder_rank) <= 20
+    signal = bool(
+        armed_at is not None
+        and age_min is not None
+        and 0.0 <= age_min <= 30.0
+        and finder_ok
+        and not sent
+    )
+
+    if signal:
+        st["signal_sent"] = True
+        st["confirmed_at"] = now
+
+    if sent:
+        stage = "SIGNAL_SENT"
+    elif signal:
+        stage = "ENTRY_CANDIDATE"
+    elif armed_at is not None:
+        stage = "READY"
+    else:
+        stage = "WATCH"
+
+    return {
+        "engine_id": "williams",
+        "engine_name": "윌리암스",
+        "status": "VALIDATION_CANDIDATE",
+        "selectable": False,
+        "orders_enabled": False,
+        "symbol": str(symbol),
+        "trigger": trigger,
+        "rsi2": rsi2,
+        "raw_cross": raw_cross,
+        "finder_rank": finder_rank,
+        "finder_confirmed": finder_ok,
+        "armed_at": armed_at.isoformat() if armed_at else None,
+        "age_min": age_min,
+        "stage": stage,
+        "signal": signal,
+        "rule": "CrossUp(day_open+0.5*(prev_high-prev_low)) & RSI2>50 -> Finder rank<=20 within 30m -> first next 1m bar entry candidate -> 5m validation hold",
+        "max_one_signal_per_symbol_day": True,
+    }
+

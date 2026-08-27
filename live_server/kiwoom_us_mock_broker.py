@@ -35,6 +35,7 @@ class KiwoomUSMockBroker:
       * mockapi.kiwoom.com only
       * orders blocked unless KIWOOM_MOCK_US_ORDER_ENABLE=1
       * US order endpoint only (/api/us/ordr)
+      * mock orders use limit type 00 because Kiwoom mock rejects market orders
     """
 
     def __init__(self, config: USMockBrokerConfig | None = None):
@@ -92,11 +93,18 @@ class KiwoomUSMockBroker:
             raise ValueError(f"unsupported US exchange code: {ex}")
         return ex
 
+    @staticmethod
+    def _price_text(price: float) -> str:
+        p = float(price)
+        if p <= 0:
+            raise ValueError("price must be > 0")
+        return f"{p:.4f}".rstrip("0").rstrip(".")
+
     def balance(self, symbol: str = "", exchange: str = "NY") -> dict[str, Any]:
         ex = self._check_exchange(exchange)
         return self._post("/api/us/acnt", "ust21070", {"stex_tp": ex, "stk_cd": str(symbol).upper().strip()})
 
-    def buy_market(self, symbol: str, qty: int = 1, exchange: str = "NY") -> dict[str, Any]:
+    def buy_limit(self, symbol: str, qty: int, price: float, exchange: str = "NY") -> dict[str, Any]:
         self._ensure_order_enabled()
         ex = self._check_exchange(exchange)
         if int(qty) <= 0:
@@ -105,11 +113,11 @@ class KiwoomUSMockBroker:
             "stex_tp": ex,
             "stk_cd": str(symbol).upper().strip(),
             "ord_qty": str(int(qty)),
-            "ord_uv": "",
-            "trde_tp": "03",
+            "ord_uv": self._price_text(price),
+            "trde_tp": "00",
         })
 
-    def sell_market(self, symbol: str, qty: int = 1, exchange: str = "NY") -> dict[str, Any]:
+    def sell_limit(self, symbol: str, qty: int, price: float, exchange: str = "NY") -> dict[str, Any]:
         self._ensure_order_enabled()
         ex = self._check_exchange(exchange)
         if int(qty) <= 0:
@@ -118,6 +126,6 @@ class KiwoomUSMockBroker:
             "stex_tp": ex,
             "stk_cd": str(symbol).upper().strip(),
             "ord_qty": str(int(qty)),
-            "ord_uv": "",
-            "trde_tp": "03",
+            "ord_uv": self._price_text(price),
+            "trde_tp": "00",
         })

@@ -28,8 +28,9 @@ def ensure_inner_lower(data):
         q=x.set_index(pd.to_datetime(x['et']))
         b5=q.resample('5min',label='left',closed='left').agg({'close':'last'}).dropna().reset_index(names='bucket_raw')
         mid=b5['close'].rolling(20).mean(); sd=b5['close'].rolling(20).std(ddof=0)
-        # Double Bollinger inner band = 20MA +/- 1 sigma. Runner exits on lower inner band.
-        b5['inner_l']=mid-sd
+        # User-defined Double Bollinger inner band: period 20, D1=0.5.
+        # Runner exits only when completed 5m close crosses below the LOWER inner band.
+        b5['inner_l']=mid-0.5*sd
         b5['inner_l_prev']=b5['inner_l'].shift(1)
         b5['close5_prev_for_inner_l']=b5['close'].shift(1)
         t=pd.to_datetime(x['et']); x['_inner_bucket']=t.dt.floor('5min')-pd.Timedelta(minutes=5)
@@ -41,7 +42,7 @@ def add_trade(trades,sym,entry,partial_price,final_price,partial_done,reason,cos
     fee=cost_bps/10000.0
     gross=(0.5*(partial_price/entry-1.0)+0.5*(final_price/entry-1.0)) if partial_done else (final_price/entry-1.0)
     net=gross-2.0*fee
-    trades.append({'engine':'DBB_ORIGINAL_ENTRY_2R_HALF_INNER_LOWER','symbol':sym,'entry_price':entry,
+    trades.append({'engine':'DBB_ORIGINAL_ENTRY_2R_HALF_INNER_LOWER_05','symbol':sym,'entry_price':entry,
                    'partial_price':partial_price if partial_done else None,'exit_price':final_price,
                    'partial_done':bool(partial_done),'exit_reason':reason,'gross_return':gross,'net_return':net,
                    'mfe':mfe,'mae':mae})
@@ -74,7 +75,7 @@ def replay(data,fallback,max_swing,cost_bps):
                     if all(pd.notna(v) for v in (lower,lower_prev,close5,prev)):
                         cross_down=float(prev)>=float(lower_prev) and float(close5)<float(lower)
                         if cross_down:
-                            add_trade(trades,sym,entry,partial_price,p,True,'INNER_LOWER_CROSS_DOWN',cost_bps,mfe,mae); pos=None; continue
+                            add_trade(trades,sym,entry,partial_price,p,True,'INNER_LOWER_05_CROSS_DOWN',cost_bps,mfe,mae); pos=None; continue
                 et=pd.Timestamp(x.at[i,'et'])
                 if et.hour==15 and et.minute>=59:
                     add_trade(trades,sym,entry,partial_price,p,partial_done,'SESSION_CLOSE',cost_bps,mfe,mae); pos=None; continue
@@ -96,11 +97,11 @@ def replay(data,fallback,max_swing,cost_bps):
     return trades
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--db',default='/home/ubuntu/day-trader-api/daytrader.db'); ap.add_argument('--max-days',type=int,default=135); ap.add_argument('--cost-bps',type=float,default=8.0); ap.add_argument('--fallback-risk-pct',type=float,default=0.015); ap.add_argument('--max-swing-risk-pct',type=float,default=0.025); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--db',default='/home/ubuntu/day-trader-api/daytrader.db'); ap.add_argument('--max-days',type=int,default=135); ap.add_argument('--cost-bps',type=float,default=8.0); ap.add_argument('--fallback-risk-pct',type=float,default=0.01); ap.add_argument('--max-swing-risk-pct',type=float,default=0.025); a=ap.parse_args()
     bars,table=load_1m_bars(a.db,0); dates=sorted(bars['date_et'].unique())[-a.max_days:]; bars=bars[bars['date_et'].isin(dates)].copy()
     data={s:prep_symbol(bars[bars['symbol']==s].copy()) for s in SYMBOLS}; data=ensure_inner_lower(data)
-    print(f'V247B SOURCE={table} DAYS={len(dates)} BARS={len(bars)} ENTRY=V240D_ORIGINAL EXIT=2R_HALF_THEN_INNER_LOWER',flush=True)
-    tr=replay(data,a.fallback_risk_pct,a.max_swing_risk_pct,a.cost_bps); print('V247B_METRICS=',json.dumps(metrics(tr)),flush=True)
+    print(f'V247C SOURCE={table} DAYS={len(dates)} BARS={len(bars)} ENTRY=V240D_ORIGINAL EXIT=2R_HALF_THEN_INNER_LOWER_05 FALLBACK={a.fallback_risk_pct}',flush=True)
+    tr=replay(data,a.fallback_risk_pct,a.max_swing_risk_pct,a.cost_bps); print('V247C_METRICS=',json.dumps(metrics(tr)),flush=True)
     if tr:
         df=pd.DataFrame(tr); print('PARTIAL_2R_COUNT=',int(df['partial_done'].sum()),flush=True); print('EXIT_REASONS=',json.dumps(df['exit_reason'].value_counts().to_dict()),flush=True); print('SYMBOLS=',json.dumps(df['symbol'].value_counts().to_dict()),flush=True); print('PARTIAL_THEN_LOSS=',int(((df['partial_done']==True)&(df['net_return']<0)).sum()),flush=True)
 if __name__=='__main__': main()

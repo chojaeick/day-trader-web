@@ -37,8 +37,13 @@ def latest_tick_price(db_path: str, symbol: str) -> float:
     return price
 
 
+def limit_price(price: float) -> float:
+    # Kiwoom US order price rule: >= $1 => max 2 decimals; < $1 => max 4 decimals.
+    return round(float(price), 2 if float(price) >= 1.0 else 4)
+
+
 def main():
-    ap = argparse.ArgumentParser()
+    ap=argparse.ArgumentParser()
     ap.add_argument('--symbol', default='SOXL', choices=['SOXL','SOXS'])
     ap.add_argument('--exchange', default='NY', choices=['NY','ND','NA'])
     ap.add_argument('--qty', type=int, default=1)
@@ -47,23 +52,23 @@ def main():
     ap.add_argument('--db', default='/home/ubuntu/day-trader-api/daytrader.db')
     ap.add_argument('--cross-pct', type=float, default=0.01,
                     help='marketable limit offset: buy above live price, sell below live price')
-    args = ap.parse_args()
+    args=ap.parse_args()
 
-    print('=== V252B KIWOOM US MOCK LIMIT ROUNDTRIP ===', flush=True)
+    print('=== V252C KIWOOM US MOCK LIMIT ROUNDTRIP ===', flush=True)
     print(f'SYMBOL={args.symbol} EXCHANGE={args.exchange} QTY={args.qty} MOCK_ONLY=YES LIMIT_ONLY=YES', flush=True)
     print('REAL_ORDER_PATH=BLOCKED BY ADAPTER', flush=True)
 
-    broker = KiwoomUSMockBroker()
-    token = broker.get_token()
+    broker=KiwoomUSMockBroker()
+    token=broker.get_token()
     print('TOKEN_OK=YES TOKEN_LEN=', len(token), flush=True)
 
-    before = broker.balance(args.symbol, args.exchange)
-    dump('BALANCE_BEFORE=', before)
+    before=broker.balance(args.symbol,args.exchange)
+    dump('BALANCE_BEFORE=',before)
 
-    live = latest_tick_price(args.db, args.symbol)
-    buy_limit = round(live * (1.0 + max(0.001, args.cross_pct)), 4)
-    sell_limit = round(live * (1.0 - max(0.001, args.cross_pct)), 4)
-    print(f'BUY_LIMIT={buy_limit} SELL_LIMIT={sell_limit}', flush=True)
+    live=latest_tick_price(args.db,args.symbol)
+    buy_limit=limit_price(live*(1.0+max(0.001,args.cross_pct)))
+    sell_limit=limit_price(live*(1.0-max(0.001,args.cross_pct)))
+    print(f'BUY_LIMIT={buy_limit:.2f} SELL_LIMIT={sell_limit:.2f}', flush=True)
 
     if not args.execute:
         print('PREFLIGHT_PASS=YES', flush=True)
@@ -73,24 +78,24 @@ def main():
     if os.getenv('KIWOOM_MOCK_US_ORDER_ENABLE','0').lower() not in ('1','true','yes','on'):
         raise SystemExit('BLOCKED: export KIWOOM_MOCK_US_ORDER_ENABLE=1 first')
 
-    buy = broker.buy_limit(args.symbol, args.qty, buy_limit, args.exchange)
-    dump('BUY_ACK=', buy)
+    buy=broker.buy_limit(args.symbol,args.qty,buy_limit,args.exchange)
+    dump('BUY_ACK=',buy)
     time.sleep(max(1.0,args.wait_sec))
 
-    after_buy = broker.balance(args.symbol, args.exchange)
-    dump('BALANCE_AFTER_BUY=', after_buy)
+    after_buy=broker.balance(args.symbol,args.exchange)
+    dump('BALANCE_AFTER_BUY=',after_buy)
 
-    live2 = latest_tick_price(args.db, args.symbol)
-    sell_limit = round(live2 * (1.0 - max(0.001, args.cross_pct)), 4)
-    print(f'SELL_LIMIT_REFRESHED={sell_limit}', flush=True)
-    sell = broker.sell_limit(args.symbol, args.qty, sell_limit, args.exchange)
-    dump('SELL_ACK=', sell)
+    live2=latest_tick_price(args.db,args.symbol)
+    sell_limit=limit_price(live2*(1.0-max(0.001,args.cross_pct)))
+    print(f'SELL_LIMIT_REFRESHED={sell_limit:.2f}', flush=True)
+    sell=broker.sell_limit(args.symbol,args.qty,sell_limit,args.exchange)
+    dump('SELL_ACK=',sell)
     time.sleep(max(1.0,args.wait_sec))
 
-    after_sell = broker.balance(args.symbol, args.exchange)
-    dump('BALANCE_AFTER_SELL=', after_sell)
+    after_sell=broker.balance(args.symbol,args.exchange)
+    dump('BALANCE_AFTER_SELL=',after_sell)
     print('ROUNDTRIP_REQUESTS_COMPLETE=YES', flush=True)
 
 
-if __name__ == '__main__':
+if __name__=='__main__':
     main()

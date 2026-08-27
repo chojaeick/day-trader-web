@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from live_server.strategy_core_v1 import Action, PositionPhase, PositionState, SignalResult, enforce_long_stop
@@ -41,8 +42,11 @@ class CleanWilliamsV1:
         loss = -d.clip(upper=0)
         avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
         avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-        rs = avg_gain / avg_loss.replace(0, pd.NA)
-        out = 100 - 100 / (1 + rs)
+        # Keep the calculation numeric. Using pd.NA here coerces the denominator
+        # to object dtype and emits a FutureWarning on every replay bar.
+        denom = avg_loss.mask(avg_loss == 0.0, np.nan)
+        rs = avg_gain / denom
+        out = 100.0 - 100.0 / (1.0 + rs)
         return out.fillna(100.0).astype(float)
 
     def _confirmed_swing_low(self, bars: pd.DataFrame, before_index: Optional[int] = None) -> Optional[float]:

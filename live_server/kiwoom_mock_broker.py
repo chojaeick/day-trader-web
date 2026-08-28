@@ -13,7 +13,7 @@ class MockBrokerConfig:
     app_secret: str
     rest_base: str = "https://mockapi.kiwoom.com"
     order_enable: bool = False
-    expected_account_last4: str = "2300"
+    expected_account_base8: str = "81332300"
 
     @classmethod
     def from_env(cls) -> "MockBrokerConfig":
@@ -21,7 +21,7 @@ class MockBrokerConfig:
         secret = os.getenv("KIWOOM_KR_MOCK_APP_SECRET", "").strip()
         base = os.getenv("KIWOOM_KR_MOCK_REST_BASE", os.getenv("KIWOOM_MOCK_REST_BASE", "https://mockapi.kiwoom.com")).strip().rstrip("/")
         enabled = os.getenv("KIWOOM_MOCK_ORDER_ENABLE", "0").lower() in ("1", "true", "yes", "on")
-        expected = os.getenv("KIWOOM_KR_MOCK_EXPECTED_ACCOUNT_LAST4", "2300").strip()
+        expected = os.getenv("KIWOOM_KR_MOCK_EXPECTED_ACCOUNT_BASE8", "81332300").strip()
         if not key or not secret:
             raise RuntimeError("KIWOOM_KR_MOCK_APP_KEY / KIWOOM_KR_MOCK_APP_SECRET not set")
         if "mockapi.kiwoom.com" not in base:
@@ -38,6 +38,10 @@ class KiwoomMockBroker:
       * order placement is disabled unless KIWOOM_MOCK_ORDER_ENABLE=1
       * domestic mock orders are forced to KRX
       * domestic account identity is checked before every order
+
+    Kiwoom ka00001 returns acctNo as 10 digits. The final two digits are
+    Kiwoom's account-classification suffix, so identity validation compares
+    the first 8 digits with the user-visible account number (e.g. 8133-2300).
     """
 
     def __init__(self, config: MockBrokerConfig | None = None):
@@ -97,10 +101,13 @@ class KiwoomMockBroker:
             return self._validated_account
         acct = self.account_number()
         digits = "".join(ch for ch in acct if ch.isdigit())
-        expected = "".join(ch for ch in self.cfg.expected_account_last4 if ch.isdigit())[-4:]
-        if expected and digits[-4:] != expected:
+        expected = "".join(ch for ch in self.cfg.expected_account_base8 if ch.isdigit())[:8]
+        if len(digits) < 8:
+            raise RuntimeError(f"KR mock account malformed: {acct!r}")
+        actual_base8 = digits[:8]
+        if expected and actual_base8 != expected:
             raise RuntimeError(
-                f"KR mock account mismatch: expected last4={expected}, got last4={digits[-4:]}"
+                f"KR mock account mismatch: expected base8={expected}, got base8={actual_base8}"
             )
         self._validated_account = acct
         return acct

@@ -124,6 +124,7 @@ def close_trade(pos: Pos, price: float, ts, reason: str):
         'entry_score': pos.entry_score,
         'pnl_pct': pnl * 100.0,
         'first_tp_done': pos.first_tp_done,
+        'partial_done': pos.first_tp_done,
         'extra_tp_count': pos.extra_tp_count,
         'remaining_before_final': pos.remaining_fraction,
         'reason': reason,
@@ -155,9 +156,6 @@ def simulate(exit_events, entry_frames, stop_pct: float):
                     pos = None
                     continue
 
-                # Before the first profit-taking event, protect the trade with a
-                # tunable initial stop. This is deliberately separate from the
-                # DBB profit ladder so stop design can be validated independently.
                 if not pos.first_tp_done:
                     stop_price = pos.entry_price * (1.0 - float(stop_pct))
                     if low <= stop_price:
@@ -165,8 +163,6 @@ def simulate(exit_events, entry_frames, stop_pct: float):
                         pos = None
                         continue
 
-                    # User-defined TP1: a completed 1-minute candle is wholly
-                    # above the dynamic outer-upper band (including its low).
                     if np.isfinite(ou) and low > ou:
                         realize_fraction(pos, 0.50, close)
                         pos.first_tp_done = True
@@ -176,9 +172,6 @@ def simulate(exit_events, entry_frames, stop_pct: float):
                             pos = None
                             continue
                 else:
-                    # After TP1, inner-lower touch ends the trade. Inner-upper
-                    # touch is only a support/retest event; it arms the next
-                    # outer-upper scale-out instead of forcing an exit.
                     if np.isfinite(il) and low <= il:
                         trades.append(close_trade(pos, close, ts, 'INNER_LOWER_FULL_EXIT'))
                         pos = None
@@ -186,15 +179,11 @@ def simulate(exit_events, entry_frames, stop_pct: float):
 
                     armed_before = pos.rebound_armed
                     if armed_before and np.isfinite(ou) and high >= ou:
-                        # Sell half of what remains: 50% -> 25% -> 12.5% ...
                         sell_fraction = pos.remaining_fraction * 0.50
                         realize_fraction(pos, sell_fraction, close)
                         pos.extra_tp_count += 1
                         pos.rebound_armed = False
 
-                    # Re-arm only after a subsequent inner-upper retest. Using
-                    # armed_before prevents one huge candle from counting both
-                    # the pullback and rebound in the same minute.
                     if (not armed_before) and np.isfinite(iu) and low <= iu:
                         pos.rebound_armed = True
 
@@ -216,6 +205,9 @@ def simulate(exit_events, entry_frames, stop_pct: float):
 
 
 def metric_row(name, t, collisions, cfg, threshold, stop_pct):
+    if 'partial_done' not in t.columns:
+        t = t.copy()
+        t['partial_done'] = t['first_tp_done'] if 'first_tp_done' in t.columns else False
     r = summary(name, t)
     r.update({
         'threshold': threshold,
@@ -227,8 +219,8 @@ def metric_row(name, t, collisions, cfg, threshold, stop_pct):
         'w_rsi_accel': cfg.w_rsi_accel,
         'macd_full_ratio': cfg.macd_slope_spread_full_ratio,
         'rsi_full_ratio': cfg.rsi_slope_full_ratio,
-        'first_tp_rate': round(float(t.first_tp_done.mean() * 100.0), 2) if len(t) else 0.0,
-        'avg_extra_tp': round(float(t.extra_tp_count.mean()), 3) if len(t) else 0.0,
+        'first_tp_rate': round(float(t.first_tp_done.mean() * 100.0), 2) if len(t) and 'first_tp_done' in t.columns else 0.0,
+        'avg_extra_tp': round(float(t.extra_tp_count.mean()), 3) if len(t) and 'extra_tp_count' in t.columns else 0.0,
     })
     return r
 
@@ -237,8 +229,6 @@ def candidate_configs():
     base = DoubleBollingerEngine5Config()
     yield 'BASE', base
 
-    # Momentum magnitude is the main entry axis. Keep volume/band location as
-    # confirmation score so entry frequency is not manufactured downward.
     for mg, rs in product([15, 20, 25, 30], [15, 20, 25, 30]):
         yield f'W_M{mg}_R{rs}', replace(base, w_macd_gap=float(mg), w_rsi_state=float(rs))
 
@@ -268,7 +258,6 @@ def main():
 
     nrun = 0
     for cfg_name, cfg in configs:
-        # Re-enrich because the relative-strength full ratios are part of cfg.
         cfg_frames = {}
         eng = DoubleBollingerEngine5(cfg)
         for sym, bars in raw.items():

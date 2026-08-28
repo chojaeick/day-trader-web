@@ -10,15 +10,14 @@ import pandas as pd
 class DoubleBollingerEngine5Config:
     """5-minute DBB/MACD/RSI score engine.
 
-    Initial 100-point weights are a starting hypothesis, not fixed truth:
-      trend 20, MACD>signal 15, MACD-gap widening 10, fresh golden cross 5,
-      RSI rising 15, RSI acceleration 10, volume expansion 10,
-      outer-band expansion 10, inner-band upward traversal 5.
+    Engine 5 is designed to enter a rising wave early when the DBB-mid trend is
+    already rising and momentum suddenly accelerates. The important distinction
+    is not merely MACD > signal, but how much faster the MACD slope is rising
+    than the signal-line slope. A steep RSI upslope is treated the same way.
 
     Rising DBB-mid trend is a mandatory directional gate. Bollinger-band price
-    position is not a hard entry filter. Confirmation factors add score; a
-    strong continuation/chase setup can therefore qualify even when price is
-    already high in the bands.
+    position, volume, band expansion and inner-band traversal are confirmations,
+    not mandatory entry gates.
     """
 
     rsi_period: int = 14
@@ -32,15 +31,20 @@ class DoubleBollingerEngine5Config:
     entry_score: float = 70.0
 
     w_trend: float = 20.0
-    w_macd_state: float = 15.0
-    w_macd_gap: float = 10.0
+    w_macd_state: float = 10.0
+    w_macd_gap: float = 20.0
     w_golden: float = 5.0
-    w_rsi_state: float = 15.0
+    w_rsi_state: float = 20.0
     w_rsi_accel: float = 10.0
-    w_volume: float = 10.0
-    w_outer_expand: float = 10.0
+    w_volume: float = 5.0
+    w_outer_expand: float = 5.0
     w_inner_traverse: float = 5.0
 
+    # Full score when current positive slope acceleration is roughly this many
+    # times the recent typical absolute slope. These are tuning parameters, not
+    # hard entry conditions.
+    macd_slope_spread_full_ratio: float = 2.0
+    rsi_slope_full_ratio: float = 2.0
     volume_full_ratio: float = 2.0
     outer_expand_full_ratio: float = 0.03
 
@@ -99,6 +103,15 @@ class DoubleBollingerEngine5:
 
         return s.rolling(n, min_periods=n).apply(f, raw=True)
 
+    @staticmethod
+    def _relative_positive_strength(x: pd.Series, n: int, full_ratio: float) -> pd.Series:
+        # Compare current positive slope with the recent typical absolute slope.
+        # shift(1) keeps the normalizer causal and prevents the current spike
+        # from diluting its own strength score.
+        baseline = x.abs().shift(1).rolling(n, min_periods=max(3, n // 2)).median()
+        ratio = x.clip(lower=0.0) / baseline.replace(0.0, np.nan)
+        return np.clip(ratio / max(float(full_ratio), 1e-9), 0.0, 1.0).fillna(0.0)
+
     def enrich(self, bars_5m: pd.DataFrame) -> pd.DataFrame:
         z = bars_5m.copy().sort_values('time').reset_index(drop=True)
         close = pd.to_numeric(z['close'], errors='coerce').astype(float)
@@ -115,14 +128,20 @@ class DoubleBollingerEngine5:
         z['rsi_slope'] = rsi.diff()
         z['rsi_accel'] = z['rsi_slope'] - z['rsi_slope'].shift(1)
         z['rsi_accelerating'] = (z['rsi_slope'] > 0) & (z['rsi_accel'] > 0)
+        z['rsi_slope_strength'] = self._relative_positive_strength(z['rsi_slope'], n, self.cfg.rsi_slope_full_ratio)
 
         z['macd'] = macd
         z['macd_signal'] = signal
         z['macd_gap'] = gap
         z['macd_gap_delta'] = gap.diff()
         z['macd_slope'] = macd.diff()
+        z['macd_signal_slope'] = signal.diff()
+        z['macd_slope_spread'] = z['macd_slope'] - z['macd_signal_slope']
+        z['macd_slope_spread_strength'] = self._relative_positive_strength(
+            z['macd_slope_spread'], n, self.cfg.macd_slope_spread_full_ratio
+        )
         z['macd_above_signal'] = macd > signal
-        z['macd_gap_widening'] = (gap > 0) & (z['macd_gap_delta'] > 0)
+        z['macd_gap_widening'] = (z['macd_slope_spread'] > 0)
         z['macd_golden_cross'] = (macd.shift(1) <= signal.shift(1)) & (macd > signal)
 
         z['mid'] = mid
@@ -146,9 +165,9 @@ class DoubleBollingerEngine5:
 
         z['score_trend'] = np.where(z['trend_up'], self.cfg.w_trend, 0.0)
         z['score_macd_state'] = np.where(z['macd_above_signal'], self.cfg.w_macd_state, 0.0)
-        z['score_macd_gap'] = np.where(z['macd_gap_widening'], self.cfg.w_macd_gap, 0.0)
+        z['score_macd_gap'] = self.cfg.w_macd_gap * z['macd_slope_spread_strength']
         z['score_golden'] = np.where(z['macd_golden_cross'], self.cfg.w_golden, 0.0)
-        z['score_rsi_state'] = np.where(z['rsi_slope'] > 0, self.cfg.w_rsi_state, 0.0)
+        z['score_rsi_state'] = self.cfg.w_rsi_state * z['rsi_slope_strength']
         z['score_rsi_accel'] = np.where(z['rsi_accelerating'], self.cfg.w_rsi_accel, 0.0)
 
         vol_strength = self._clip01((z['volume_ratio'].fillna(0.0) - 1.0) / max(self.cfg.volume_full_ratio - 1.0, 1e-9))

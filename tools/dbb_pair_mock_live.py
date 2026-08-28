@@ -6,17 +6,26 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from live_server.api import db, ticks_to_bars
+# IMPORTANT: this runner must stay independent from live_server.api. Importing
+# api constructs CleanEngine and can take SQLite write locks during startup.
+from live_server.config import Settings
+from live_server.db import DB
+from live_server.analytics import ticks_to_bars
 from live_server.double_bollinger_v2 import DoubleBollingerV2, DoubleBollingerPairV2
-from live_server.strategy_core_v1 import Action, PositionPhase, PositionState
+from live_server.strategy_core_v1 import Action, PositionPhase, PositionState, SignalResult
 from live_server.kiwoom_us_mock_broker import KiwoomUSMockBroker
+
+_settings = Settings()
+db = DB(_settings.db_path)
 
 EXCHANGE = {"SOXL": "NY", "SOXS": "NY"}
 STATE_PATH = Path(os.getenv("DBB_MOCK_STATE_PATH", str(ROOT / "dbb_pair_mock_state.json")))
@@ -24,6 +33,18 @@ LOG_PATH = Path(os.getenv("DBB_MOCK_LOG_PATH", str(ROOT / "dbb_pair_mock_live.js
 LOCK_PATH = Path(os.getenv("DBB_MOCK_LOCK_PATH", "/tmp/dbb_pair_mock_live.lock"))
 RECON_SEC = max(30, int(os.getenv("DBB_MOCK_RECON_SEC", "60") or 60))
 BAR_LIMITS = (5000, 12000, 24000)
+
+# Exit policy. Values can be tuned from systemd/env without code edits.
+TP1_CAP_PCT = max(0.002, float(os.getenv("DBB_TP1_CAP_PCT", "0.005") or 0.005))
+PRE_TP1_PROTECT_ACTIVATE_PCT = max(0.002, float(os.getenv("DBB_PRE_TP1_PROTECT_ACTIVATE_PCT", "0.004") or 0.004))
+PRE_TP1_TRAIL_PCT = max(0.001, float(os.getenv("DBB_PRE_TP1_TRAIL_PCT", "0.0035") or 0.0035))
+RUNNER_TRAIL_PCT = max(0.001, float(os.getenv("DBB_RUNNER_TRAIL_PCT", "0.004") or 0.004))
+MOMENTUM_FAIL_BARS = max(2, int(os.getenv("DBB_MOMENTUM_FAIL_BARS", "2") or 2))
+FORCE_FLAT_MINUTE_ET = int(os.getenv("DBB_FORCE_FLAT_MINUTE_ET", str(15 * 60 + 55)) or (15 * 60 + 55))
+
+
+class MarketClosedOrderError(RuntimeError):
+    pass
 
 
 def truthy(name: str, default: str = "0") -> bool:
@@ -51,12 +72,18 @@ def load_state() -> dict[str, Any]:
         return {}
 
 
-def completed_bars(sym: str):
-    """Build only the history DBB actually needs.
+def et_session() -> tuple[str, int, str]:
+    et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    minute = et.hour * 60 + et.minute
+    day = et.strftime("%Y-%m-%d")
+    if et.weekday() >= 5:
+        return "CLOSED", minute, day
+    if 9 * 60 + 30 <= minute < 16 * 60:
+        return "REGULAR", minute, day
+    return "CLOSED", minute, day
 
-    Williams needed very deep history. DBB does not. Reading 200k/80k ticks on
-    every loop delayed evaluation by minutes, so use an adaptive small window.
-    """
+
+def completed_bars(sym: str):
     bars = None
     used = None
     for lim in BAR_LIMITS:
@@ -79,12 +106,10 @@ def completed_bars(sym: str):
         pass
     if len(x) < 40:
         return None
-    # Keep indicator work bounded too.
     return x.tail(300).reset_index(drop=True)
 
 
 def fresh_broker() -> KiwoomUSMockBroker:
-    """Use the exact fresh-broker pattern proven by the successful roundtrip."""
     return KiwoomUSMockBroker()
 
 
@@ -138,19 +163,20 @@ def marketable_price(price: float, side: str) -> float:
 
 
 def order_with_retry(side: str, sym: str, qty: int, px: float):
-    """Every attempt uses a new broker/token, matching the proven V252C path."""
     last = None
     for attempt in (1, 2):
         try:
             b = fresh_broker()
             if side == "BUY":
-                ack = b.buy_limit(sym, qty, px, EXCHANGE[sym])
-            else:
-                ack = b.sell_limit(sym, qty, px, EXCHANGE[sym])
-            return ack
+                return b.buy_limit(sym, qty, px, EXCHANGE[sym])
+            return b.sell_limit(sym, qty, px, EXCHANGE[sym])
         except Exception as e:
             last = e
-            log("ORDER_RETRY", side=side, symbol=sym, qty=qty, limit=px, attempt=attempt, error=repr(e))
+            text = repr(e)
+            if "RC4058" in text or "장종료" in text:
+                log("ORDER_MARKET_CLOSED", side=side, symbol=sym, qty=qty, limit=px, error=text)
+                raise MarketClosedOrderError(text)
+            log("ORDER_RETRY", side=side, symbol=sym, qty=qty, limit=px, attempt=attempt, error=text)
             if attempt == 2:
                 raise
             time.sleep(1.5)
@@ -169,8 +195,8 @@ def state_from_dict(d: dict[str, Any]) -> PositionState:
     return st
 
 
-def state_to_dict(st: PositionState, initial_qty: int, current_qty: int, last_bar: str | None = None):
-    return {
+def state_to_dict(st: PositionState, initial_qty: int, current_qty: int, last_bar: str | None = None, extras: dict[str, Any] | None = None):
+    d = {
         "symbol": st.symbol,
         "phase": st.phase.value,
         "entry_price": st.entry_price,
@@ -183,16 +209,59 @@ def state_to_dict(st: PositionState, initial_qty: int, current_qty: int, last_ba
         "current_qty": int(current_qty),
         "last_bar": last_bar,
     }
+    if extras:
+        d.update(extras)
+    return d
 
 
-def rebuild_from_holding(h: dict[str, Any], bar_key: str, qty_default: int) -> dict[str, Any]:
+def frozen_tp1(entry: float, outer_upper: float | None) -> float:
+    cap = entry * (1.0 + TP1_CAP_PCT)
+    try:
+        outer = float(outer_upper or 0.0)
+    except Exception:
+        outer = 0.0
+    if outer > entry * 1.001:
+        return min(outer, cap)
+    return cap
+
+
+def rebuild_from_holding(h: dict[str, Any], bar_key: str, qty_default: int, bars=None) -> dict[str, Any]:
     avg = float(h["avg"] or h["price"])
     st = PositionState(symbol=h["symbol"])
     st.open(avg, avg * 0.99, opened_at=bar_key)
-    d = state_to_dict(st, max(qty_default, h["qty"]), h["qty"], bar_key)
+    outer = None
+    try:
+        if bars is not None:
+            diag = DoubleBollingerV2().entry_diagnostics(h["symbol"], bars)
+            outer = diag.get("outer_upper")
+    except Exception:
+        pass
+    extras = {
+        "entry_outer_upper": outer,
+        "tp1_price": frozen_tp1(avg, outer),
+        "momentum_fail_count": 0,
+        "exit_pending_market_closed": False,
+        "exit_pending_reason": None,
+        "entry_source": "RECONCILED",
+    }
+    d = state_to_dict(st, max(qty_default, h["qty"]), h["qty"], bar_key, extras)
     save_state(d)
-    log("STATE_REBUILT", holding=h)
+    log("STATE_REBUILT", holding=h, tp1_price=d["tp1_price"])
     return d
+
+
+def with_preserved_extras(st: PositionState, persisted: dict[str, Any], initial_qty: int, current_qty: int, bar_key: str) -> dict[str, Any]:
+    extras = {
+        "entry_outer_upper": persisted.get("entry_outer_upper"),
+        "tp1_price": persisted.get("tp1_price"),
+        "momentum_fail_count": int(persisted.get("momentum_fail_count") or 0),
+        "exit_pending_market_closed": bool(persisted.get("exit_pending_market_closed", False)),
+        "exit_pending_reason": persisted.get("exit_pending_reason"),
+        "entry_source": persisted.get("entry_source"),
+        "entry_score": persisted.get("entry_score"),
+        "entry_reason": persisted.get("entry_reason"),
+    }
+    return state_to_dict(st, initial_qty, current_qty, bar_key, extras)
 
 
 def main() -> int:
@@ -216,7 +285,22 @@ def main() -> int:
     last_eval_bar = None
     last_recon = 0.0
 
-    log("START", qty=qty_default, recon_sec=RECON_SEC, state=str(STATE_PATH), log=str(LOG_PATH), account_polling="60S_RECON_PLUS_EVENT", bar_limits=list(BAR_LIMITS), fresh_broker_orders=True)
+    log(
+        "START",
+        qty=qty_default,
+        recon_sec=RECON_SEC,
+        state=str(STATE_PATH),
+        log=str(LOG_PATH),
+        account_polling="60S_RECON_PLUS_EVENT",
+        bar_limits=list(BAR_LIMITS),
+        fresh_broker_orders=True,
+        regular_session_only=True,
+        force_flat_minute_et=FORCE_FLAT_MINUTE_ET,
+        tp1_cap_pct=TP1_CAP_PCT,
+        pre_tp1_trail_pct=PRE_TP1_TRAIL_PCT,
+        runner_trail_pct=RUNNER_TRAIL_PCT,
+        momentum_fail_bars=MOMENTUM_FAIL_BARS,
+    )
 
     while True:
         try:
@@ -228,6 +312,7 @@ def main() -> int:
                 continue
 
             bar_key = max(str(bars[s].iloc[-1]["time"]) for s in bars)
+            session, et_minute, et_day = et_session()
 
             if time.monotonic() - last_recon >= RECON_SEC:
                 hs = pair_holdings()
@@ -239,7 +324,7 @@ def main() -> int:
                 if hs:
                     h0 = hs[0]
                     if not persisted or persisted.get("symbol") != h0["symbol"] or int(persisted.get("current_qty") or 0) != h0["qty"]:
-                        persisted = rebuild_from_holding(h0, bar_key, qty_default)
+                        persisted = rebuild_from_holding(h0, bar_key, qty_default, bars[h0["symbol"]])
                 elif persisted:
                     persisted = {}
                     STATE_PATH.unlink(missing_ok=True)
@@ -252,7 +337,13 @@ def main() -> int:
                 continue
             last_eval_bar = bar_key
 
+            # Do not open new positions outside the US regular session. This is a
+            # day-trading runner; positions are flattened before 16:00 ET.
             if not persisted:
+                if session != "REGULAR" or et_minute >= FORCE_FLAT_MINUTE_ET:
+                    log("SESSION_NO_ENTRY", bar=bar_key, session=session, et_minute=et_minute, et_day=et_day)
+                    continue
+
                 r = pair.evaluate_flat_pair(bars)
                 log("FLAT_EVAL", bar=bar_key, symbol=r.symbol, action=r.action.value, reason=r.reason, price=r.price, score=r.score, eval_ms=round((time.monotonic()-t0)*1000,1))
                 if r.action != Action.ENTER:
@@ -261,7 +352,11 @@ def main() -> int:
                 sym = r.symbol
                 px = marketable_price(float(r.price), "BUY")
                 log("BUY_TRIGGER", symbol=sym, qty=qty_default, limit=px, score=r.score, reason=r.reason)
-                ack = order_with_retry("BUY", sym, qty_default, px)
+                try:
+                    ack = order_with_retry("BUY", sym, qty_default, px)
+                except MarketClosedOrderError:
+                    log("BUY_ABORTED_MARKET_CLOSED", symbol=sym, qty=qty_default)
+                    continue
                 log("BUY_SENT", symbol=sym, qty=qty_default, limit=px, score=r.score, reason=r.reason, ack=ack)
                 time.sleep(3)
                 h = holding(sym)
@@ -269,18 +364,119 @@ def main() -> int:
                     stop = float(r.stop or (h["avg"] * 0.99))
                     st = PositionState(symbol=sym)
                     st.open(h["avg"], stop, opened_at=bar_key)
-                    persisted = state_to_dict(st, qty_default, h["qty"], bar_key)
+                    entry_outer = (r.diagnostics or {}).get("outer_upper")
+                    extras = {
+                        "entry_outer_upper": entry_outer,
+                        "tp1_price": frozen_tp1(float(h["avg"]), entry_outer),
+                        "momentum_fail_count": 0,
+                        "exit_pending_market_closed": False,
+                        "exit_pending_reason": None,
+                        "entry_source": "DBB_SIGNAL",
+                        "entry_score": r.score,
+                        "entry_reason": r.reason,
+                    }
+                    persisted = state_to_dict(st, qty_default, h["qty"], bar_key, extras)
                     save_state(persisted)
-                    log("BUY_FILLED", holding=h, stop=stop)
+                    log("BUY_FILLED", holding=h, stop=stop, tp1_price=extras["tp1_price"], entry_outer_upper=entry_outer)
                 else:
                     log("BUY_NOT_YET_VISIBLE", symbol=sym, ack=ack)
                 continue
 
             st = state_from_dict(persisted)
             sym = st.symbol.upper()
-            r = eng.evaluate_open(st, bars[sym])
             current_qty = int(persisted.get("current_qty") or persisted.get("initial_qty") or qty_default)
-            log("OPEN_EVAL", bar=bar_key, symbol=sym, qty=current_qty, action=r.action.value, reason=r.reason, price=r.price, eval_ms=round((time.monotonic()-t0)*1000,1))
+
+            # If a prior exit could not be sent because the market was closed,
+            # liquidate first thing on the next regular session before any new
+            # strategy decision.
+            if persisted.get("exit_pending_market_closed"):
+                if session != "REGULAR":
+                    log("EXIT_PENDING_MARKET_CLOSED", symbol=sym, qty=current_qty, reason=persisted.get("exit_pending_reason"), session=session)
+                    continue
+                h = holding(sym)
+                if not h:
+                    persisted = {}
+                    STATE_PATH.unlink(missing_ok=True)
+                    log("EXIT_PENDING_ALREADY_FLAT", symbol=sym)
+                    continue
+                px = marketable_price(float(bars[sym].iloc[-1]["close"]), "SELL")
+                reason = str(persisted.get("exit_pending_reason") or "MARKET_REOPEN_EXIT")
+                log("FULL_SELL_TRIGGER", symbol=sym, qty=h["qty"], limit=px, reason=reason)
+                ack = order_with_retry("SELL", sym, h["qty"], px)
+                log("FULL_SELL_SENT", symbol=sym, qty=h["qty"], limit=px, reason=reason, ack=ack)
+                time.sleep(3)
+                h2 = holding(sym)
+                if not h2:
+                    persisted = {}
+                    STATE_PATH.unlink(missing_ok=True)
+                    log("FULL_SELL_FILLED", symbol=sym, reason=reason)
+                else:
+                    persisted["current_qty"] = h2["qty"]
+                    save_state(persisted)
+                    log("FULL_SELL_PENDING", holding=h2, reason=reason)
+                continue
+
+            # Hard day-trading boundary: flatten before regular close, not after
+            # Kiwoom starts rejecting orders.
+            if session == "REGULAR" and et_minute >= FORCE_FLAT_MINUTE_ET:
+                r = SignalResult(sym, Action.FULL_EXIT, "SESSION_CLOSE_FLATTEN", float(bars[sym].iloc[-1]["close"]), exit_fraction=1.0)
+            elif session != "REGULAR":
+                persisted["exit_pending_market_closed"] = True
+                persisted["exit_pending_reason"] = "OUTSIDE_REGULAR_WITH_OPEN_POSITION"
+                save_state(persisted)
+                log("EXIT_PENDING_MARKET_CLOSED", symbol=sym, qty=current_qty, reason=persisted["exit_pending_reason"], session=session)
+                continue
+            else:
+                r = eng.evaluate_open(st, bars[sym])
+
+                # Persist a frozen TP1 from entry instead of chasing an expanding
+                # outer Bollinger band. Cap TP1 at +0.5% by default.
+                diag = r.diagnostics or {}
+                price = float(r.price)
+                high = float(diag.get("high") or bars[sym].iloc[-1]["high"])
+                tp1 = float(persisted.get("tp1_price") or frozen_tp1(float(st.entry_price), persisted.get("entry_outer_upper")))
+                persisted["tp1_price"] = tp1
+
+                # Two-bar thesis failure BEFORE TP1: RSI slope and MACD-gap
+                # deterioration below inner-upper invalidates the early entry.
+                momentum_weak = bool(diag.get("momentum_weak", False))
+                inner_u = float(diag.get("inner_upper") or price)
+                fail_now = bool(momentum_weak and price < inner_u)
+                fail_count = int(persisted.get("momentum_fail_count") or 0)
+                fail_count = fail_count + 1 if fail_now else 0
+                persisted["momentum_fail_count"] = fail_count
+
+                peak = float(st.high_watermark or st.entry_price)
+                peak_profit = (peak / float(st.entry_price) - 1.0) if st.entry_price else 0.0
+                pre_tp1_trail_hit = bool(
+                    not st.partial_exit_done
+                    and peak_profit >= PRE_TP1_PROTECT_ACTIVATE_PCT
+                    and price <= peak * (1.0 - PRE_TP1_TRAIL_PCT)
+                )
+
+                if not st.partial_exit_done and high >= tp1:
+                    r = SignalResult(sym, Action.PARTIAL_EXIT, "FROZEN_TP1", price, stop=st.stop_price, exit_fraction=0.5, diagnostics=diag)
+                elif not st.partial_exit_done and pre_tp1_trail_hit:
+                    r = SignalResult(sym, Action.FULL_EXIT, "PRE_TP1_PROFIT_PROTECT", price, stop=st.stop_price, exit_fraction=1.0, diagnostics=diag)
+                elif not st.partial_exit_done and fail_count >= MOMENTUM_FAIL_BARS:
+                    r = SignalResult(sym, Action.FULL_EXIT, "PRE_TP1_MOMENTUM_2BAR", price, stop=st.stop_price, exit_fraction=1.0, diagnostics=diag)
+                elif st.partial_exit_done:
+                    runner_trail_hit = bool(st.high_watermark and price <= float(st.high_watermark) * (1.0 - RUNNER_TRAIL_PCT))
+                    if runner_trail_hit and r.action == Action.HOLD:
+                        r = SignalResult(sym, Action.FULL_EXIT, "RUNNER_TIGHT_TRAIL", price, stop=st.stop_price, exit_fraction=1.0, diagnostics=diag)
+
+            log(
+                "OPEN_EVAL",
+                bar=bar_key,
+                symbol=sym,
+                qty=current_qty,
+                action=r.action.value,
+                reason=r.reason,
+                price=r.price,
+                tp1_price=persisted.get("tp1_price"),
+                momentum_fail_count=persisted.get("momentum_fail_count", 0),
+                eval_ms=round((time.monotonic()-t0)*1000,1),
+            )
 
             if r.action == Action.PARTIAL_EXIT:
                 h = holding(sym)
@@ -292,15 +488,23 @@ def main() -> int:
                 sell_qty = max(1, min(h["qty"] - 1 if h["qty"] > 1 else 1, int(round(h["qty"] * float(r.exit_fraction or 0.5)))))
                 px = marketable_price(float(r.price), "SELL")
                 log("PARTIAL_SELL_TRIGGER", symbol=sym, qty=sell_qty, limit=px, reason=r.reason)
-                ack = order_with_retry("SELL", sym, sell_qty, px)
+                try:
+                    ack = order_with_retry("SELL", sym, sell_qty, px)
+                except MarketClosedOrderError:
+                    persisted["exit_pending_market_closed"] = True
+                    persisted["exit_pending_reason"] = r.reason
+                    save_state(persisted)
+                    log("EXIT_PENDING_MARKET_CLOSED", symbol=sym, qty=h["qty"], reason=r.reason)
+                    continue
                 log("PARTIAL_SELL_SENT", symbol=sym, qty=sell_qty, limit=px, reason=r.reason, ack=ack)
                 time.sleep(3)
                 h2 = holding(sym)
                 if h2:
                     st.partial_exit(float(r.exit_fraction or 0.5))
-                    persisted = state_to_dict(st, int(persisted.get("initial_qty") or qty_default), h2["qty"], bar_key)
+                    persisted = with_preserved_extras(st, persisted, int(persisted.get("initial_qty") or qty_default), h2["qty"], bar_key)
+                    persisted["momentum_fail_count"] = 0
                     save_state(persisted)
-                    log("PARTIAL_SELL_FILLED", holding=h2)
+                    log("PARTIAL_SELL_FILLED", holding=h2, reason=r.reason)
                 else:
                     persisted = {}
                     STATE_PATH.unlink(missing_ok=True)
@@ -315,18 +519,25 @@ def main() -> int:
                     continue
                 px = marketable_price(float(r.price), "SELL")
                 log("FULL_SELL_TRIGGER", symbol=sym, qty=h["qty"], limit=px, reason=r.reason)
-                ack = order_with_retry("SELL", sym, h["qty"], px)
+                try:
+                    ack = order_with_retry("SELL", sym, h["qty"], px)
+                except MarketClosedOrderError:
+                    persisted["exit_pending_market_closed"] = True
+                    persisted["exit_pending_reason"] = r.reason
+                    save_state(persisted)
+                    log("EXIT_PENDING_MARKET_CLOSED", symbol=sym, qty=h["qty"], reason=r.reason)
+                    continue
                 log("FULL_SELL_SENT", symbol=sym, qty=h["qty"], limit=px, reason=r.reason, ack=ack)
                 time.sleep(3)
                 h2 = holding(sym)
                 if not h2:
                     persisted = {}
                     STATE_PATH.unlink(missing_ok=True)
-                    log("FULL_SELL_FILLED", symbol=sym)
+                    log("FULL_SELL_FILLED", symbol=sym, reason=r.reason)
                 else:
                     persisted["current_qty"] = h2["qty"]
                     save_state(persisted)
-                    log("FULL_SELL_PENDING", holding=h2)
+                    log("FULL_SELL_PENDING", holding=h2, reason=r.reason)
             else:
                 persisted["high_watermark"] = st.high_watermark
                 persisted["last_bar"] = bar_key

@@ -13,7 +13,7 @@ from tools.backtest_dbb_engine5_tuner import MIN_TRADES, THRESHOLDS, build_1m_ex
 from tools.backtest_dbb_kr_v2_v21_v22 import FORCE_FLAT_MINUTE, NO_ENTRY_MINUTE, load_data, summary
 
 OUT = Path('/home/ubuntu/day-trader-api')
-CHECKPOINT = OUT / 'dbb_engine5_exit_v4_checkpoint.csv'
+CHECKPOINT = OUT / 'dbb_engine5_exit_v5_checkpoint.csv'
 
 
 def candidate_configs():
@@ -56,9 +56,11 @@ def pack_exit_events(raw, cfg):
 def pack_state_events(frames):
     ev = {}
     for sym, f in frames.items():
-        cols = ['time', 'trend_up', 'outer_expanding']
-        for ts, trend_up, outer_expanding in f[cols].itertuples(index=False, name=None):
-            ev.setdefault(pd.Timestamp(ts), {})[sym] = (bool(trend_up), bool(outer_expanding))
+        cols = ['time', 'trend_up', 'outer_expanding', 'mid_slope8', 'macd_slope_spread', 'rsi_slope']
+        for ts, trend_up, outer_expanding, mid_slope8, spread, rsi_slope in f[cols].itertuples(index=False, name=None):
+            ev.setdefault(pd.Timestamp(ts), {})[sym] = (
+                bool(trend_up), bool(outer_expanding), _finite(mid_slope8), _finite(spread), _finite(rsi_slope)
+            )
     return ev
 
 
@@ -68,28 +70,39 @@ def pack_entry_events(scored_frames):
         if 'entry_gate' not in f.columns:
             raise RuntimeError('Engine 5 frame missing entry_gate; corrected persistence gate is not deployed')
         q = f[f['entry_gate']].copy()
-        cols = ['time', 'close', 'entry_score', 'macd_slope_spread_strength', 'rsi_slope_strength', 'inner_upper', 'inner_lower']
+        cols = ['time', 'close', 'entry_score', 'macd_slope_spread_strength', 'rsi_slope_strength', 'inner_upper', 'inner_lower', 'outer_upper', 'mid']
         for r in q[cols].itertuples(index=False, name=None):
-            iu = _finite(r[5]); il = _finite(r[6])
+            iu = _finite(r[5]); il = _finite(r[6]); ou = _finite(r[7]); mid = _finite(r[8]); close = float(r[1])
             band_r = iu - il if np.isfinite(iu) and np.isfinite(il) else np.nan
             if not np.isfinite(band_r) or band_r <= 0:
                 continue
+            # Structural R: if entry is already extended above the upper bands,
+            # do not use the tiny current inner-band width alone. Anchor risk to
+            # at least the distance back to inner-upper, while keeping one full
+            # inner-band width as the minimum structural unit.
+            extended_dist = max(0.0, close - iu) if np.isfinite(iu) else 0.0
+            structural_r = max(band_r, extended_dist)
             ts = pd.Timestamp(r[0])
-            ev.setdefault(ts, []).append((sym, float(r[1]), float(r[2]), _finite(r[3]), _finite(r[4]), band_r, iu, il))
+            ev.setdefault(ts, []).append((sym, close, float(r[2]), _finite(r[3]), _finite(r[4]), structural_r, iu, il, ou, mid, band_r))
     return ev
 
 
 def simulate_v4(packed_exits, entry_events, state_events, threshold: float):
-    """Engine 5 corrected exit state machine.
+    """Engine 5 exit V5.
 
-    R is the full 5-minute inner-band width at entry: inner_upper-inner_lower.
+    R is structural risk at entry:
+      max(full 5m inner-band width, entry-close distance back to inner-upper).
     - Initial stop: entry - 1R.
-    - TP1: entry + 2R, sell 50% of original position.
-    - After TP1, while 5m DBB trend remains up and outer band is expanding,
-      first 1m touch of outer-upper sells half of the remaining position (25% original).
+    - TP1: entry + 2R, sell 50% original.
+    - After TP1, continuing uptrend + outer expansion: outer-upper touch sells
+      half the remainder (25% original).
     - Final runner exits on 1m close below inner-lower.
-    - If the 5m rising trend is lost after TP1, an inner-upper retest exits all remaining shares.
-    Intrabar stop-vs-target ambiguity is handled conservatively: stop is checked first.
+    - Momentum/trend fade exits all remaining shares immediately at the current
+      1m close when at least two of the following are true on the latest 5m bar:
+        DBB mid slope <= 0, MACD slope spread <= 0, RSI slope <= 0.
+      This is evaluated after TP1 and also while profitable before TP1, so a
+      strong move is not allowed to round-trip while waiting for a mechanical TP.
+    - Re-entry is allowed with no artificial cooldown when entry_gate becomes true again.
     """
     pos = None
     trades = []
@@ -112,7 +125,7 @@ def simulate_v4(packed_exits, entry_events, state_events, threshold: float):
         trades.append({
             'symbol': pos['symbol'], 'entry_time': pos['entry_time'], 'exit_time': pd.Timestamp(ts),
             'entry_price': pos['entry_price'], 'exit_price': float(price), 'entry_score': pos['entry_score'],
-            'r_abs': pos['r_abs'], 'r_pct': pos['r_abs'] / pos['entry_price'] * 100.0,
+            'r_abs': pos['r_abs'], 'raw_band_r': pos['raw_band_r'], 'r_pct': pos['r_abs'] / pos['entry_price'] * 100.0,
             'stop_price': pos['stop_price'], 'tp1_price': pos['tp1_price'],
             'pnl_pct': pnl * 100.0, 'first_tp_done': pos['tp1_done'], 'second_tp_done': pos['tp2_done'],
             'partial_done': pos['tp1_done'], 'extra_tp_count': int(pos['tp2_done']),
@@ -130,6 +143,12 @@ def simulate_v4(packed_exits, entry_events, state_events, threshold: float):
             if rr is not None:
                 close, low, high, iu, il, ou = rr
                 last_price = close
+                trend_up, outer_expanding, mid_slope8, spread, rsi_slope = current_state.get(
+                    pos['symbol'], (False, False, np.nan, np.nan, np.nan)
+                )
+                fade_votes = int(np.isfinite(mid_slope8) and mid_slope8 <= 0) + int(np.isfinite(spread) and spread <= 0) + int(np.isfinite(rsi_slope) and rsi_slope <= 0)
+                momentum_fade = fade_votes >= 2
+                profitable = close > pos['entry_price']
 
                 if minute >= FORCE_FLAT_MINUTE:
                     close_record(close, ts, 'SESSION_FORCE_FLAT')
@@ -140,23 +159,17 @@ def simulate_v4(packed_exits, entry_events, state_events, threshold: float):
                         realize(0.50, pos['tp1_price'])
                         pos['tp1_done'] = True
                         pos['tp1_time'] = ts
+                    elif profitable and momentum_fade:
+                        close_record(close, ts, 'PROFIT_MOMENTUM_FADE_EXIT')
                 else:
-                    trend_up, outer_expanding = current_state.get(pos['symbol'], (False, False))
-
-                    # A rising wave that turns sideways/loses its 5m DBB-mid uptrend
-                    # is not allowed to drift indefinitely. Exit remaining shares on
-                    # an inner-upper retest/breach.
-                    if (not trend_up) and np.isfinite(iu) and low <= iu:
-                        fill = iu if high >= iu else close
-                        close_record(fill, ts, 'SIDEWAYS_INNER_UPPER_EXIT')
+                    if momentum_fade:
+                        close_record(close, ts, 'MOMENTUM_FADE_FULL_EXIT')
                     else:
-                        # TP2 only after TP1, only during continuing uptrend + outer expansion.
                         if (not pos['tp2_done']) and trend_up and outer_expanding and np.isfinite(ou) and high >= ou:
                             realize(pos['remaining'] * 0.50, ou)
                             pos['tp2_done'] = True
                             pos['tp2_time'] = ts
 
-                        # The final 25% runner is protected by a close below inner-lower.
                         if pos is not None and pos['tp2_done'] and np.isfinite(il) and close < il:
                             close_record(close, ts, 'INNER_LOWER_CLOSE_EXIT')
 
@@ -167,14 +180,15 @@ def simulate_v4(packed_exits, entry_events, state_events, threshold: float):
                 if eligible:
                     if len(eligible) > 1:
                         collisions += 1
-                    sym, close, score, ms, rs, band_r, entry_iu, entry_il = max(
+                    sym, close, score, ms, rs, structural_r, entry_iu, entry_il, entry_ou, entry_mid, raw_band_r = max(
                         eligible,
                         key=lambda c: (c[2], c[3] if np.isfinite(c[3]) else -1e9, c[4] if np.isfinite(c[4]) else -1e9, c[0])
                     )
                     pos = {
                         'symbol': sym, 'entry_time': pd.Timestamp(ts), 'entry_price': close, 'entry_score': score,
-                        'r_abs': band_r, 'entry_inner_upper': entry_iu, 'entry_inner_lower': entry_il,
-                        'stop_price': close - band_r, 'tp1_price': close + 2.0 * band_r,
+                        'r_abs': structural_r, 'raw_band_r': raw_band_r,
+                        'entry_inner_upper': entry_iu, 'entry_inner_lower': entry_il, 'entry_outer_upper': entry_ou, 'entry_mid': entry_mid,
+                        'stop_price': close - structural_r, 'tp1_price': close + 2.0 * structural_r,
                         'remaining': 1.0, 'realized': 0.0, 'tp1_done': False, 'tp2_done': False,
                         'tp1_time': None, 'tp2_time': None,
                     }
@@ -218,7 +232,7 @@ def main():
     packed_exits = pack_exit_events(raw, base_cfg)
     base_frames = build_cfg_frames(raw, base_cfg)
     state_events = pack_state_events(base_frames)
-    print(f'[EXIT V4] 1R=entry 5m inner-band width; stop=-1R; TP1=+2R sell50%; uptrend+outer expansion outer-upper touch sells half remaining; final runner close<inner-lower; sideways inner-upper retest exits remaining.', flush=True)
+    print('[EXIT V5] structural R=max(inner-band width, entry distance to inner-upper); stop=-1R; TP1=+2R sell50%; continuing trend outer-upper touch sells half remaining; momentum fade(2/3: DBB mid, MACD spread, RSI slope) exits remaining; final runner close<inner-lower.', flush=True)
     print(f'[TIMELINE] 1m timestamps={len(packed_exits)}', flush=True)
 
     existing = pd.read_csv(CHECKPOINT) if CHECKPOINT.exists() else pd.DataFrame()
@@ -259,16 +273,16 @@ def main():
     eligible = board[board.trades >= MIN_TRADES].copy().sort_values(
         ['win_rate', 'pf', 'avg_pct', 'gross_pct', 'trades'], ascending=[False, False, False, False, False]
     )
-    print('\n=== ENGINE 5 EXIT V4: TOP 30 ===')
+    print('\n=== ENGINE 5 EXIT V5: TOP 30 ===')
     cols = ['version','threshold','trades','wins','losses','win_rate','avg_pct','gross_pct','pf','max_loss_pct','first_tp_rate','second_tp_rate','avg_r_pct','collisions','w_macd_gap','w_rsi_state','w_rsi_accel','w_volume','w_outer_expand','macd_full_ratio','rsi_full_ratio']
     print(eligible[[c for c in cols if c in eligible.columns]].head(30).to_string(index=False))
 
-    board.to_csv(OUT / 'dbb_engine5_exit_v4_all.csv', index=False)
-    eligible.head(100).to_csv(OUT / 'dbb_engine5_exit_v4_top100.csv', index=False)
+    board.to_csv(OUT / 'dbb_engine5_exit_v5_all.csv', index=False)
+    eligible.head(100).to_csv(OUT / 'dbb_engine5_exit_v5_top100.csv', index=False)
     if best_trades is not None:
-        best_trades.to_csv(OUT / 'dbb_engine5_exit_v4_best_trades.csv', index=False)
+        best_trades.to_csv(OUT / 'dbb_engine5_exit_v5_best_trades.csv', index=False)
     print(f'[TIMING] total={time.perf_counter()-t0:.2f}s')
-    print('[CSV] dbb_engine5_exit_v4_all.csv, dbb_engine5_exit_v4_top100.csv, dbb_engine5_exit_v4_best_trades.csv')
+    print('[CSV] dbb_engine5_exit_v5_all.csv, dbb_engine5_exit_v5_top100.csv, dbb_engine5_exit_v5_best_trades.csv')
 
 
 if __name__ == '__main__':

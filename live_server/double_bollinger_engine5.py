@@ -14,13 +14,14 @@ class DoubleBollingerEngine5Config:
       1) DBB mid is rising,
       2) MACD itself is rising,
       3) MACD is rising faster than its signal line,
-      4) RSI is rising.
+      4) RSI is rising,
+      5) weak one-bar rebounds are rejected by persistence/context checks.
 
-    Those four conditions are hard gates. Their *magnitude* plus MACD state,
-    golden cross, RSI acceleration, volume, band expansion and inner-band
-    traversal are then scored. This prevents a positive MACD slope spread from
-    authorizing a buy while MACD itself is still falling, and prevents other
-    score components from compensating for a flat/falling RSI.
+    If MACD is already above its signal line (or is crossing it now), the MACD
+    context gate is satisfied. If MACD is still below signal, the MACD gap must
+    improve for two consecutive completed 5-minute bars. RSI must also rise for
+    two consecutive completed 5-minute bars. This prevents a single 5-minute
+    bounce from being mistaken for a sustained acceleration wave.
     """
 
     rsi_period: int = 14
@@ -180,17 +181,35 @@ class DoubleBollingerEngine5:
         ]
         z['entry_score'] = z[score_cols].sum(axis=1).clip(0.0, 100.0)
 
-        # Hard directional gates: score can measure strength, but it cannot
-        # compensate for a missing directional condition.
+        # Direction gates. Magnitude is scored later, but score cannot compensate
+        # for a missing directional condition.
         z['gate_trend_up'] = z['trend_up'].fillna(False)
         z['gate_macd_rising'] = (z['macd_slope'] > 0).fillna(False)
         z['gate_macd_accel'] = (z['macd_slope_spread'] > 0).fillna(False)
         z['gate_rsi_rising'] = (z['rsi_slope'] > 0).fillna(False)
+
+        # Persistence/context gates. If MACD is below signal, require two
+        # consecutive completed 5m bars of improving gap. RSI must rise for two
+        # consecutive completed 5m bars as well.
+        gap_improving_now = (z['macd_gap_delta'] > 0).fillna(False)
+        gap_improving_prev = (z['macd_gap_delta'].shift(1) > 0).fillna(False)
+        z['gate_macd_context'] = (
+            z['macd_above_signal'].fillna(False)
+            | z['macd_golden_cross'].fillna(False)
+            | (gap_improving_now & gap_improving_prev)
+        )
+        z['gate_rsi_persistent'] = (
+            (z['rsi_slope'] > 0).fillna(False)
+            & (z['rsi_slope'].shift(1) > 0).fillna(False)
+        )
+
         z['entry_gate'] = (
             z['gate_trend_up']
             & z['gate_macd_rising']
             & z['gate_macd_accel']
+            & z['gate_macd_context']
             & z['gate_rsi_rising']
+            & z['gate_rsi_persistent']
         )
         z['entry_signal'] = z['entry_gate'] & (z['entry_score'] >= self.cfg.entry_score)
         return z

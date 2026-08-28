@@ -119,8 +119,11 @@ def by_symbol(name: str, trades: pd.DataFrame) -> pd.DataFrame:
 def exit_reasons(name: str, trades: pd.DataFrame) -> pd.DataFrame:
     if trades.empty:
         return pd.DataFrame()
+    reason_col = 'reason' if 'reason' in trades.columns else ('exit_reason' if 'exit_reason' in trades.columns else None)
+    if reason_col is None:
+        return pd.DataFrame([{'version': name, 'note': 'no reason/exit_reason column'}])
     rows = []
-    for reason, g in trades.groupby('exit_reason'):
+    for reason, g in trades.groupby(reason_col):
         r = row(f'{name}:{reason}', g)
         r['exit_reason'] = reason
         rows.append(r)

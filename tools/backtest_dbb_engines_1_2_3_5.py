@@ -26,7 +26,7 @@ from tools.backtest_dbb_kr_v2_v21_v22_adaptive import (
     build_frames_cached,
     simulate_v22_adaptive,
 )
-from tools.backtest_dbb_engine5_tuner import main as run_engine5
+from tools.backtest_dbb_engine5_fast_tuner import main as run_engine5
 
 RUNTIME = Path('/home/ubuntu/day-trader-api')
 DB = RUNTIME / 'daytrader.db'
@@ -102,8 +102,8 @@ def main():
     run_engines_123_cached(raw)
 
     print('\n' + '=' * 88)
-    print('PHASE B — ENGINE 5 CLARIFIED LOGIC + TUNING')
-    print('Compare every Engine 5 candidate against the cached Engine 1/2/3 reference above.')
+    print('PHASE B — ENGINE 5 FAST STAGED TUNING')
+    print('Stage 1 screens all entry configs with one stop; Stage 2 tests all stops only on the top configs.')
     print('=' * 88, flush=True)
     run_engine5()
 

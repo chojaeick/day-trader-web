@@ -15,9 +15,10 @@ class DoubleBollingerEngine5Config:
       RSI rising 15, RSI acceleration 10, volume expansion 10,
       outer-band expansion 10, inner-band upward traversal 5.
 
-    No Bollinger-band position is a hard entry filter. Confirmation factors add
-    score; a strong continuation/chase setup can therefore qualify even when
-    price is already high in the bands.
+    Rising DBB-mid trend is a mandatory directional gate. Bollinger-band price
+    position is not a hard entry filter. Confirmation factors add score; a
+    strong continuation/chase setup can therefore qualify even when price is
+    already high in the bands.
     """
 
     rsi_period: int = 14
@@ -40,7 +41,6 @@ class DoubleBollingerEngine5Config:
     w_outer_expand: float = 10.0
     w_inner_traverse: float = 5.0
 
-    # Full-score normalization anchors for continuous confirmation strength.
     volume_full_ratio: float = 2.0
     outer_expand_full_ratio: float = 0.03
 
@@ -144,8 +144,6 @@ class DoubleBollingerEngine5:
         cross_inner_upper_now = (close.shift(1) <= iu.shift(1)) & (close > iu)
         z['inner_traverse_up'] = touched_lower_recently & cross_inner_upper_now
 
-        # 100-point starting score.  Directional state receives binary base
-        # points; volume and band expansion scale continuously with strength.
         z['score_trend'] = np.where(z['trend_up'], self.cfg.w_trend, 0.0)
         z['score_macd_state'] = np.where(z['macd_above_signal'], self.cfg.w_macd_state, 0.0)
         z['score_macd_gap'] = np.where(z['macd_gap_widening'], self.cfg.w_macd_gap, 0.0)
@@ -166,5 +164,5 @@ class DoubleBollingerEngine5:
             'score_outer_expand', 'score_inner_traverse',
         ]
         z['entry_score'] = z[score_cols].sum(axis=1).clip(0.0, 100.0)
-        z['entry_signal'] = z['entry_score'] >= self.cfg.entry_score
+        z['entry_signal'] = z['trend_up'] & (z['entry_score'] >= self.cfg.entry_score)
         return z

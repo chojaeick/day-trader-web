@@ -15,11 +15,13 @@ class DoubleBollingerEngine5Config:
       - Overall trend is rising.
       - MACD is above its signal line.
       - RSI slope is rising.
-      - The outer Bollinger range is expanding.
-      - Inner-band upward traversal and approximately 2x volume are confirmation
-        diagnostics only; they are NOT mandatory entry gates.
-      - Entry may occur at any Bollinger-band position when the mandatory trend,
-        MACD, RSI and volatility-expansion conditions are satisfied.
+      - Bollinger position is NOT an entry gate.
+      - Inner-band upward traversal, volume expansion and outer-band expansion
+        are confirmation/strength diagnostics only; they are NOT mandatory gates.
+      - A continuation/chase entry is therefore still possible while price is
+        already high in the bands, provided the core trend/MACD/RSI state is valid.
+      - Sudden volume expansion, steeper RSI and a widening MACD-signal gap are
+        recorded as stronger continuation diagnostics rather than hard filters.
       - TP1 is NOT frozen. After price breaks the dynamically rising outer-upper
         band and later comes back below the then-current outer-upper band, sell 50%.
       - Hold the remaining 50% through an inner-upper touch.
@@ -97,11 +99,17 @@ class DoubleBollingerEngine5:
         mid, iu, il, ou, ol = self._bands(close)
         width = ou - ol
         n = self.cfg.setup_lookback_bars
+        macd_gap = macd - signal
 
         z['rsi'] = rsi
         z['rsi_slope'] = rsi.diff()
+        z['rsi_slope_prev'] = z['rsi_slope'].shift(1)
+        z['rsi_accelerating'] = z['rsi_slope'] > z['rsi_slope_prev']
         z['macd'] = macd
         z['macd_signal'] = signal
+        z['macd_gap'] = macd_gap
+        z['macd_gap_delta'] = macd_gap.diff()
+        z['macd_gap_widening'] = z['macd_gap_delta'] > 0
         z['macd_slope'] = macd.diff()
         z['macd_above_signal'] = macd > signal
         z['macd_golden_cross'] = (macd.shift(1) <= signal.shift(1)) & (macd > signal)
@@ -111,12 +119,12 @@ class DoubleBollingerEngine5:
         z['outer_upper'] = ou
         z['outer_lower'] = ol
         z['outer_width'] = width
-        z['outer_expanding'] = width > width.shift(1)
+        z['outer_width_delta'] = width.diff()
+        z['outer_expanding'] = z['outer_width_delta'] > 0
         z['mid_slope8'] = self._rolling_slope(mid, n)
         z['trend_up'] = z['mid_slope8'] > 0
 
-        # Confirmation diagnostics only. Neither 2x volume nor inner-band
-        # traversal is required for an Engine-5 entry.
+        # Confirmation/strength diagnostics only. None of these blocks entry.
         prior_vol = volume.shift(1).rolling(n, min_periods=n).mean()
         z['volume_ratio'] = volume / prior_vol.replace(0.0, np.nan)
         z['volume_surge'] = z['volume_ratio'] >= self.cfg.volume_multiple
@@ -126,13 +134,13 @@ class DoubleBollingerEngine5:
         z['inner_traverse_up'] = touched_lower_recently & cross_inner_upper_now
         z['confirmation_inner_and_volume'] = z['inner_traverse_up'] & z['volume_surge']
 
-        # Mandatory entry conditions only. Bollinger position is intentionally
-        # unrestricted: the signal may occur below, inside, or above the inner
-        # band. Inner traversal and volume surge remain available for reporting.
+        # Core entry state only: rising overall trend + MACD above signal + RSI rising.
+        # Band location, volume surge and volatility expansion are intentionally
+        # not filters. This allows continuation/chase entries when momentum grows
+        # while price is already near/above the inner or outer upper band.
         z['entry_signal'] = (
             z['trend_up']
             & z['macd_above_signal']
             & (z['rsi_slope'] > 0)
-            & z['outer_expanding']
         )
         return z

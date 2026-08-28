@@ -13,33 +13,37 @@ class MockBrokerConfig:
     app_secret: str
     rest_base: str = "https://mockapi.kiwoom.com"
     order_enable: bool = False
+    expected_account_last4: str = "2300"
 
     @classmethod
     def from_env(cls) -> "MockBrokerConfig":
-        key = os.getenv("KIWOOM_MOCK_APP_KEY", "").strip()
-        secret = os.getenv("KIWOOM_MOCK_APP_SECRET", "").strip()
-        base = os.getenv("KIWOOM_MOCK_REST_BASE", "https://mockapi.kiwoom.com").strip().rstrip("/")
+        key = os.getenv("KIWOOM_KR_MOCK_APP_KEY", "").strip()
+        secret = os.getenv("KIWOOM_KR_MOCK_APP_SECRET", "").strip()
+        base = os.getenv("KIWOOM_KR_MOCK_REST_BASE", os.getenv("KIWOOM_MOCK_REST_BASE", "https://mockapi.kiwoom.com")).strip().rstrip("/")
         enabled = os.getenv("KIWOOM_MOCK_ORDER_ENABLE", "0").lower() in ("1", "true", "yes", "on")
+        expected = os.getenv("KIWOOM_KR_MOCK_EXPECTED_ACCOUNT_LAST4", "2300").strip()
         if not key or not secret:
-            raise RuntimeError("KIWOOM_MOCK_APP_KEY / KIWOOM_MOCK_APP_SECRET not set")
+            raise RuntimeError("KIWOOM_KR_MOCK_APP_KEY / KIWOOM_KR_MOCK_APP_SECRET not set")
         if "mockapi.kiwoom.com" not in base:
             raise RuntimeError(f"Refusing non-mock REST base: {base}")
-        return cls(key, secret, base, enabled)
+        return cls(key, secret, base, enabled, expected)
 
 
 class KiwoomMockBroker:
-    """Kiwoom mock-investment broker adapter.
+    """Kiwoom domestic-stock mock-investment broker adapter.
 
     Safety invariants:
-      * only KIWOOM_MOCK_* credentials are accepted
+      * only KIWOOM_KR_MOCK_* credentials are accepted
       * only mockapi.kiwoom.com is accepted
       * order placement is disabled unless KIWOOM_MOCK_ORDER_ENABLE=1
       * domestic mock orders are forced to KRX
+      * domestic account identity is checked before every order
     """
 
     def __init__(self, config: MockBrokerConfig | None = None):
         self.cfg = config or MockBrokerConfig.from_env()
         self.token: str | None = None
+        self._validated_account: str | None = None
 
     def get_token(self) -> str:
         r = requests.post(
@@ -55,7 +59,7 @@ class KiwoomMockBroker:
         r.raise_for_status()
         d = r.json()
         if d.get("return_code") not in (None, 0) or not d.get("token"):
-            raise RuntimeError(f"mock token failed: {d}")
+            raise RuntimeError(f"KR mock token failed: {d}")
         self.token = d["token"]
         return self.token
 
@@ -85,18 +89,33 @@ class KiwoomMockBroker:
         d = self._post("/api/dostk/acnt", "ka00001", {})
         acct = str(d.get("acctNo") or d.get("acct_no") or "").strip()
         if not acct:
-            raise RuntimeError(f"mock account number missing: {d}")
+            raise RuntimeError(f"KR mock account number missing: {d}")
+        return acct
+
+    def validate_account(self) -> str:
+        if self._validated_account:
+            return self._validated_account
+        acct = self.account_number()
+        digits = "".join(ch for ch in acct if ch.isdigit())
+        expected = "".join(ch for ch in self.cfg.expected_account_last4 if ch.isdigit())[-4:]
+        if expected and digits[-4:] != expected:
+            raise RuntimeError(
+                f"KR mock account mismatch: expected last4={expected}, got last4={digits[-4:]}"
+            )
+        self._validated_account = acct
         return acct
 
     def request_account(self, api_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Low-level safe account-query helper for documented account TRs."""
+        """Low-level safe account-query helper for documented domestic account TRs."""
+        self.validate_account()
         return self._post("/api/dostk/acnt", api_id, body or {})
 
     def _ensure_order_enabled(self) -> None:
         if not self.cfg.order_enable:
             raise RuntimeError(
-                "Mock order placement is disabled. Set KIWOOM_MOCK_ORDER_ENABLE=1 only after account-query validation."
+                "KR mock order placement is disabled. Set KIWOOM_MOCK_ORDER_ENABLE=1 only after account-query validation."
             )
+        self.validate_account()
 
     def buy_market(self, symbol: str, qty: int) -> dict[str, Any]:
         self._ensure_order_enabled()

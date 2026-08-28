@@ -10,14 +10,17 @@ import pandas as pd
 class DoubleBollingerEngine5Config:
     """5-minute DBB/MACD/RSI score engine.
 
-    Engine 5 is designed to enter a rising wave early when the DBB-mid trend is
-    already rising and momentum suddenly accelerates. The important distinction
-    is not merely MACD > signal, but how much faster the MACD slope is rising
-    than the signal-line slope. A steep RSI upslope is treated the same way.
+    Engine 5 enters only when the directional conditions are all true:
+      1) DBB mid is rising,
+      2) MACD itself is rising,
+      3) MACD is rising faster than its signal line,
+      4) RSI is rising.
 
-    Rising DBB-mid trend is a mandatory directional gate. Bollinger-band price
-    position, volume, band expansion and inner-band traversal are confirmations,
-    not mandatory entry gates.
+    Those four conditions are hard gates. Their *magnitude* plus MACD state,
+    golden cross, RSI acceleration, volume, band expansion and inner-band
+    traversal are then scored. This prevents a positive MACD slope spread from
+    authorizing a buy while MACD itself is still falling, and prevents other
+    score components from compensating for a flat/falling RSI.
     """
 
     rsi_period: int = 14
@@ -40,9 +43,6 @@ class DoubleBollingerEngine5Config:
     w_outer_expand: float = 5.0
     w_inner_traverse: float = 5.0
 
-    # Full score when current positive slope acceleration is roughly this many
-    # times the recent typical absolute slope. These are tuning parameters, not
-    # hard entry conditions.
     macd_slope_spread_full_ratio: float = 2.0
     rsi_slope_full_ratio: float = 2.0
     volume_full_ratio: float = 2.0
@@ -105,9 +105,6 @@ class DoubleBollingerEngine5:
 
     @staticmethod
     def _relative_positive_strength(x: pd.Series, n: int, full_ratio: float) -> pd.Series:
-        # Compare current positive slope with the recent typical absolute slope.
-        # shift(1) keeps the normalizer causal and prevents the current spike
-        # from diluting its own strength score.
         baseline = x.abs().shift(1).rolling(n, min_periods=max(3, n // 2)).median()
         ratio = x.clip(lower=0.0) / baseline.replace(0.0, np.nan)
         return np.clip(ratio / max(float(full_ratio), 1e-9), 0.0, 1.0).fillna(0.0)
@@ -141,7 +138,7 @@ class DoubleBollingerEngine5:
             z['macd_slope_spread'], n, self.cfg.macd_slope_spread_full_ratio
         )
         z['macd_above_signal'] = macd > signal
-        z['macd_gap_widening'] = (z['macd_slope_spread'] > 0)
+        z['macd_gap_widening'] = z['macd_slope_spread'] > 0
         z['macd_golden_cross'] = (macd.shift(1) <= signal.shift(1)) & (macd > signal)
 
         z['mid'] = mid
@@ -172,7 +169,6 @@ class DoubleBollingerEngine5:
 
         vol_strength = self._clip01((z['volume_ratio'].fillna(0.0) - 1.0) / max(self.cfg.volume_full_ratio - 1.0, 1e-9))
         z['score_volume'] = self.cfg.w_volume * vol_strength
-
         width_strength = self._clip01(z['outer_width_ratio'].fillna(0.0) / max(self.cfg.outer_expand_full_ratio, 1e-9))
         z['score_outer_expand'] = self.cfg.w_outer_expand * width_strength
         z['score_inner_traverse'] = np.where(z['inner_traverse_up'], self.cfg.w_inner_traverse, 0.0)
@@ -183,5 +179,18 @@ class DoubleBollingerEngine5:
             'score_outer_expand', 'score_inner_traverse',
         ]
         z['entry_score'] = z[score_cols].sum(axis=1).clip(0.0, 100.0)
-        z['entry_signal'] = z['trend_up'] & (z['entry_score'] >= self.cfg.entry_score)
+
+        # Hard directional gates: score can measure strength, but it cannot
+        # compensate for a missing directional condition.
+        z['gate_trend_up'] = z['trend_up'].fillna(False)
+        z['gate_macd_rising'] = (z['macd_slope'] > 0).fillna(False)
+        z['gate_macd_accel'] = (z['macd_slope_spread'] > 0).fillna(False)
+        z['gate_rsi_rising'] = (z['rsi_slope'] > 0).fillna(False)
+        z['entry_gate'] = (
+            z['gate_trend_up']
+            & z['gate_macd_rising']
+            & z['gate_macd_accel']
+            & z['gate_rsi_rising']
+        )
+        z['entry_signal'] = z['entry_gate'] & (z['entry_score'] >= self.cfg.entry_score)
         return z

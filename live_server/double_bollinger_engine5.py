@@ -10,22 +10,22 @@ import pandas as pd
 class DoubleBollingerEngine5Config:
     """User-specified 5-minute DBB/MACD/RSI logic.
 
-    This module intentionally implements only the stated Engine 5 logic:
+    Engine 5 rules:
       - 5-minute candles.
       - Overall trend is rising.
       - MACD is above its signal line.
       - RSI slope is rising.
-      - Price has traversed the inner Bollinger band upward within the recent
-        7-8 bars and remains in the rising setup.
-      - The traversal/setup includes an approximately 2x volume expansion.
       - The outer Bollinger range is expanding.
+      - Inner-band upward traversal and approximately 2x volume are confirmation
+        diagnostics only; they are NOT mandatory entry gates.
+      - Entry may occur at any Bollinger-band position when the mandatory trend,
+        MACD, RSI and volatility-expansion conditions are satisfied.
       - TP1 is NOT frozen. After price breaks the dynamically rising outer-upper
         band and later comes back below the then-current outer-upper band, sell 50%.
       - Hold the remaining 50% through an inner-upper touch.
       - Sell the remainder only when MACD is trending down, RSI slope is down,
         and price reaches the inner-lower band.
 
-    The 8-bar lookback is the literal implementation of the user's "7-8 bars".
     The existing DBB family parameters are preserved: 20-period center,
     inner +/-0.5 sigma, outer +/-3 sigma.
     """
@@ -115,36 +115,22 @@ class DoubleBollingerEngine5:
         z['mid_slope8'] = self._rolling_slope(mid, n)
         z['trend_up'] = z['mid_slope8'] > 0
 
-        # Volume surge is measured against the preceding 8 completed 5m bars,
-        # excluding the current bar itself.
+        # Confirmation diagnostics only. Neither 2x volume nor inner-band
+        # traversal is required for an Engine-5 entry.
         prior_vol = volume.shift(1).rolling(n, min_periods=n).mean()
         z['volume_ratio'] = volume / prior_vol.replace(0.0, np.nan)
         z['volume_surge'] = z['volume_ratio'] >= self.cfg.volume_multiple
 
-        # "Passed through the inner band and rose": during the preceding 8 bars
-        # price was at/below inner-lower, and the current close has crossed above
-        # inner-upper. This creates the setup event; it may remain actionable for
-        # up to 8 bars while the stated momentum/trend conditions remain true.
         touched_lower_recently = (close.shift(1) <= il.shift(1)).rolling(n, min_periods=1).max().fillna(0).astype(bool)
         cross_inner_upper_now = (close.shift(1) <= iu.shift(1)) & (close > iu)
         z['inner_traverse_up'] = touched_lower_recently & cross_inner_upper_now
-        z['setup_event'] = z['inner_traverse_up'] & z['volume_surge']
+        z['confirmation_inner_and_volume'] = z['inner_traverse_up'] & z['volume_surge']
 
-        setup_age = []
-        last_setup = None
-        for i, flag in enumerate(z['setup_event'].fillna(False).astype(bool)):
-            if flag:
-                last_setup = i
-            setup_age.append(np.nan if last_setup is None else i - last_setup)
-        z['setup_age'] = setup_age
-        z['setup_active'] = z['setup_age'].notna() & (z['setup_age'] <= n)
-
-        # Entry is the literal conjunction described by the user. There is no
-        # score, no inner-upper bonus, and no fixed MACD/RSI threshold beyond
-        # direction/state.
+        # Mandatory entry conditions only. Bollinger position is intentionally
+        # unrestricted: the signal may occur below, inside, or above the inner
+        # band. Inner traversal and volume surge remain available for reporting.
         z['entry_signal'] = (
-            z['setup_active']
-            & z['trend_up']
+            z['trend_up']
             & z['macd_above_signal']
             & (z['rsi_slope'] > 0)
             & z['outer_expanding']

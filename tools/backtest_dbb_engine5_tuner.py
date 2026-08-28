@@ -12,7 +12,6 @@ from tools.backtest_dbb_kr_v2_v21_v22 import FORCE_FLAT_MINUTE, NO_ENTRY_MINUTE,
 
 OUT = Path('/home/ubuntu/day-trader-api')
 MIN_TRADES = 40
-TARGET_WIN_RATE = 80.0
 THRESHOLDS = [45, 50, 55, 60, 65, 70, 75, 80]
 EXIT_MODES = ['TOUCH', 'MACD', 'RSI', 'BOTH']
 
@@ -67,6 +66,8 @@ def reweight(frames, cfg: DoubleBollingerEngine5Config, threshold: float):
         f['score_inner_traverse'] = np.where(f['inner_traverse_up'], cfg.w_inner_traverse, 0.0)
         cols = ['score_trend','score_macd_state','score_macd_gap','score_golden','score_rsi_state','score_rsi_accel','score_volume','score_outer_expand','score_inner_traverse']
         f['entry_score'] = f[cols].sum(axis=1).clip(0.0, 100.0)
+        # Overall rising trend is a mandatory Engine5 strategy condition.
+        # Win rate is NOT a strategy gate; it is only an observed tuning result.
         f['entry_signal'] = f['trend_up'] & (f['entry_score'] >= float(threshold))
         out[sym] = f
     return out
@@ -174,7 +175,9 @@ def candidate_configs():
         for v in vals:
             yield f'{name}_{v}', replace(base, **{field: float(v)})
 
-    # A compact set of paired momentum emphasis variants.
+    # Compact paired momentum emphasis variants. These are score changes,
+    # not new hard entry gates, so tuning does not manufacture win rate by
+    # simply starving the engine of entries.
     for macd_gap, rsi_accel, volume, outer in product([10,15,20], [10,15,20], [5,10,15], [5,10,15]):
         cfg = replace(base, w_macd_gap=float(macd_gap), w_rsi_accel=float(rsi_accel), w_volume=float(volume), w_outer_expand=float(outer))
         yield f'PAIR_G{macd_gap}_R{rsi_accel}_V{volume}_O{outer}', cfg
@@ -190,7 +193,8 @@ def main():
 
     configs = list(candidate_configs())
     total = len(configs) * len(THRESHOLDS) * len(EXIT_MODES)
-    print(f'[TUNER] configs={len(configs)} thresholds={len(THRESHOLDS)} exits={len(EXIT_MODES)} total_runs={total} min_trades={MIN_TRADES} target_win={TARGET_WIN_RATE:.1f}%', flush=True)
+    print(f'[TUNER] configs={len(configs)} thresholds={len(THRESHOLDS)} exits={len(EXIT_MODES)} total_runs={total} min_trades={MIN_TRADES}', flush=True)
+    print('[RULE] 80% win rate is a tuning goal only. It is not used as a filter or strategy condition.', flush=True)
 
     nrun = 0
     for cfg_name, cfg in configs:
@@ -202,7 +206,8 @@ def main():
                 r = metric_row(cfg_name, t, collisions, cfg, th, exit_mode)
                 rows.append(r)
                 if len(t) >= MIN_TRADES:
-                    key = (float(r['win_rate']), float(r['pf']), float(r['avg_pct']), float(r['gross_pct']), len(t))
+                    # Rank observed results only. No target-win-rate gate.
+                    key = (float(r['win_rate']), len(t), float(r['pf']), float(r['avg_pct']), float(r['gross_pct']))
                     if best_key is None or key > best_key:
                         best_key = key
                         best_trades = t.assign(config=cfg_name, threshold=th, exit_mode=exit_mode)
@@ -211,17 +216,13 @@ def main():
 
     board = pd.DataFrame(rows)
     eligible = board[board.trades >= MIN_TRADES].copy()
-    eligible = eligible.sort_values(['win_rate','pf','avg_pct','gross_pct','trades'], ascending=[False,False,False,False,False])
-    reached = eligible[eligible.win_rate >= TARGET_WIN_RATE]
+    # Win rate is the primary tuning objective; trades is the second key so
+    # equal-win-rate configurations prefer more opportunities, not fewer.
+    eligible = eligible.sort_values(['win_rate','trades','pf','avg_pct','gross_pct'], ascending=[False,False,False,False,False])
 
-    print('\n=== ENGINE 5 TUNER: TOP 30 WITH TRADE FLOOR ===')
+    print('\n=== ENGINE 5 TUNER: TOP 30 (NO WIN-RATE FILTER) ===')
     cols = ['version','threshold','exit_mode','trades','wins','losses','win_rate','avg_pct','gross_pct','pf','max_loss_pct','partial_rate','collisions','w_macd_state','w_macd_gap','w_golden','w_rsi_state','w_rsi_accel','w_volume','w_outer_expand','w_inner_traverse']
     print(eligible[[c for c in cols if c in eligible.columns]].head(30).to_string(index=False))
-    print(f'\n[TARGET] win_rate>={TARGET_WIN_RATE:.1f}% and trades>={MIN_TRADES}: matches={len(reached)}')
-    if len(reached):
-        print(reached[[c for c in cols if c in reached.columns]].head(20).to_string(index=False))
-    else:
-        print('No configuration reached the target without violating the trade-count floor on this sample.')
 
     board.to_csv(OUT / 'dbb_engine5_tuner_all.csv', index=False)
     eligible.head(100).to_csv(OUT / 'dbb_engine5_tuner_top100.csv', index=False)

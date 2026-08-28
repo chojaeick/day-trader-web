@@ -23,8 +23,10 @@ from tools.backtest_dbb_kr_v2_v21_v22 import FORCE_FLAT_MINUTE, NO_ENTRY_MINUTE,
 OUT = Path('/home/ubuntu/day-trader-api')
 COARSE_STOP = 0.010
 TOP_CONFIGS = 12
-STAGE1_CKPT = OUT / 'dbb_engine5_fast_stage1_checkpoint.csv'
-STAGE2_CKPT = OUT / 'dbb_engine5_fast_stage2_checkpoint.csv'
+# New checkpoint names are intentional: old checkpoints were produced by the
+# incorrect trend-only gate and must never contaminate corrected validation.
+STAGE1_CKPT = OUT / 'dbb_engine5_fast_gates_v2_stage1_checkpoint.csv'
+STAGE2_CKPT = OUT / 'dbb_engine5_fast_gates_v2_stage2_checkpoint.csv'
 
 
 def candidate_configs():
@@ -94,7 +96,11 @@ def pack_exit_events(exit_frames):
 def pack_entry_events(scored_frames):
     ev = {}
     for sym, f in scored_frames.items():
-        q = f[f['trend_up']]
+        # Corrected Engine 5 hard gate. Score is not allowed to compensate for
+        # a missing directional condition.
+        if 'entry_gate' not in f.columns:
+            raise RuntimeError('Engine 5 frame missing entry_gate; corrected engine was not deployed')
+        q = f[f['entry_gate']]
         cols = ['time','close','entry_score','macd_slope_spread_strength','rsi_slope_strength']
         for r in q[cols].itertuples(index=False, name=None):
             ts = pd.Timestamp(r[0])
@@ -175,6 +181,8 @@ def simulate_fast(packed_exits, entry_events, threshold: float, stop_pct: float)
 
 
 def score_once(cfg_frames, cfg):
+    # reweight changes only scores; entry_gate comes from the corrected engine
+    # and remains attached to every frame.
     return reweight(cfg_frames, cfg, 0.0)
 
 
@@ -188,7 +196,9 @@ def main():
     packed_exits = pack_exit_events(exit_frames)
     del exit_frames
     print(f'[ULTRAFAST] packed 1m exit timeline once: {len(packed_exits)} timestamps', flush=True)
-    print('[ULTRAFAST] each config is enriched once, scored once, then all thresholds reuse packed entry events.', flush=True)
+    print('[ENTRY GATES V2] REQUIRED: DBB mid rising AND MACD slope>0 AND MACD-signal slope spread>0 AND RSI slope>0.', flush=True)
+    print('[ENTRY SCORE] Magnitudes/confirmations rank only candidates that passed all hard gates.', flush=True)
+    print('[CHECKPOINT] Using new gates-v2 checkpoint files; old trend-only results are ignored.', flush=True)
 
     configs = list(candidate_configs())
     cfg_map = {name: cfg for name, cfg in configs}
@@ -253,16 +263,15 @@ def main():
     board = pd.DataFrame(final_rows).drop_duplicates(['version','threshold','initial_stop_pct'], keep='last')
     board = board[board.trades >= MIN_TRADES].copy().sort_values(['win_rate','trades','pf','avg_pct','gross_pct'], ascending=[False,False,False,False,False])
 
-    print('\n=== ENGINE 5 FAST TUNER: TOP 30 ===')
+    print('\n=== ENGINE 5 GATES V2 FAST TUNER: TOP 30 ===')
     cols = ['version','threshold','initial_stop_pct','trades','wins','losses','win_rate','avg_pct','gross_pct','pf','max_loss_pct','first_tp_rate','avg_extra_tp','collisions','w_macd_gap','w_rsi_state','w_rsi_accel','w_volume','w_outer_expand','macd_full_ratio','rsi_full_ratio']
     print(board[[c for c in cols if c in board.columns]].head(30).to_string(index=False))
-    coarse.to_csv(OUT / 'dbb_engine5_fast_stage1.csv', index=False)
-    board.head(100).to_csv(OUT / 'dbb_engine5_fast_top100.csv', index=False)
+    coarse.to_csv(OUT / 'dbb_engine5_fast_gates_v2_stage1.csv', index=False)
+    board.head(100).to_csv(OUT / 'dbb_engine5_fast_gates_v2_top100.csv', index=False)
     if best_trades is not None:
-        best_trades.to_csv(OUT / 'dbb_engine5_fast_best_trades.csv', index=False)
+        best_trades.to_csv(OUT / 'dbb_engine5_fast_gates_v2_best_trades.csv', index=False)
     print(f'[TIMING] total={time.perf_counter()-t0:.2f}s')
-    print('[CSV] dbb_engine5_fast_stage1.csv, dbb_engine5_fast_top100.csv, dbb_engine5_fast_best_trades.csv')
-    print('[CHECKPOINT] Stage 1/2 checkpoints retained for resume.')
+    print('[CSV] dbb_engine5_fast_gates_v2_stage1.csv, dbb_engine5_fast_gates_v2_top100.csv, dbb_engine5_fast_gates_v2_best_trades.csv')
 
 
 if __name__ == '__main__':

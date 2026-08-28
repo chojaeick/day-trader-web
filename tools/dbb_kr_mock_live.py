@@ -9,13 +9,7 @@ from zoneinfo import ZoneInfo
 
 from live_server.double_bollinger_v2 import DoubleBollingerV2, DoubleBollingerV2Config
 from live_server.kiwoom_mock_broker import KiwoomMockBroker
-from tools.dbb_kr_shadow_live import (
-    db_conn,
-    diag_for,
-    latest_age_sec,
-    load_bars,
-    strongest_candidate,
-)
+from tools.dbb_kr_shadow_live import db_conn, diag_for, latest_age_sec, load_bars
 
 STATE_PATH = Path(os.getenv("DBB_KR_LIVE_STATE", "/home/ubuntu/day-trader-api/dbb_kr_mock_live_state.json"))
 LOG_PATH = Path(os.getenv("DBB_KR_LIVE_LOG", "/home/ubuntu/day-trader-api/dbb_kr_mock_live.jsonl"))
@@ -30,6 +24,19 @@ PRE_PARTIAL_PULLBACK_PCT = float(os.getenv("DBB_KR_PRE_PARTIAL_PULLBACK_PCT", "0
 RUNNER_TRAIL_STRONG_PCT = float(os.getenv("DBB_KR_RUNNER_TRAIL_STRONG_PCT", "0.008"))
 RUNNER_TRAIL_NORMAL_PCT = float(os.getenv("DBB_KR_RUNNER_TRAIL_NORMAL_PCT", "0.005"))
 MOMENTUM_FAIL_BARS = int(os.getenv("DBB_KR_MOMENTUM_FAIL_BARS", "2"))
+
+# SAFETY: KR live runner never scans arbitrary domestic stocks.
+# Default pair is the closest broad-market long/short 2x pair:
+#   122630 KODEX 레버리지 (KOSPI200 daily +2x)
+#   252670 KODEX 200선물인버스2X (F-KOSPI200 daily -2x)
+# Override only with an explicit comma-separated six-digit allowlist.
+DEFAULT_UNIVERSE = ("122630", "252670")
+ALLOWED_SYMBOLS = tuple(
+    s.strip() for s in os.getenv("DBB_KR_ALLOWED_SYMBOLS", ",".join(DEFAULT_UNIVERSE)).split(",") if s.strip()
+)
+if not ALLOWED_SYMBOLS or any(len(s) != 6 or not s.isdigit() for s in ALLOWED_SYMBOLS):
+    raise RuntimeError("DBB_KR_ALLOWED_SYMBOLS must be a comma-separated list of six-digit KR symbols")
+
 KST = ZoneInfo("Asia/Seoul")
 
 
@@ -71,16 +78,46 @@ def strip_code(v: str) -> str:
     return s[1:] if s.startswith("A") else s
 
 
+def ensure_allowed(symbol: str) -> str:
+    sym = strip_code(symbol)
+    if sym not in ALLOWED_SYMBOLS:
+        raise RuntimeError(f"KR live safety block: symbol {sym} is not in allowlist {ALLOWED_SYMBOLS}")
+    return sym
+
+
 def account_qty(broker: KiwoomMockBroker, symbol: str) -> int:
+    sym = ensure_allowed(symbol)
     r = broker.request_account("kt00004", {"qry_tp": "0", "dmst_stex_tp": "KRX"})
     for p in r.get("stk_acnt_evlt_prst") or []:
-        if strip_code(p.get("stk_cd")) == symbol:
+        if strip_code(p.get("stk_cd")) == sym:
             return int(p.get("rmnd_qty") or 0)
     return 0
 
 
+def strongest_allowed_candidate(engine: DoubleBollingerV2):
+    ranked = []
+    with db_conn() as con:
+        for sym in ALLOWED_SYMBOLS:
+            bars = load_bars(con, sym)
+            if len(bars) < 40 or latest_age_sec(bars) > STALE_SEC:
+                continue
+            try:
+                d = diag_for(engine, sym, bars)
+            except Exception as e:
+                emit("DIAG_ERROR", symbol=sym, error=repr(e))
+                continue
+            if not d.get("ready"):
+                continue
+            ranked.append((float(d.get("score") or 0.0), d, bars))
+    ranked.sort(key=lambda z: z[0], reverse=True)
+    if not ranked:
+        return None, None
+    emit("SCAN", universe=list(ALLOWED_SYMBOLS), top=[{"symbol": d.get("symbol"), "score": d.get("score"), "stage": d.get("stage"), "price": d.get("price")} for _, d, _ in ranked])
+    return ranked[0][1], ranked[0][2]
+
+
 def sell_all_tracked(broker: KiwoomMockBroker, state: dict, reason: str, price: float | None = None, **extra) -> dict:
-    sym = str(state["symbol"])
+    sym = ensure_allowed(str(state["symbol"]))
     tracked = int(state.get("current_qty") or state.get("initial_qty") or 0)
     held = account_qty(broker, sym)
     qty = min(tracked, held)
@@ -99,7 +136,7 @@ def sell_all_tracked(broker: KiwoomMockBroker, state: dict, reason: str, price: 
 
 
 def manage_open(engine: DoubleBollingerV2, broker: KiwoomMockBroker, state: dict) -> dict:
-    sym = str(state["symbol"])
+    sym = ensure_allowed(str(state["symbol"]))
     with db_conn() as con:
         bars = load_bars(con, sym)
     if len(bars) < 40 or latest_age_sec(bars) > STALE_SEC:
@@ -173,12 +210,13 @@ def main() -> None:
     account = broker.validate_account()
     digits = "".join(c for c in account if c.isdigit())
     engine = DoubleBollingerV2(DoubleBollingerV2Config(open_bonus_score=0.0))
-    emit("START", mode="KOREA_MOCK_LIVE", account_base8=digits[:8], qty=ORDER_QTY, poll_sec=POLL_SEC)
+    emit("START", mode="KOREA_MOCK_LIVE", account_base8=digits[:8], qty=ORDER_QTY, poll_sec=POLL_SEC, allowed_symbols=list(ALLOWED_SYMBOLS))
 
     while True:
         try:
             state = load_state()
             if state:
+                ensure_allowed(str(state.get("symbol", "")))
                 manage_open(engine, broker, state)
             else:
                 now = now_kst()
@@ -186,12 +224,11 @@ def main() -> None:
                 if minute >= NO_ENTRY_MINUTE_KST:
                     emit("NO_NEW_ENTRY_TIME", kst=str(now))
                 else:
-                    with db_conn() as con:
-                        best, bars = strongest_candidate(engine, con)
+                    best, bars = strongest_allowed_candidate(engine)
                     if best is None or bars is None:
-                        emit("NO_LIVE_CANDIDATE")
+                        emit("NO_LIVE_CANDIDATE", allowed_symbols=list(ALLOWED_SYMBOLS))
                     elif bool(best.get("early") or best.get("confirm")):
-                        sym = str(best["symbol"])
+                        sym = ensure_allowed(str(best["symbol"]))
                         price = float(best["price"])
                         resp = broker.buy_market(sym, ORDER_QTY)
                         state = {

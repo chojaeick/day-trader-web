@@ -16,12 +16,12 @@ class USMockBrokerConfig:
 
     @classmethod
     def from_env(cls) -> "USMockBrokerConfig":
-        key = os.getenv("KIWOOM_US_MOCK_APP_KEY", "").strip()
-        secret = os.getenv("KIWOOM_US_MOCK_APP_SECRET", "").strip()
+        key = os.getenv("KIWOOM_US_MOCK_APP_KEY", os.getenv("KIWOOM_MOCK_APP_KEY", "")).strip()
+        secret = os.getenv("KIWOOM_US_MOCK_APP_SECRET", os.getenv("KIWOOM_MOCK_APP_SECRET", "")).strip()
         base = os.getenv("KIWOOM_US_MOCK_REST_BASE", os.getenv("KIWOOM_MOCK_REST_BASE", "https://mockapi.kiwoom.com")).strip().rstrip("/")
         enabled = os.getenv("KIWOOM_MOCK_US_ORDER_ENABLE", "0").lower() in ("1", "true", "yes", "on")
         if not key or not secret:
-            raise RuntimeError("KIWOOM_US_MOCK_APP_KEY / KIWOOM_US_MOCK_APP_SECRET not set")
+            raise RuntimeError("KIWOOM_US_MOCK_APP_KEY / KIWOOM_US_MOCK_APP_SECRET (or legacy KIWOOM_MOCK_APP_KEY / KIWOOM_MOCK_APP_SECRET) not set")
         if "mockapi.kiwoom.com" not in base:
             raise RuntimeError(f"Refusing non-mock REST base: {base}")
         return cls(key, secret, base, enabled)
@@ -31,7 +31,8 @@ class KiwoomUSMockBroker:
     """Kiwoom US-stock mock-investment REST adapter.
 
     Safety invariants:
-      * only KIWOOM_US_MOCK_* credentials are accepted
+      * KIWOOM_US_MOCK_* credentials are preferred
+      * legacy KIWOOM_MOCK_* credentials remain a temporary fallback for the existing US service
       * only mockapi.kiwoom.com is accepted
       * orders blocked unless KIWOOM_MOCK_US_ORDER_ENABLE=1
       * US order endpoint only (/api/us/ordr)

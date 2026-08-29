@@ -12,7 +12,7 @@ import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
 import tools.backtest_dbb_engine5_v16_wait_reaccel as v16
 from live_server.double_bollinger_engine5 import DoubleBollingerEngine5Config
 from tools.backtest_dbb_engine5_tuner import reweight
-from tools.backtest_dbb_kr_v2_v21_v22 import load_data, summary
+from tools.backtest_dbb_kr_v2_v21_v22 import load_data
 
 OUTDIR = Path('/home/ubuntu/day-trader-api/engine5_v16_full_validation')
 OUTDIR.mkdir(parents=True, exist_ok=True)
@@ -58,9 +58,6 @@ def add_breakout_and_decel_filter(ev16, frames):
     removed=[]; added=[]
     for sym,f0 in frames.items():
         f=enrich_for_v17(f0)
-        # Existing candidate: if both 5m MACD slope and RSI slope are decelerating,
-        # remove as a diagnostic WAIT candidate. This is intentionally conservative
-        # and will be judged by winner preservation, not assumed correct.
         for r in f[f['both_decelerating']].itertuples(index=False):
             ts=pd.Timestamp(r.time)
             if ts in out:
@@ -68,15 +65,12 @@ def add_breakout_and_decel_filter(ev16, frames):
                 out[ts]=[e for e in out[ts] if str(e[0]).zfill(6)!=str(sym).zfill(6)]
                 if len(out[ts])<before: removed.append((str(sym).zfill(6),ts))
                 if not out[ts]: out.pop(ts,None)
-        # High-volume breakout can bypass normal trend persistence only while
-        # MACD/RSI acceleration is alive.
         for r in f[f['breakout_candidate']].itertuples(index=False):
             ts=pd.Timestamp(r.time)
             minute=ts.hour*60+ts.minute
             if minute<OPEN_MINUTE: continue
             e=tuple_from_row(str(sym).zfill(6),r,True)
             if e is None: continue
-            # breakout path uses a qualifying score floor but does not require entry_gate.
             if float(r.entry_score)<THRESHOLD: continue
             already=any(str(x[0]).zfill(6)==str(sym).zfill(6) for x in out.get(ts,[]))
             if not already:
@@ -94,7 +88,7 @@ def simulate_v17(packed_exits, entry_events, state_events, threshold):
     def close_record(price,ts,reason):
         nonlocal pos
         pnl=pos['realized']+pos['remaining']*(float(price)/pos['entry_price']-1.0)
-        trades.append({'symbol':pos['symbol'],'entry_time':pos['entry_time'],'exit_time':pd.Timestamp(ts),'entry_price':pos['entry_price'],'exit_price':float(price),'entry_score':pos['entry_score'],'r_abs':pos['r_abs'],'r_pct':pos['r_abs']/pos['entry_price']*100.0,'pnl_pct':pnl*100.0,'first_tp_done':pos['tp1_done'],'second_tp_done':pos['tp2_done'],'reason':reason,'breakout_entry':pos['breakout_entry']})
+        trades.append({'symbol':pos['symbol'],'entry_time':pos['entry_time'],'exit_time':pd.Timestamp(ts),'entry_price':pos['entry_price'],'exit_price':float(price),'entry_score':pos['entry_score'],'r_abs':pos['r_abs'],'r_pct':pos['r_abs']/pos['entry_price']*100.0,'pnl_pct':pnl*100.0,'first_tp_done':pos['tp1_done'],'second_tp_done':pos['tp2_done'],'partial_done':pos['tp1_done'],'extra_tp_count':int(pos['tp2_done']),'reason':reason,'breakout_entry':pos['breakout_entry']})
         pos=None
     for ts,minute,rows in packed_exits:
         last_ts=ts
@@ -116,7 +110,6 @@ def simulate_v17(packed_exits, entry_events, state_events, threshold):
                 elif low<=pos['stop_price']: close_record(pos['stop_price'],ts,'INITIAL_STRUCTURAL_STOP')
                 elif tight and momentum_cooling and dd>=HWM_DD: close_record(close,ts,'BREAKOUT_10M_HWM_1PCT_EXIT')
                 elif tight:
-                    # Preserve full size during first 10m if momentum remains alive.
                     pass
                 elif not pos['tp1_done']:
                     if high>=pos['tp1_price']:
@@ -146,10 +139,19 @@ def simulate_v17(packed_exits, entry_events, state_events, threshold):
     return pd.DataFrame(trades),collisions
 
 
+def stats(t: pd.DataFrame) -> dict:
+    if t.empty:
+        return {'win_rate':0.0,'avg_pct':0.0,'gross_pct':0.0,'pf':0.0}
+    pnl=pd.to_numeric(t['pnl_pct'],errors='coerce').fillna(0.0)
+    wins=pnl[pnl>0].sum(); losses=-pnl[pnl<0].sum()
+    return {'win_rate':float((pnl>0).mean()*100.0),'avg_pct':float(pnl.mean()),'gross_pct':float(pnl.sum()),'pf':float(wins/losses) if losses>0 else float('inf')}
+
+
 def run(name,packed_exits,state_events,events):
     t,c=simulate_v17(packed_exits,events,state_events,THRESHOLD)
-    s=summary(name,t)
-    print(f'{name}: {len(t)}t win={s["win_rate"]:.2f} avg={s["avg_pct"]:+.4f} gross={s["gross_pct"]:+.4f} pf={s["pf"]:.3f} max={t.pnl_pct.min():+.4f} collisions={c}')
+    s=stats(t)
+    maxloss=float(pd.to_numeric(t['pnl_pct'],errors='coerce').min()) if len(t) else np.nan
+    print(f'{name}: {len(t)}t win={s["win_rate"]:.2f} avg={s["avg_pct"]:+.4f} gross={s["gross_pct"]:+.4f} pf={s["pf"]:.3f} max={maxloss:+.4f} collisions={c}')
     return t,s
 
 

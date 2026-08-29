@@ -15,7 +15,6 @@ import tools.validate_engine5_v17c_multi_symbol as multi
 import tools.validate_engine5_v17c_opening_5m_hwm_sweep as sweep
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
 import tools.validate_engine5_v20_macd_strength as ms
-import tools.validate_engine5_v20_rebound as rb
 from live_server.double_bollinger_engine5 import DoubleBollingerEngine5, DoubleBollingerEngine5Config
 from tools.backtest_dbb_engine5_tuner import reweight, to_5m
 from tools.backtest_dbb_kr_v2_v21_v22 import load_data
@@ -25,6 +24,7 @@ THRESHOLD = 50
 FEE_RT_PCT = 0.25
 RAW_MIN = 52.0
 REL_MIN = 1.45
+REL_LOOKBACK = 8
 MAX_ARM_MIN = 5
 
 SLOPE_IMPROVE_RATIOS = [0.15, 0.25, 0.35]
@@ -53,7 +53,6 @@ def build_provisional_5m(raw_bars, cfg):
     complete['time'] = pd.to_datetime(complete['time'])
     eng = DoubleBollingerEngine5(cfg)
     out = []
-
     for _, r1 in b.iterrows():
         ts = pd.Timestamp(r1.time)
         bucket_start = ts.floor('5min')
@@ -62,7 +61,6 @@ def build_provisional_5m(raw_bars, cfg):
         cur = b[(b.time >= bucket_start) & (b.time <= ts)]
         if cur.empty:
             continue
-
         prov = pd.DataFrame([dict(
             time=bucket_end,
             open=float(cur.iloc[0].open),
@@ -75,11 +73,8 @@ def build_provisional_5m(raw_bars, cfg):
         e = eng.enrich(z)
         if len(e) < 2:
             continue
-
         x = e.iloc[-1]
         prev = e.iloc[-2]
-        cur_mid_slope = finite(x.mid_slope8)
-        prev_mid_slope = finite(prev.mid_slope8)
         out.append(dict(
             time=ts,
             bucket_end=bucket_end,
@@ -92,12 +87,46 @@ def build_provisional_5m(raw_bars, cfg):
             macd_slope=finite(x.macd_slope),
             rsi=finite(x.rsi),
             rsi_slope=finite(x.rsi_slope),
-            mid_slope8=cur_mid_slope,
-            completed_prev_mid_slope8=prev_mid_slope,
+            mid_slope8=finite(x.mid_slope8),
             trend_up=bool(x.trend_up),
             entry_score=finite(x.entry_score),
         ))
     return pd.DataFrame(out)
+
+
+def add_completed_strength(frame: pd.DataFrame) -> pd.DataFrame:
+    f = frame.copy().sort_values('time').reset_index(drop=True)
+    d = pd.to_numeric(f['macd_gap_delta'], errors='coerce')
+    f['strength_baseline'] = d.abs().shift(1).rolling(REL_LOOKBACK, min_periods=4).median()
+    return f
+
+
+def add_provisional_strength(pf: pd.DataFrame, completed_strength: pd.DataFrame) -> pd.DataFrame:
+    if pf.empty:
+        return pf.copy()
+    z = pf.copy().sort_values('time').reset_index(drop=True)
+    baselines, rels, prev_slopes = [], [], []
+    cs = completed_strength.copy()
+    cs['time'] = pd.to_datetime(cs['time'])
+    for _, p in z.iterrows():
+        ts = pd.Timestamp(p.time)
+        q = cs[cs.time <= ts.floor('5min')]
+        if q.empty:
+            baseline = np.nan
+            prev_slope = np.nan
+        else:
+            r = q.iloc[-1]
+            baseline = finite(r.get('strength_baseline', np.nan))
+            prev_slope = finite(r.get('mid_slope8', np.nan))
+        raw = finite(p.gap_delta)
+        rel = raw / baseline if np.isfinite(raw) and raw > 0 and np.isfinite(baseline) and baseline > 0 else np.nan
+        baselines.append(baseline)
+        rels.append(rel)
+        prev_slopes.append(prev_slope)
+    z['strength_baseline'] = baselines
+    z['strength_rel'] = rels
+    z['completed_prev_mid_slope8'] = prev_slopes
+    return z
 
 
 def stats(label, t):
@@ -105,17 +134,12 @@ def stats(label, t):
     n = g - FEE_RT_PCT
     gp = float(n[n > 0].sum()) if len(n) else 0.0
     gl = float(-n[n < 0].sum()) if len(n) else 0.0
-    return dict(
-        label=label,
-        trades=len(n),
-        net_wins=int((n > 0).sum()),
-        net_losses=int((n <= 0).sum()),
-        net_win_pct=float((n > 0).mean() * 100.0) if len(n) else 0.0,
-        net_sum_pct=float(n.sum()) if len(n) else 0.0,
-        net_avg_pct=float(n.mean()) if len(n) else 0.0,
-        net_pf=(gp / gl) if gl > 0 else np.inf,
-        max_net_loss_pct=float(n.min()) if len(n) else np.nan,
-    )
+    return dict(label=label, trades=len(n), net_wins=int((n > 0).sum()), net_losses=int((n <= 0).sum()),
+                net_win_pct=float((n > 0).mean() * 100.0) if len(n) else 0.0,
+                net_sum_pct=float(n.sum()) if len(n) else 0.0,
+                net_avg_pct=float(n.mean()) if len(n) else 0.0,
+                net_pf=(gp / gl) if gl > 0 else np.inf,
+                max_net_loss_pct=float(n.min()) if len(n) else np.nan)
 
 
 def classify_transition_regime(p):
@@ -127,8 +151,6 @@ def classify_transition_regime(p):
         return 'DOWN_TURNING'
     if prev <= 0 < cur:
         return 'ZERO_CROSS_UP'
-    if prev < 0 and cur > 0:
-        return 'EARLY_UP'
     return 'NONE'
 
 
@@ -136,7 +158,6 @@ def transition_ready_5m(p, improve_ratio: float):
     regime = classify_transition_regime(p)
     if regime == 'NONE':
         return False, {}
-
     prev = finite(p.completed_prev_mid_slope8)
     cur = finite(p.mid_slope8)
     raw = finite(p.gap_delta)
@@ -148,26 +169,15 @@ def transition_ready_5m(p, improve_ratio: float):
     vals = [prev, cur, raw, rel, macd_slope, rsi_slope, gap, rsi]
     if not all(np.isfinite(x) for x in vals):
         return False, {}
-
     improve = cur - prev
     required = max(abs(prev) * float(improve_ratio), 1e-9)
     slope_turn = improve >= required
     momentum = raw >= RAW_MIN and rel >= REL_MIN and macd_slope > 0 and rsi_slope > 0
     ok = bool(slope_turn and momentum)
-    return ok, dict(
-        regime=regime,
-        prev_slope=prev,
-        cur_slope=cur,
-        slope_improve=improve,
-        required_improve=required,
-        raw=raw,
-        rel=rel,
-        gap=gap,
-        macd_slope_5m=macd_slope,
-        rsi=rsi,
-        rsi_slope_5m=rsi_slope,
-        golden=bool(p.golden),
-    )
+    return ok, dict(regime=regime, prev_slope=prev, cur_slope=cur, slope_improve=improve,
+                    required_improve=required, raw=raw, rel=rel, gap=gap,
+                    macd_slope_5m=macd_slope, rsi=rsi, rsi_slope_5m=rsi_slope,
+                    golden=bool(p.golden))
 
 
 def one_m_transition_confirm(m: pd.DataFrame, ts: pd.Timestamp, lookback: int,
@@ -181,7 +191,6 @@ def one_m_transition_confirm(m: pd.DataFrame, ts: pd.Timestamp, lookback: int,
     rsis = pd.to_numeric(q.rsi_1m, errors='coerce').to_numpy(float)
     if not (np.isfinite(close).all() and np.isfinite(low).all() and np.isfinite(gaps).all() and np.isfinite(rsis).all()):
         return False, {}
-
     dg = np.diff(gaps)
     pos_ratio = float((dg > 0).mean()) if len(dg) else 0.0
     pos = float(dg[dg > 0].sum()) if np.any(dg > 0) else 0.0
@@ -192,74 +201,56 @@ def one_m_transition_confirm(m: pd.DataFrame, ts: pd.Timestamp, lookback: int,
     local_low = float(low[low_idx])
     low_before_now = low_idx < len(q) - 1
     rebound = (float(close[-1]) / local_low - 1.0) * 100.0 if local_low > 0 else np.nan
-
-    price_ok = bool(
-        low_before_now
-        and float(close[-1]) > float(close[-2])
-        and float(close[-1]) > float(close[0])
-        and np.isfinite(rebound)
-        and rebound >= rebound_pct
-    )
-    momentum_ok = bool(
-        gaps[-1] > gaps[0]
-        and pos_ratio >= min_pos_ratio
-        and retrace <= 0.35
-        and finite(last.macd_slope_1m) > 0
-        and finite(last.macd_gap_delta_1m) > 0
-        and rsis[-1] > rsis[0]
-        and finite(last.rsi_slope_1m) > 0
-    )
-    ok = bool(price_ok and momentum_ok)
-    return ok, dict(
-        local_low=local_low,
-        low_time=pd.Timestamp(q.iloc[low_idx].time),
-        rebound_pct=float(rebound),
-        price_progress=float(close[-1] - close[0]),
-        one_m_gap_start=float(gaps[0]),
-        one_m_gap_end=float(gaps[-1]),
-        one_m_gap_rise=float(gaps[-1] - gaps[0]),
-        one_m_pos_ratio=pos_ratio,
-        one_m_retrace=retrace,
-        one_m_rsi_start=float(rsis[0]),
-        one_m_rsi_end=float(rsis[-1]),
-        last_gap_delta=finite(last.macd_gap_delta_1m),
-        last_macd_slope=finite(last.macd_slope_1m),
-        last_rsi_slope=finite(last.rsi_slope_1m),
-    )
+    price_ok = bool(low_before_now and float(close[-1]) > float(close[-2]) and float(close[-1]) > float(close[0])
+                    and np.isfinite(rebound) and rebound >= rebound_pct)
+    momentum_ok = bool(gaps[-1] > gaps[0] and pos_ratio >= min_pos_ratio and retrace <= 0.35
+                       and finite(last.macd_slope_1m) > 0 and finite(last.macd_gap_delta_1m) > 0
+                       and rsis[-1] > rsis[0] and finite(last.rsi_slope_1m) > 0)
+    return bool(price_ok and momentum_ok), dict(
+        local_low=local_low, low_time=pd.Timestamp(q.iloc[low_idx].time), rebound_pct=float(rebound),
+        price_progress=float(close[-1] - close[0]), one_m_gap_start=float(gaps[0]),
+        one_m_gap_end=float(gaps[-1]), one_m_gap_rise=float(gaps[-1] - gaps[0]),
+        one_m_pos_ratio=pos_ratio, one_m_retrace=retrace, one_m_rsi_start=float(rsis[0]),
+        one_m_rsi_end=float(rsis[-1]), last_gap_delta=finite(last.macd_gap_delta_1m),
+        last_macd_slope=finite(last.macd_slope_1m), last_rsi_slope=finite(last.rsi_slope_1m))
 
 
-def build_transition_events(scored, micros, provisional,
-                            improve_ratio: float, lookback: int,
+def make_event(sym: str, completed_row, ts: pd.Timestamp, price: float):
+    iu = finite(completed_row.get('inner_upper', np.nan))
+    il = finite(completed_row.get('inner_lower', np.nan))
+    ou = finite(completed_row.get('outer_upper', np.nan))
+    mid = finite(completed_row.get('mid', np.nan))
+    band_r = iu - il if np.isfinite(iu) and np.isfinite(il) else np.nan
+    if not np.isfinite(band_r) or band_r <= 0:
+        return None
+    score = max(THRESHOLD, finite(completed_row.get('entry_score', THRESHOLD)))
+    extended = bool(np.isfinite(ou) and float(price) > ou)
+    return (str(sym).zfill(6), float(price), float(score),
+            finite(completed_row.get('macd_slope_spread_strength', np.nan)),
+            finite(completed_row.get('rsi_slope_strength', np.nan)),
+            float(band_r), float(band_r), iu, il, ou, mid, extended, False)
+
+
+def build_transition_events(scored, micros, provisional, improve_ratio: float, lookback: int,
                             min_pos_ratio: float, rebound_pct: float):
-    events = {}
-    diag = []
-    seen_bucket = set()
+    events, diag, seen_bucket = {}, [], set()
     for sym, pf in provisional.items():
         sym = norm_sym(sym)
         if pf.empty or sym not in scored or sym not in micros:
             continue
-        sf = scored[sym]
-        m = micros[sym]
-        armed = None
-        armed_until = None
+        sf, m = scored[sym], micros[sym]
+        armed, armed_until = None, None
         for _, p in pf.iterrows():
             ts = pd.Timestamp(p.time)
             minute = ts.hour * 60 + ts.minute
             if minute < 9 * 60 + 10 or minute >= base.NO_ENTRY_MINUTE:
                 continue
-
             ready, meta5 = transition_ready_5m(p, improve_ratio)
             if ready:
                 armed_until = ts + pd.Timedelta(minutes=MAX_ARM_MIN)
-                armed = dict(
-                    ready_time=ts,
-                    bucket_end=pd.Timestamp(p.bucket_end),
-                    ready_price=finite(p.close),
-                    **meta5,
-                )
+                armed = dict(ready_time=ts, bucket_end=pd.Timestamp(p.bucket_end), ready_price=finite(p.close), **meta5)
             if armed is None or armed_until is None or ts > armed_until:
                 continue
-
             confirmed, meta1 = one_m_transition_confirm(m, ts, lookback, min_pos_ratio, rebound_pct)
             if not confirmed:
                 continue
@@ -269,27 +260,16 @@ def build_transition_events(scored, micros, provisional,
             q5 = sf[sf.time <= ts.floor('5min')]
             if q5.empty:
                 continue
-            row5 = q5.iloc[-1]
-            ev = h.event_from_5m_row(sym, row5, ts, finite(p.close))
+            ev = make_event(sym, q5.iloc[-1], ts, finite(p.close))
             if ev is None:
                 continue
-
             seen_bucket.add(bucket_key)
             events.setdefault(ts, []).append(ev)
-            diag.append(dict(
-                symbol=sym,
-                trigger_time=ts,
-                trigger_price=finite(p.close),
-                delay_min=(ts - armed['ready_time']).total_seconds() / 60.0,
-                improve_ratio=improve_ratio,
-                lookback=lookback,
-                min_pos_ratio=min_pos_ratio,
-                min_rebound_pct=rebound_pct,
-                **armed,
-                **meta1,
-            ))
-            armed = None
-            armed_until = None
+            diag.append(dict(symbol=sym, trigger_time=ts, trigger_price=finite(p.close),
+                             delay_min=(ts - armed['ready_time']).total_seconds() / 60.0,
+                             improve_ratio=improve_ratio, lookback=lookback, min_pos_ratio=min_pos_ratio,
+                             min_rebound_pct=rebound_pct, **armed, **meta1))
+            armed, armed_until = None, None
     return events, pd.DataFrame(diag)
 
 
@@ -305,7 +285,6 @@ def main():
     raw = load_data()
     base_cfg = DoubleBollingerEngine5Config()
     cfg = replace(base_cfg, macd_slope_spread_full_ratio=2.0, rsi_slope_full_ratio=1.5)
-
     packed = v8.base.pack_exit_events(raw, base_cfg)
     states = base.pack_state_events(base.build_cfg_frames(raw, base_cfg))
     frames0 = base.build_cfg_frames(raw, cfg)
@@ -323,11 +302,11 @@ def main():
     ev20, _ = ms.filter_events(ev18, strength_frames, raw_min=RAW_MIN, rel_min=REL_MIN)
     base_trades = multi.simulate_multi(packed, ev20, states, THRESHOLD)
 
+    completed_for_rel = {sym: add_completed_strength(f) for sym, f in scored.items()}
     provisional = {}
     for s, b in raw.items():
         sym = norm_sym(s)
-        pf = build_provisional_5m(b, cfg)
-        provisional[sym] = rb.add_provisional_strength(pf, strength_frames[sym])
+        provisional[sym] = add_provisional_strength(build_provisional_5m(b, cfg), completed_for_rel[sym])
 
     print('=== V20 REGIME TRANSITION VALIDATION ===')
     print('BASE: current V20 unchanged for established uptrend entries.')
@@ -336,8 +315,7 @@ def main():
     print('1m confirmation: actual price rebound + coherent MACD/RSI continuation; mild pullback allowed.')
     print(pd.DataFrame([stats('V20_BASE', base_trades)]).to_string(index=False))
 
-    rows = []
-    all_diag = []
+    rows, all_diag = [], []
     for ir in SLOPE_IMPROVE_RATIOS:
         for lb in ONE_M_LOOKBACKS:
             for pr in ONE_M_POS_RATIOS:
@@ -349,22 +327,12 @@ def main():
                     label = f'TRANS_IR{ir:.2f}_LB{lb}_POS{pr:.2f}_R{rp:.2f}'
                     sm = stats(label, t_merged)
                     se = stats(label + '_EXTRA_ONLY', t_extra)
-                    sm.update(
-                        improve_ratio=ir,
-                        lookback=lb,
-                        min_pos_ratio=pr,
-                        min_rebound_pct=rp,
-                        transition_triggers=len(d),
-                        extra_trades=se['trades'],
-                        extra_win_pct=se['net_win_pct'],
-                        extra_net_sum_pct=se['net_sum_pct'],
-                        extra_pf=se['net_pf'],
-                    )
+                    sm.update(improve_ratio=ir, lookback=lb, min_pos_ratio=pr, min_rebound_pct=rp,
+                              transition_triggers=len(d), extra_trades=se['trades'],
+                              extra_win_pct=se['net_win_pct'], extra_net_sum_pct=se['net_sum_pct'], extra_pf=se['net_pf'])
                     rows.append(sm)
                     if len(d):
-                        dd = d.copy()
-                        dd.insert(0, 'label', label)
-                        all_diag.append(dd)
+                        dd = d.copy(); dd.insert(0, 'label', label); all_diag.append(dd)
 
     summary = pd.DataFrame(rows).sort_values(['net_sum_pct', 'net_pf', 'net_win_pct'], ascending=False)
     print('\n=== MERGED SWEEP SUMMARY ===')
@@ -378,15 +346,11 @@ def main():
         for sym, day in TARGETS:
             mask |= (diag.symbol == sym) & (dt.dt.date == day)
         target = diag[mask].copy().sort_values(['symbol', 'trigger_time', 'label'])
-        cols = [
-            'label','symbol','regime','ready_time','trigger_time','delay_min',
-            'ready_price','trigger_price','prev_slope','cur_slope','slope_improve',
-            'raw','rel','gap','golden','rsi','rsi_slope_5m',
-            'low_time','local_low','rebound_pct','price_progress',
-            'one_m_gap_start','one_m_gap_end','one_m_gap_rise','one_m_pos_ratio',
-            'one_m_retrace','one_m_rsi_start','one_m_rsi_end',
-            'last_gap_delta','last_macd_slope','last_rsi_slope'
-        ]
+        cols = ['label','symbol','regime','ready_time','trigger_time','delay_min','ready_price','trigger_price',
+                'prev_slope','cur_slope','slope_improve','raw','rel','gap','golden','rsi','rsi_slope_5m',
+                'low_time','local_low','rebound_pct','price_progress','one_m_gap_start','one_m_gap_end',
+                'one_m_gap_rise','one_m_pos_ratio','one_m_retrace','one_m_rsi_start','one_m_rsi_end',
+                'last_gap_delta','last_macd_slope','last_rsi_slope']
         print(target[[c for c in cols if c in target.columns]].to_string(index=False) if len(target) else 'NONE')
         target.to_csv(OUT_DIR / 'v20_regime_transition_targets.csv', index=False)
     else:

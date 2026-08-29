@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import time
 from dataclasses import asdict
@@ -17,7 +16,7 @@ from live_server.db import DB
 from live_server.kiwoom import KiwoomClient
 from live_server.korea import KoreaMarketAdapter
 from live_server.double_bollinger_engine5 import DoubleBollingerEngine5Config
-from live_server.double_bollinger_engine5_v16 import Engine5V16Runtime
+from live_server.double_bollinger_engine5_v16 import DoubleBollingerEngine5V16, Engine5V16Policy
 from live_server.kiwoom_mock_broker import KiwoomMockBroker
 
 KST = ZoneInfo("Asia/Seoul")
@@ -139,15 +138,56 @@ def minute_bucket_5m(bars: pd.DataFrame) -> pd.DataFrame:
     if bars.empty:
         return bars.copy()
     f = bars.copy()
-    t = f["time"]
-    f["bucket"] = t.dt.floor("5min") + pd.Timedelta(minutes=5)
+    f["bucket"] = f["time"].dt.floor("5min") + pd.Timedelta(minutes=5)
     out = f.groupby("bucket", as_index=False).agg(
         open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last"), volume=("volume", "sum")
     ).rename(columns={"bucket": "time"})
     return out.sort_values("time").reset_index(drop=True)
 
 
-def strict_r_from_latest_5m(enriched: pd.DataFrame) -> float | None:
+def evaluate(engine: DoubleBollingerEngine5V16, symbol: str, five: pd.DataFrame, bars_1m: pd.DataFrame) -> dict:
+    if five.empty:
+        return {"symbol": symbol, "action": "NO_BUY", "reason": "NO_5M_DATA", "score": 0.0}
+    enriched = engine.enrich(five)
+    refined = engine.refine_v10_entry_frame(enriched)
+    last = refined.iloc[-1]
+    ts = pd.Timestamp(last["time"])
+    minute = ts.hour * 60 + ts.minute
+    score = float(last.get("entry_score") or 0.0)
+    price = float(last.get("close") or 0.0)
+    _, gap = previous_close_and_gap(bars_1m)
+    base = {
+        "symbol": symbol,
+        "signal_time": ts,
+        "price": price,
+        "score": score,
+        "gap_pct": gap,
+        "entry_gate": bool(last.get("entry_gate", False)),
+        "action": "NO_BUY",
+        "reason": "ENTRY_GATE_FALSE",
+    }
+    if minute < engine.policy.open_entry_minute:
+        base.update(action="WAIT", reason="OPENING_BLOCK")
+        return base
+    if not base["entry_gate"]:
+        return base
+    wait, st = engine.should_wait_opening_signal(bars_1m, ts, float(gap) if gap is not None else np.nan)
+    base.update(st)
+    if wait:
+        re = engine.first_reaccel(bars_1m, ts)
+        if re is None:
+            base.update(action="WAIT", reason="SLOPE_DECAY_NO_REACCEL")
+            return base
+        base.update(action="BUY", reason="SLOPE_DECAY_REACCEL", price=float(re["price"]), delayed_time=re["time"])
+        return base
+    base.update(action="BUY", reason="V10_BUY")
+    return base
+
+
+def strict_r_from_latest_5m(engine: DoubleBollingerEngine5V16, five: pd.DataFrame) -> float | None:
+    if five.empty:
+        return None
+    enriched = engine.enrich(five)
     if enriched.empty:
         return None
     r = enriched.iloc[-1]
@@ -208,7 +248,7 @@ def manage_open(broker: KiwoomMockBroker, korea: KoreaMarketAdapter, state: dict
     return state
 
 
-def scan(runtime: Engine5V16Runtime, korea: KoreaMarketAdapter) -> tuple[dict | None, dict | None]:
+def scan(engine: DoubleBollingerEngine5V16, korea: KoreaMarketAdapter) -> tuple[dict | None, pd.DataFrame | None, pd.DataFrame | None]:
     rows = normalize_finder_rows(korea)
     emit("FINDER", rows=rows)
     ranked = []
@@ -220,9 +260,7 @@ def scan(runtime: Engine5V16Runtime, korea: KoreaMarketAdapter) -> tuple[dict | 
                 emit("SKIP_SHORT_DATA", symbol=sym, bars=len(bars))
                 continue
             five = minute_bucket_5m(bars)
-            decision = runtime.evaluate(sym, five, bars)
-            _, gap = previous_close_and_gap(bars)
-            decision["gap_pct"] = gap
+            decision = evaluate(engine, sym, five, bars)
             decision["finder_score"] = meta["finder_score"]
             decision["name"] = meta.get("name")
             emit("ENGINE5_DECISION", **decision)
@@ -231,11 +269,11 @@ def scan(runtime: Engine5V16Runtime, korea: KoreaMarketAdapter) -> tuple[dict | 
         except Exception as e:
             emit("SCAN_ERROR", symbol=sym, error=repr(e))
     if not ranked:
-        return None, None
+        return None, None, None
     ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
     _, _, d, bars, five = ranked[0]
-    d["risk_abs"] = strict_r_from_latest_5m(runtime.last_enriched.get(d["symbol"], pd.DataFrame()))
-    return d, bars
+    d["risk_abs"] = strict_r_from_latest_5m(engine, five)
+    return d, bars, five
 
 
 def main() -> None:
@@ -247,8 +285,9 @@ def main() -> None:
     korea = KoreaMarketAdapter(kc)
     broker = KiwoomMockBroker()
     cfg = DoubleBollingerEngine5Config(macd_slope_spread_full_ratio=2.0, rsi_slope_full_ratio=1.5)
-    runtime = Engine5V16Runtime(cfg=cfg, gap_pct=4.0, open_minute=9 * 60 + 10, micro_end_minute=10 * 60)
-    emit("START", mode="KR_ENGINE5_V16_FINDER", poll_sec=POLL_SEC, qty=ORDER_QTY, threshold=ENTRY_THRESHOLD, finder_top=FINDER_TOP, cfg=asdict(cfg))
+    policy = Engine5V16Policy(open_entry_minute=9 * 60 + 10, opening_wait_end_minute=10 * 60, gap_wait_pct=4.0)
+    engine = DoubleBollingerEngine5V16(config=cfg, policy=policy)
+    emit("START", mode="KR_ENGINE5_V16_FINDER", poll_sec=POLL_SEC, qty=ORDER_QTY, threshold=ENTRY_THRESHOLD, finder_top=FINDER_TOP, cfg=asdict(cfg), policy=asdict(policy))
     while True:
         try:
             state = load_state()
@@ -256,13 +295,13 @@ def main() -> None:
                 manage_open(broker, korea, state)
             else:
                 now = now_kst(); minute = now.hour * 60 + now.minute
-                if minute < 9 * 60 + 10:
+                if minute < policy.open_entry_minute:
                     emit("OPENING_BLOCK", kst=str(now))
                 elif minute >= NO_ENTRY_MINUTE:
                     emit("NO_NEW_ENTRY_TIME", kst=str(now))
                 else:
-                    best, bars = scan(runtime, korea)
-                    if best is None or bars is None:
+                    best, bars, five = scan(engine, korea)
+                    if best is None or bars is None or five is None:
                         emit("NO_BUY")
                     else:
                         sym = best["symbol"]

@@ -7,11 +7,10 @@ import pandas as pd
 
 import tools.backtest_dbb_engine5_fast_tuner_v4 as base
 import tools.backtest_dbb_engine5_fast_tuner_v8 as v8
-import tools.backtest_dbb_engine5_fast_tuner_v9 as v9
 import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
 
 # V11: gap-up confirmation layer derived from manual chart review.
-# Keep V10 BUY/WAIT logic, V9 09:00-09:09 block, and V8 strict 1R/2R exits.
+# Keep V10 BUY/WAIT logic, V9 09:00-09:09 block (through V10), and V8 strict 1R/2R exits.
 # For meaningful gap-ups during the first hour, do not buy a fading opening spike.
 # Require the DBB trend to be up and MACD/RSI momentum to be maintained or re-accelerating.
 base.CHECKPOINT = Path('/home/ubuntu/day-trader-api/dbb_engine5_exit_v11_checkpoint.csv')
@@ -47,11 +46,6 @@ def _apply_gap_confirmation(frame: pd.DataFrame, gap_map: dict) -> pd.DataFrame:
     prev_spread = spread.shift(1)
     prev_rsi_slope = rsi_slope.shift(1)
 
-    # Opening gap confirmation:
-    # 1) actual DBB trend must already be up,
-    # 2) MACD acceleration must be positive and not fading versus prior 5m bar,
-    #    unless it is a fresh re-acceleration from <= 0,
-    # 3) RSI must be rising and not materially fading, unless turning up from <= 0.
     macd_maintained = (
         (spread > 0)
         & ((prev_spread <= 0) | (spread >= prev_spread))
@@ -87,12 +81,24 @@ def build_cfg_frames(raw, cfg):
     return out
 
 
+def pack_entry_events(scored_frames):
+    # V10 already refines BUY/WAIT; enforce the same 09:10 opening rule here.
+    ev = v8.pack_entry_events(scored_frames)
+    filtered = {}
+    for ts, rows in ev.items():
+        t = pd.Timestamp(ts)
+        minute = t.hour * 60 + t.minute
+        if minute >= 9 * 60 + 10:
+            filtered[ts] = rows
+    return filtered
+
+
 def main():
-    print('[ENGINE5 V11] V10 BUY/WAIT + V9 09:00-09:09 block + V8 strict 1R/2R exits; NEW GAP RULE: gap-up >=4% before 10:00 requires confirmed DBB uptrend and maintained/re-accelerating MACD+RSI.', flush=True)
+    print('[ENGINE5 V11] V10 BUY/WAIT + 09:00-09:09 block + V8 strict 1R/2R exits; NEW GAP RULE: gap-up >=4% before 10:00 requires confirmed DBB uptrend and maintained/re-accelerating MACD+RSI.', flush=True)
     base.build_cfg_frames = build_cfg_frames
-    base.pack_entry_events = v8.pack_entry_events
+    base.pack_entry_events = pack_entry_events
     base.pack_exit_events = v8.base.pack_exit_events
-    base.simulate_v4 = v9.simulate_v9
+    base.simulate_v4 = v8.v7.simulate_v7
     base.main()
 
 

@@ -9,13 +9,16 @@ import tools.backtest_dbb_engine5_fast_tuner_v4 as base
 import tools.backtest_dbb_engine5_fast_tuner_v8 as v8
 import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
 
-# V11: gap-up confirmation layer derived from manual chart review.
-# Keep V10 BUY/WAIT logic, V9 09:00-09:09 block (through V10), and V8 strict 1R/2R exits.
-# For meaningful gap-ups during the first hour, do not buy a fading opening spike.
-# Require the DBB trend to be up and MACD/RSI momentum to be maintained or re-accelerating.
+# IMPORTANT: capture the original V4 frame builder BEFORE monkey-patching base.
+# Calling v10.build_cfg_frames after replacing base.build_cfg_frames can change the
+# composition path (and can recurse through the shared module object). V11 must be
+# a strict subset of V10 entry events, never a different entry engine.
+ORIG_BUILD_CFG_FRAMES = base.build_cfg_frames
+
 base.CHECKPOINT = Path('/home/ubuntu/day-trader-api/dbb_engine5_exit_v11_checkpoint.csv')
 GAP_CONFIRM_PCT = 4.0
-GAP_CONFIRM_END_MINUTE = 10 * 60  # special opening-gap confirmation applies before 10:00
+GAP_CONFIRM_END_MINUTE = 10 * 60
+OPEN_ENTRY_MINUTE = 9 * 60 + 10
 
 
 def _daily_gap_map(raw_bars: pd.DataFrame) -> dict:
@@ -46,6 +49,7 @@ def _apply_gap_confirmation(frame: pd.DataFrame, gap_map: dict) -> pd.DataFrame:
     prev_spread = spread.shift(1)
     prev_rsi_slope = rsi_slope.shift(1)
 
+    # For >=4% gap-ups before 10:00, reject a fading opening spike.
     macd_maintained = (
         (spread > 0)
         & ((prev_spread <= 0) | (spread >= prev_spread))
@@ -60,7 +64,6 @@ def _apply_gap_confirmation(frame: pd.DataFrame, gap_map: dict) -> pd.DataFrame:
         & macd_maintained
         & rsi_maintained
     )
-
     gap_sensitive = (
         (z['gap_pct'] >= GAP_CONFIRM_PCT)
         & (minute < GAP_CONFIRM_END_MINUTE)
@@ -68,33 +71,37 @@ def _apply_gap_confirmation(frame: pd.DataFrame, gap_map: dict) -> pd.DataFrame:
 
     z['gap_sensitive_open'] = gap_sensitive
     z['gap_trend_confirmed'] = gap_trend_confirmed
-    z['entry_gate_v11'] = z['entry_gate'].fillna(False) & (~gap_sensitive | gap_trend_confirmed)
+    # CRITICAL: V11 can only remove V10 entries; it can never create a new one.
+    v10_gate = z['entry_gate'].fillna(False)
+    z['entry_gate_v11'] = v10_gate & (~gap_sensitive | gap_trend_confirmed)
     z['entry_gate'] = z['entry_gate_v11']
     return z
 
 
 def build_cfg_frames(raw, cfg):
-    frames = v10.build_cfg_frames(raw, cfg)
+    # Reproduce V10 exactly from the immutable original V4 frames, then add only
+    # the V11 gap filter. Do not call v10.build_cfg_frames through patched base.
+    raw_frames = ORIG_BUILD_CFG_FRAMES(raw, cfg)
     out = {}
-    for sym, f in frames.items():
-        out[sym] = _apply_gap_confirmation(f, _daily_gap_map(raw[sym]))
+    for sym, f in raw_frames.items():
+        f10 = v10._refine_entry_frame(f)
+        out[sym] = _apply_gap_confirmation(f10, _daily_gap_map(raw[sym]))
     return out
 
 
 def pack_entry_events(scored_frames):
-    # V10 already refines BUY/WAIT; enforce the same 09:10 opening rule here.
     ev = v8.pack_entry_events(scored_frames)
     filtered = {}
     for ts, rows in ev.items():
         t = pd.Timestamp(ts)
         minute = t.hour * 60 + t.minute
-        if minute >= 9 * 60 + 10:
+        if minute >= OPEN_ENTRY_MINUTE:
             filtered[ts] = rows
     return filtered
 
 
 def main():
-    print('[ENGINE5 V11] V10 BUY/WAIT + 09:00-09:09 block + V8 strict 1R/2R exits; NEW GAP RULE: gap-up >=4% before 10:00 requires confirmed DBB uptrend and maintained/re-accelerating MACD+RSI.', flush=True)
+    print('[ENGINE5 V11 FIXED] exact V10 BUY/WAIT baseline + 09:00-09:09 block + >=4% gap-up pre-10:00 fade confirmation; V11 entry set is guaranteed to be a subset of V10.', flush=True)
     base.build_cfg_frames = build_cfg_frames
     base.pack_entry_events = pack_entry_events
     base.pack_exit_events = v8.base.pack_exit_events

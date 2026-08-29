@@ -14,11 +14,10 @@ import tools.backtest_engine5_v17b_breakout_v16_veto as v17b
 import tools.validate_engine5_v17c_multi_symbol as multi
 import tools.validate_engine5_v17c_opening_5m_hwm_sweep as sweep
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
-import tools.validate_engine5_v20_live_5m_1m as live
 import tools.validate_engine5_v20_macd_strength as ms
 import tools.validate_engine5_v20_rebound as rb
-from live_server.double_bollinger_engine5 import DoubleBollingerEngine5Config
-from tools.backtest_dbb_engine5_tuner import reweight
+from live_server.double_bollinger_engine5 import DoubleBollingerEngine5, DoubleBollingerEngine5Config
+from tools.backtest_dbb_engine5_tuner import reweight, to_5m
 from tools.backtest_dbb_kr_v2_v21_v22 import load_data
 
 OUT_DIR = Path('/home/ubuntu/day-trader-api/engine5_v16_full_validation')
@@ -28,14 +27,6 @@ RAW_MIN = 52.0
 REL_MIN = 1.45
 MAX_ARM_MIN = 5
 
-# Rising market: keep current V20 unchanged.
-# Non-rising market: allow a separate transition entry only when a strong directional
-# change is visible in the forming 5m bar AND the 1m tape confirms persistence.
-# This path covers:
-#   1) falling -> V / turn up
-#   2) falling -> flattening -> up
-#   3) sideways -> breakout up
-# Golden cross is context only; it is not mandatory.
 SLOPE_IMPROVE_RATIOS = [0.15, 0.25, 0.35]
 ONE_M_LOOKBACKS = [3, 4, 5]
 ONE_M_POS_RATIOS = [0.67, 0.75]
@@ -53,6 +44,60 @@ def finite(x):
 
 def norm_sym(x):
     return str(x).zfill(6)
+
+
+def build_provisional_5m(raw_bars, cfg):
+    b = raw_bars.copy().sort_values('time').reset_index(drop=True)
+    b['time'] = pd.to_datetime(b['time'])
+    complete = to_5m(b)
+    complete['time'] = pd.to_datetime(complete['time'])
+    eng = DoubleBollingerEngine5(cfg)
+    out = []
+
+    for _, r1 in b.iterrows():
+        ts = pd.Timestamp(r1.time)
+        bucket_start = ts.floor('5min')
+        bucket_end = bucket_start + pd.Timedelta(minutes=5)
+        hist = complete[complete.time <= bucket_start].copy()
+        cur = b[(b.time >= bucket_start) & (b.time <= ts)]
+        if cur.empty:
+            continue
+
+        prov = pd.DataFrame([dict(
+            time=bucket_end,
+            open=float(cur.iloc[0].open),
+            high=float(pd.to_numeric(cur.high, errors='coerce').max()),
+            low=float(pd.to_numeric(cur.low, errors='coerce').min()),
+            close=float(r1.close),
+            volume=float(pd.to_numeric(cur.volume, errors='coerce').sum()),
+        )])
+        z = pd.concat([hist, prov], ignore_index=True).drop_duplicates('time', keep='last').sort_values('time')
+        e = eng.enrich(z)
+        if len(e) < 2:
+            continue
+
+        x = e.iloc[-1]
+        prev = e.iloc[-2]
+        cur_mid_slope = finite(x.mid_slope8)
+        prev_mid_slope = finite(prev.mid_slope8)
+        out.append(dict(
+            time=ts,
+            bucket_end=bucket_end,
+            close=float(r1.close),
+            macd=finite(x.macd),
+            signal=finite(x.macd_signal),
+            gap=finite(x.macd_gap),
+            gap_delta=finite(x.macd_gap_delta),
+            golden=bool(x.macd_golden_cross),
+            macd_slope=finite(x.macd_slope),
+            rsi=finite(x.rsi),
+            rsi_slope=finite(x.rsi_slope),
+            mid_slope8=cur_mid_slope,
+            completed_prev_mid_slope8=prev_mid_slope,
+            trend_up=bool(x.trend_up),
+            entry_score=finite(x.entry_score),
+        ))
+    return pd.DataFrame(out)
 
 
 def stats(label, t):
@@ -74,30 +119,16 @@ def stats(label, t):
 
 
 def classify_transition_regime(p):
-    """Return a transition regime only around a non-rising -> rising change.
-
-    We deliberately do not use current trend_up=True as an entry prerequisite.
-    The important state is whether the market was recently non-rising and its slope
-    is now bending upward strongly.
-    """
     prev = finite(p.completed_prev_mid_slope8)
     cur = finite(p.mid_slope8)
     if not (np.isfinite(prev) and np.isfinite(cur)):
         return 'NONE'
-
-    # Still below zero but improving: falling structure is bending up.
     if prev < 0 and cur <= 0:
         return 'DOWN_TURNING'
-
-    # Just crossed from non-rising to positive: the earliest upturn after down/flat.
     if prev <= 0 < cur:
         return 'ZERO_CROSS_UP'
-
-    # Very recent non-rising structure that has only just moved positive. This is
-    # treated as a transition, not an established uptrend.
     if prev < 0 and cur > 0:
         return 'EARLY_UP'
-
     return 'NONE'
 
 
@@ -114,7 +145,6 @@ def transition_ready_5m(p, improve_ratio: float):
     rsi_slope = finite(p.rsi_slope)
     gap = finite(p.gap)
     rsi = finite(p.rsi)
-
     vals = [prev, cur, raw, rel, macd_slope, rsi_slope, gap, rsi]
     if not all(np.isfinite(x) for x in vals):
         return False, {}
@@ -122,16 +152,7 @@ def transition_ready_5m(p, improve_ratio: float):
     improve = cur - prev
     required = max(abs(prev) * float(improve_ratio), 1e-9)
     slope_turn = improve >= required
-
-    # Strong change: use the frozen V20 MACD strength floor, but only as qualification.
-    # Directional coherence is separately required through slope and RSI.
-    momentum = (
-        raw >= RAW_MIN
-        and rel >= REL_MIN
-        and macd_slope > 0
-        and rsi_slope > 0
-    )
-
+    momentum = raw >= RAW_MIN and rel >= REL_MIN and macd_slope > 0 and rsi_slope > 0
     ok = bool(slope_turn and momentum)
     return ok, dict(
         regime=regime,
@@ -154,7 +175,6 @@ def one_m_transition_confirm(m: pd.DataFrame, ts: pd.Timestamp, lookback: int,
     q = m[m.time <= pd.Timestamp(ts)].tail(lookback).copy()
     if len(q) < lookback:
         return False, {}
-
     close = pd.to_numeric(q.close, errors='coerce').to_numpy(float)
     low = pd.to_numeric(q.low, errors='coerce').to_numpy(float)
     gaps = pd.to_numeric(q.macd_gap_1m, errors='coerce').to_numpy(float)
@@ -167,14 +187,12 @@ def one_m_transition_confirm(m: pd.DataFrame, ts: pd.Timestamp, lookback: int,
     pos = float(dg[dg > 0].sum()) if np.any(dg > 0) else 0.0
     neg = float(-dg[dg < 0].sum()) if np.any(dg < 0) else 0.0
     retrace = neg / max(pos, 1e-9)
-
     last = q.iloc[-1]
     low_idx = int(np.argmin(low))
     local_low = float(low[low_idx])
     low_before_now = low_idx < len(q) - 1
     rebound = (float(close[-1]) / local_low - 1.0) * 100.0 if local_low > 0 else np.nan
 
-    # Price must have actually turned up; oscillator-only turns are not buys.
     price_ok = bool(
         low_before_now
         and float(close[-1]) > float(close[-2])
@@ -182,8 +200,6 @@ def one_m_transition_confirm(m: pd.DataFrame, ts: pd.Timestamp, lookback: int,
         and np.isfinite(rebound)
         and rebound >= rebound_pct
     )
-
-    # Continuity: tolerate one mild pullback, reject zig-zag/noisy momentum.
     momentum_ok = bool(
         gaps[-1] > gaps[0]
         and pos_ratio >= min_pos_ratio
@@ -193,7 +209,6 @@ def one_m_transition_confirm(m: pd.DataFrame, ts: pd.Timestamp, lookback: int,
         and rsis[-1] > rsis[0]
         and finite(last.rsi_slope_1m) > 0
     )
-
     ok = bool(price_ok and momentum_ok)
     return ok, dict(
         local_low=local_low,
@@ -219,7 +234,6 @@ def build_transition_events(scored, micros, provisional,
     events = {}
     diag = []
     seen_bucket = set()
-
     for sym, pf in provisional.items():
         sym = norm_sym(sym)
         if pf.empty or sym not in scored or sym not in micros:
@@ -228,7 +242,6 @@ def build_transition_events(scored, micros, provisional,
         m = micros[sym]
         armed = None
         armed_until = None
-
         for _, p in pf.iterrows():
             ts = pd.Timestamp(p.time)
             minute = ts.hour * 60 + ts.minute
@@ -244,22 +257,15 @@ def build_transition_events(scored, micros, provisional,
                     ready_price=finite(p.close),
                     **meta5,
                 )
-
             if armed is None or armed_until is None or ts > armed_until:
                 continue
 
-            confirmed, meta1 = one_m_transition_confirm(
-                m, ts, lookback, min_pos_ratio, rebound_pct
-            )
+            confirmed, meta1 = one_m_transition_confirm(m, ts, lookback, min_pos_ratio, rebound_pct)
             if not confirmed:
                 continue
-
             bucket_key = (sym, armed['bucket_end'])
             if bucket_key in seen_bucket:
                 continue
-
-            # Use only the latest completed 5m row for the event object; trigger time/price
-            # come from the causal 1m/provisional observation.
             q5 = sf[sf.time <= ts.floor('5min')]
             if q5.empty:
                 continue
@@ -284,7 +290,6 @@ def build_transition_events(scored, micros, provisional,
             ))
             armed = None
             armed_until = None
-
     return events, pd.DataFrame(diag)
 
 
@@ -303,14 +308,12 @@ def main():
 
     packed = v8.base.pack_exit_events(raw, base_cfg)
     states = base.pack_state_events(base.build_cfg_frames(raw, base_cfg))
-
     frames0 = base.build_cfg_frames(raw, cfg)
     f10 = {norm_sym(s): v10._refine_entry_frame(f) for s, f in frames0.items()}
     scored0 = reweight(f10, cfg, 0.0)
     scored = {norm_sym(s): f for s, f in scored0.items()}
     strength_frames = {sym: ms.add_strength(f) for sym, f in scored.items()}
 
-    # Current V20 base path: completely unchanged.
     raw_entries = v8.pack_entry_events(scored)
     ev10 = sweep.filt_open(raw_entries)
     ev16, waits = v16.build_wait_events(ev10, raw, cfg, False)
@@ -323,7 +326,7 @@ def main():
     provisional = {}
     for s, b in raw.items():
         sym = norm_sym(s)
-        pf = live.build_provisional_5m(b, cfg)
+        pf = build_provisional_5m(b, cfg)
         provisional[sym] = rb.add_provisional_strength(pf, strength_frames[sym])
 
     print('=== V20 REGIME TRANSITION VALIDATION ===')
@@ -335,19 +338,14 @@ def main():
 
     rows = []
     all_diag = []
-    best_payload = None
-
     for ir in SLOPE_IMPROVE_RATIOS:
         for lb in ONE_M_LOOKBACKS:
             for pr in ONE_M_POS_RATIOS:
                 for rp in PRICE_REBOUND_PCTS:
-                    extra, d = build_transition_events(
-                        scored, micros, provisional, ir, lb, pr, rp
-                    )
+                    extra, d = build_transition_events(scored, micros, provisional, ir, lb, pr, rp)
                     merged = merge_events(ev20, extra)
                     t_extra = multi.simulate_multi(packed, extra, states, THRESHOLD)
                     t_merged = multi.simulate_multi(packed, merged, states, THRESHOLD)
-
                     label = f'TRANS_IR{ir:.2f}_LB{lb}_POS{pr:.2f}_R{rp:.2f}'
                     sm = stats(label, t_merged)
                     se = stats(label + '_EXTRA_ONLY', t_extra)
@@ -368,9 +366,7 @@ def main():
                         dd.insert(0, 'label', label)
                         all_diag.append(dd)
 
-    summary = pd.DataFrame(rows).sort_values(
-        ['net_sum_pct', 'net_pf', 'net_win_pct'], ascending=False
-    )
+    summary = pd.DataFrame(rows).sort_values(['net_sum_pct', 'net_pf', 'net_win_pct'], ascending=False)
     print('\n=== MERGED SWEEP SUMMARY ===')
     print(summary.to_string(index=False))
 

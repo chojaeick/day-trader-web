@@ -1,21 +1,13 @@
 from __future__ import annotations
 
-"""Full KR V21 integration test for the revised EXISTING Slow-turn decision logic.
+"""Full KR V21 integration test for revised EXISTING Slow-turn decision logic.
 
-This does not create a new strategy path. V20, V-rebound, exits, conflict ordering and
-position ownership remain the existing integrated V21 implementation. Only SLOW_TURN
-eligibility is replaced by:
+V20, V-rebound, exits, conflict ordering and position ownership remain unchanged.
+Only Slow-turn eligibility is compared.
 
-    BURST score >= diagnostic threshold
-      OR
-    COHERENCE structural gate: joint5>=0.80, joint1>=0.70, price_progress>=1.00%
-
-The integrated simulator still requires event tuple score>=50. For COHERENCE-only events
-we therefore use 50 solely as an interface/transport credential after the independent
-structural gate has already accepted the entry. It must NOT be interpreted as a computed
-Slow-turn score and is recorded separately as decision_mode='COHERENCE'.
-
-Thresholds 50/55/60 are diagnostics only; no production threshold is frozen here.
+IMPORTANT: OLD baseline is the final pre-score-fix V21, i.e. non-Slow sources plus the
+re-armed Slow-turn selection at CUT=-0.15. It is NOT integ.build_sources()'s older
+Slow-turn cohort.
 """
 
 from dataclasses import replace
@@ -42,6 +34,7 @@ OUT_TR=ROOT/'v21_slow_turn_dual_gate_integrated_trades.csv'
 OUT_SIG=ROOT/'v21_slow_turn_dual_gate_integrated_signals.csv'
 CUT=-0.15
 THRESHOLDS=(50.0,55.0,60.0)
+EXPECTED_OLD=dict(trades=50,wins=27,win_pct=54.0,net_sum_pct=49.4759,pf=3.6605)
 
 
 def n(x): return str(x).zfill(6)
@@ -50,16 +43,25 @@ def num(x): return pd.to_numeric(x,errors='coerce')
 def replace_score(event,score):
     e=list(event); e[2]=float(score); return tuple(e)
 
-def stat(label,tr):
-    return integ.stat(label,tr)
-
+def stat(label,tr): return integ.stat(label,tr)
 def mode_for(r,th):
-    b=float(r.burst_score)>=float(th)
-    c=bool(r.coherence_gate)
+    b=float(r.burst_score)>=float(th); c=bool(r.coherence_gate)
     if b and c:return 'BOTH'
     if b:return 'BURST'
     if c:return 'COHERENCE'
     return 'REJECT'
+
+
+def assert_old(st):
+    ok=(int(st['trades'])==EXPECTED_OLD['trades'] and int(st['wins'])==EXPECTED_OLD['wins'] and
+        abs(float(st['win_pct'])-EXPECTED_OLD['win_pct'])<1e-3 and
+        abs(float(st['net_sum_pct'])-EXPECTED_OLD['net_sum_pct'])<1e-3 and
+        abs(float(st['pf'])-EXPECTED_OLD['pf'])<1e-3)
+    if not ok:
+        print('OLD BASELINE REPRO FAILURE')
+        print('expected=',EXPECTED_OLD)
+        print('actual=',{k:st.get(k) for k in EXPECTED_OLD})
+        raise SystemExit(3)
 
 
 def main():
@@ -77,14 +79,22 @@ def main():
     micros={s:h.build_micro(raw[s],cfg) for s in raw}
 
     print('=== BUILD UNCHANGED V20 + V_REBOUND ===',flush=True)
-    old=integ.build_sources(raw,cfg,scored,strength,completed,micros)
-    non_slow=[x for x in old if x['source']!='SLOW_TURN']
+    legacy=integ.build_sources(raw,cfg,scored,strength,completed,micros)
+    non_slow=[z for z in legacy if z['source']!='SLOW_TURN']
 
-    print('=== REBUILD EXISTING RE-ARMED SLOW-TURN CANDIDATES ===',flush=True)
+    print('=== REBUILD FINAL V21 RE-ARMED SLOW-TURN ===',flush=True)
     allc=revised.build_all_slow(raw,cfg,completed,micros)
     sel=revised.select_revised(allc,CUT).copy()
     sel['symbol']=sel.symbol.astype(str).str.zfill(6)
     sel['entry_time']=pd.to_datetime(sel.entry_time)
+
+    # Correct OLD V21: final re-armed Slow-turn cohort, including historical transport-score
+    # behavior, combined with unchanged V20/V-rebound sources.
+    old_slow=revised.slow_tags(sel)
+    old=sorted(non_slow+old_slow,key=lambda z:(pd.Timestamp(z['time']),z['symbol'],z['source']))
+    old_tr=integ.simulate(packed,states,old)
+    old_st=stat('OLD_V21',old_tr)
+    assert_old(old_st)
 
     v=pd.read_csv(V5)
     v['symbol']=v.symbol.astype(str).str.zfill(6)
@@ -93,13 +103,10 @@ def main():
     x=sel.merge(v[keep].drop_duplicates(['symbol','entry_time']),on=['symbol','entry_time'],how='left',validate='one_to_one',suffixes=('','_v5'))
     if x.burst_score.isna().any():
         miss=x[x.burst_score.isna()][['symbol','entry_time']]
-        print('V5 SCORE MATCH FAILURE')
-        print(miss.to_string(index=False)); raise SystemExit(2)
+        print('V5 SCORE MATCH FAILURE'); print(miss.to_string(index=False)); raise SystemExit(2)
 
     rows=[]; trade_parts=[]; signal_parts=[]
-    old_tr=integ.simulate(packed,states,old)
-    old_st=stat('OLD_V21',old_tr)
-    rows.append(dict(burst_threshold='OLD',slow_selected=sum(z['source']=='SLOW_TURN' for z in old),burst_only=np.nan,coherence_only=np.nan,both=np.nan,**old_st))
+    rows.append(dict(burst_threshold='OLD',slow_selected=len(old_slow),burst_only=np.nan,coherence_only=np.nan,both=np.nan,**old_st))
 
     for th in THRESHOLDS:
         tags=[]; diag=[]
@@ -108,8 +115,6 @@ def main():
             if mode=='REJECT':
                 diag.append(dict(symbol=n(r.symbol),entry_time=pd.Timestamp(r.entry_time),regime=str(r.regime),burst_score=float(r.burst_score),coherence_gate=bool(r.coherence_gate),decision_mode=mode,transport_score=np.nan))
                 continue
-            # BURST keeps its computed score. COHERENCE-only uses 50 solely because the
-            # existing simulator's tuple interface re-checks score>=50 after the structural gate.
             transport=float(r.burst_score) if mode in ('BURST','BOTH') and float(r.burst_score)>=50 else 50.0
             ev=replace_score(r.event,transport)
             tags.append(dict(source='SLOW_TURN',symbol=n(r.symbol),time=pd.Timestamp(r.entry_time),event=ev,
@@ -124,8 +129,7 @@ def main():
         q=tr.copy();q['burst_threshold']=th;trade_parts.append(q)
         q2=pd.DataFrame(diag);q2['burst_threshold']=th;signal_parts.append(q2)
 
-    summary=pd.DataFrame(rows)
-    summary.to_csv(OUT_SUM,index=False)
+    summary=pd.DataFrame(rows); summary.to_csv(OUT_SUM,index=False)
     if trade_parts:pd.concat(trade_parts,ignore_index=True).to_csv(OUT_TR,index=False)
     if signal_parts:pd.concat(signal_parts,ignore_index=True).to_csv(OUT_SIG,index=False)
 
@@ -141,10 +145,9 @@ def main():
         print(f'-- {sym} {t} --')
         print(q[['burst_threshold','burst_score','coherence_gate','decision_mode','transport_score']].to_string(index=False,float_format=lambda v:f'{v:.4f}') if len(q) else 'NOT FOUND')
 
-    print('\nREADING:')
-    print('- OLD must reproduce the prior V21 integrated baseline before comparing revised rows.')
-    print('- 55/60 are not frozen; this checks full-simulator conflicts/ownership and semantics only.')
-    print('- COHERENCE transport_score=50 is interface compatibility, not a calculated score or score-floor rule.')
+    print('\nREPRO CHECK: OLD final V21 baseline PASS')
+    print('55/60 remain diagnostics only; do not freeze from this KR sample.')
+    print('COHERENCE transport_score=50 is simulator interface compatibility, not a calculated score.')
     print('WROTE',OUT_SUM);print('WROTE',OUT_TR);print('WROTE',OUT_SIG)
 
 if __name__=='__main__':main()

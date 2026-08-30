@@ -4,9 +4,8 @@ from __future__ import annotations
 
 Reuses the existing US core cache. No data rebuild, no threshold changes, no
 US tuning. Historical constructors are imported unchanged from the original KR
-validators and evaluated with the historical multi-symbol simulator they were
-built for, so 12-field historical events are not forced through the newer
-13-field integrated simulator.
+validators. Legacy V16 12-field tuples are upgraded only by appending the
+missing breakout_entry=False flag required by the later multi-symbol simulator.
 """
 
 import pickle
@@ -33,6 +32,24 @@ THRESHOLD=50
 
 def count_events(ev): return sum(len(v) for v in ev.values())
 
+def normalize_events(ev):
+    out={}
+    bad=[]
+    for ts,rows in ev.items():
+        for c in rows:
+            if len(c)==13:
+                x=c
+            elif len(c)==12:
+                # V16 predates breakout_entry. Semantics are non-breakout.
+                x=tuple(c)+(False,)
+            else:
+                bad.append((pd.Timestamp(ts),str(c[0]) if len(c) else '?',len(c)))
+                continue
+            out.setdefault(pd.Timestamp(ts),[]).append(x)
+    if bad:
+        raise ValueError(f'UNSUPPORTED_EVENT_WIDTH examples={bad[:10]}')
+    return out
+
 def stat(label,tr,signals):
     p=pd.to_numeric(tr.pnl_pct,errors='coerce').dropna() if len(tr) else pd.Series(dtype=float)
     gp=float(p[p>0].sum()) if len(p) else 0.0
@@ -46,15 +63,16 @@ def stat(label,tr,signals):
         pf=(gp/gl if gl>0 else float('inf')),max_loss_pct=(float(p.min()) if len(p) else float('nan')))
 
 def run(label,ev,packed,states):
-    tr=multi.simulate_multi(packed,ev,states,THRESHOLD)
-    return tr,stat(label,tr,count_events(ev))
+    nev=normalize_events(ev)
+    tr=multi.simulate_multi(packed,nev,states,THRESHOLD)
+    return tr,stat(label,tr,count_events(nev))
 
 def main():
     with CORE.open('rb') as fh:d=pickle.load(fh)
     raw=d['raw']; cfg=d['cfg']; packed=d['packed']; states=d['states']; scored=d['scored']; micros=d['micros']
     print('=== US OOS REMAINING HISTORICAL V19 PATHS ===')
     print('NO CACHE REBUILD. NO THRESHOLD CHANGES. NO OOS TUNING.')
-    print('HISTORICAL 12-FIELD EVENTS USE THEIR ORIGINAL MULTI-SYMBOL SIMULATOR.')
+    print('LEGACY 12-FIELD EVENTS ARE UPGRADED ONLY WITH breakout_entry=False.')
 
     raw_entries=v8.pack_entry_events(scored)
     ev10=sweep.filt_open(raw_entries)

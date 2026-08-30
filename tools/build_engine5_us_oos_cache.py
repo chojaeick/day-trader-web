@@ -13,6 +13,7 @@ import tools.backtest_dbb_engine5_fast_tuner_v4 as base
 import tools.backtest_dbb_engine5_fast_tuner_v8 as v8
 import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
 import tools.validate_engine5_v20_regime_transition as rt
+import tools.validate_engine5_v20_macd_strength as ms
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
 import tools.validate_engine5_slow_turn_regime_integrated as sri
 import tools.validate_engine5_slow_turn_prototype as slow
@@ -70,7 +71,7 @@ def main():
     frames0=base.build_cfg_frames(raw,cfg)
     f10={key(s):v10._refine_entry_frame(f) for s,f in frames0.items()}
     scored={key(s):f for s,f in reweight(f10,cfg,0.0).items()}
-    strength={s:rt.add_strength_columns(f) for s,f in scored.items()}
+    strength={s:ms.add_strength(f) for s,f in scored.items()}
     completed={s:rt.add_completed_strength(f) for s,f in scored.items()}
     micros={s:h.build_micro(b,cfg) for s,b in raw.items()}
     with CORE_CACHE.open('wb') as fh:pickle.dump(dict(raw=raw,cfg0=cfg0,cfg=cfg,packed=packed,states=states,scored=scored,strength=strength,completed=completed,micros=micros),fh,pickle.HIGHEST_PROTOCOL)

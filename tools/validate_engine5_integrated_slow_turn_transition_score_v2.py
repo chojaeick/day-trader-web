@@ -65,56 +65,96 @@ def robust_scale(s: pd.Series) -> float:
     return q if q > 1e-12 else np.nan
 
 
+def pick_series(df: pd.DataFrame, names):
+    for c in names:
+        if c in df.columns:
+            s = num(df[c])
+            if s.notna().any():
+                return s, c
+    return None, None
+
+
 def episode_features_for_candidate(r, pf: pd.DataFrame, micro: pd.DataFrame):
     ready = pd.Timestamp(r.ready_time)
     entry = pd.Timestamp(r.entry_time)
 
     z = pf.copy().sort_values('time')
     z['time'] = pd.to_datetime(z['time'])
-    m = micro.copy().sort_values('time')
-    m['time'] = pd.to_datetime(m['time'])
 
-    # Actual 5m/provisional turn episode: 20 minutes leading into READY.  The score uses
-    # cumulative change divided by elapsed bars, so slow drift is not rewarded like a snap turn.
+    # 20-minute causal provisional window ending at READY.
     w5 = z[(z.time <= ready) & (z.time >= ready - pd.Timedelta(minutes=20))].copy()
     if len(w5) < 3:
-        return None
+        return dict(transition_score=np.nan, score_error='short_window', episode_rows=len(w5))
 
-    gap = num(w5['macd_gap']) if 'macd_gap' in w5 else None
-    if gap is None or gap.isna().all():
-        if 'macd' in w5 and 'macd_signal' in w5:
-            gap = num(w5['macd']) - num(w5['macd_signal'])
-        else:
-            return None
-    rsi = num(w5['rsi'])
+    # Prefer level series when available.  Provisional Slow-turn caches often carry
+    # gap_delta/rsi_slope rather than macd_gap/rsi, so reconstruct levels causally by
+    # cumulative sum.  Only relative turn shape/speed is used, so additive origin is irrelevant.
+    gap, gap_col = pick_series(w5, ['macd_gap', 'gap'])
+    if gap is None:
+        gd, gd_col = pick_series(w5, ['gap_delta', 'macd_gap_delta'])
+        if gd is not None:
+            gap = gd.fillna(0.0).cumsum()
+            gap_col = f'cumsum({gd_col})'
 
-    # Anchor at the local minimum in the episode, independently for MACD gap and RSI.
-    gi = gap.idxmin(); ri = rsi.idxmin()
-    gtail = w5.loc[gi:].copy(); rtail = w5.loc[ri:].copy()
-    g = num(gtail['macd_gap']) if 'macd_gap' in gtail else num(gtail['macd']) - num(gtail['macd_signal'])
-    rr = num(rtail['rsi'])
+    rsi, rsi_col = pick_series(w5, ['rsi'])
+    if rsi is None:
+        rs, rs_col = pick_series(w5, ['rsi_slope'])
+        if rs is not None:
+            rsi = rs.fillna(0.0).cumsum()
+            rsi_col = f'cumsum({rs_col})'
 
-    g_gain = finite(g.iloc[-1] - g.iloc[0]) if len(g) >= 2 else 0.0
-    r_gain = finite(rr.iloc[-1] - rr.iloc[0]) if len(rr) >= 2 else 0.0
-    g_steps = max(len(g) - 1, 1)
-    r_steps = max(len(rr) - 1, 1)
+    if gap is None or rsi is None:
+        return dict(
+            transition_score=np.nan,
+            score_error=f'missing_series gap={gap_col} rsi={rsi_col}',
+            episode_rows=len(w5),
+            pf_columns='|'.join(map(str, w5.columns)),
+        )
+
+    # Use positional arrays to avoid idxmin/.loc index-label mismatch after filtering.
+    gv = np.asarray(gap, dtype=float)
+    rv = np.asarray(rsi, dtype=float)
+    gt = pd.to_datetime(w5['time']).reset_index(drop=True)
+
+    if not np.isfinite(gv).any() or not np.isfinite(rv).any():
+        return dict(transition_score=np.nan, score_error='nonfinite_series', episode_rows=len(w5))
+
+    gi = int(np.nanargmin(gv)); ri = int(np.nanargmin(rv))
+    gtail = gv[gi:]; rtail = rv[ri:]
+
+    g_gain = finite(gtail[-1] - gtail[0]) if len(gtail) >= 2 else 0.0
+    r_gain = finite(rtail[-1] - rtail[0]) if len(rtail) >= 2 else 0.0
+    g_steps = max(len(gtail) - 1, 1)
+    r_steps = max(len(rtail) - 1, 1)
     g_speed = g_gain / g_steps
     r_speed = r_gain / r_steps
 
-    # Compare speed with the candidate's own recent pre-anchor one-step noise.
-    pre = z[z.time < min(pd.Timestamp(gtail.iloc[0].time), pd.Timestamp(rtail.iloc[0].time))].tail(12)
-    pre_gap = num(pre['macd_gap']) if 'macd_gap' in pre else num(pre['macd']) - num(pre['macd_signal'])
-    pre_rsi = num(pre['rsi'])
-    g_base = robust_scale(pre_gap.diff())
-    r_base = robust_scale(pre_rsi.diff())
+    # Baseline from the 12 provisional observations immediately before the earlier turn anchor.
+    anchor_pos = min(gi, ri)
+    pre = z[z.time < pd.Timestamp(gt.iloc[anchor_pos])].tail(12).copy()
+
+    pre_gap, _ = pick_series(pre, ['macd_gap', 'gap'])
+    if pre_gap is None:
+        pre_gd, _ = pick_series(pre, ['gap_delta', 'macd_gap_delta'])
+        if pre_gd is not None:
+            # For a delta-backed current series, baseline is directly the typical delta magnitude.
+            g_base = robust_scale(pre_gd)
+        else:
+            g_base = np.nan
+    else:
+        g_base = robust_scale(pre_gap.diff())
+
+    pre_rsi, _ = pick_series(pre, ['rsi'])
+    if pre_rsi is None:
+        pre_rs, _ = pick_series(pre, ['rsi_slope'])
+        r_base = robust_scale(pre_rs) if pre_rs is not None else np.nan
+    else:
+        r_base = robust_scale(pre_rsi.diff())
 
     g_strength = clip01(g_speed / (3.0 * g_base)) if np.isfinite(g_base) and g_base > 0 and g_speed > 0 else 0.0
     r_strength = clip01(r_speed / (3.0 * r_base)) if np.isfinite(r_base) and r_base > 0 and r_speed > 0 else 0.0
-
-    # Synchrony rewards MACD and RSI turning together, not one carrying the other.
     sync = min(g_strength, r_strength)
 
-    # 1m price progress is already causal and existing Slow-turn infrastructure provides it.
     px = finite(getattr(r, 'price_progress_1m_pct', np.nan))
     price_strength = clip01(px / 1.5) if np.isfinite(px) and px > 0 else 0.0
     j1 = finite(getattr(r, 'joint1_persistence', np.nan))
@@ -128,7 +168,8 @@ def episode_features_for_candidate(r, pf: pd.DataFrame, micro: pd.DataFrame):
     score = score_macd + score_rsi + score_sync + score_price + score_micro
 
     return dict(
-        transition_score=float(score),
+        transition_score=float(score), score_error='', episode_rows=len(w5),
+        gap_source=gap_col, rsi_source=rsi_col,
         macd_episode_score=score_macd,
         rsi_episode_score=score_rsi,
         sync_score=score_sync,
@@ -142,8 +183,10 @@ def episode_features_for_candidate(r, pf: pd.DataFrame, micro: pd.DataFrame):
         rsi_episode_speed=r_speed,
         macd_baseline_step=g_base,
         rsi_baseline_step=r_base,
-        macd_turn_start=pd.Timestamp(gtail.iloc[0].time),
-        rsi_turn_start=pd.Timestamp(rtail.iloc[0].time),
+        macd_turn_start=pd.Timestamp(gt.iloc[gi]),
+        rsi_turn_start=pd.Timestamp(gt.iloc[ri]),
+        episode_start=pd.Timestamp(w5.iloc[0].time),
+        episode_end=pd.Timestamp(w5.iloc[-1].time),
     )
 
 
@@ -155,13 +198,20 @@ def attach_scores(sel, pf_by_symbol, micros):
     rows=[]
     for _, r in sel.iterrows():
         d = episode_features_for_candidate(r, pf_by_symbol[n(r.symbol)], micros[n(r.symbol)])
-        rows.append(d or dict(transition_score=0.0))
-    return pd.concat([sel.copy(), pd.DataFrame(rows, index=sel.index)], axis=1)
+        rows.append(d)
+    out = pd.concat([sel.copy(), pd.DataFrame(rows, index=sel.index)], axis=1)
+    bad = out[num(out.transition_score).isna()]
+    if len(bad):
+        print(f'[SCORE ERROR] {len(bad)}/{len(out)} candidates could not be scored')
+        cols=[c for c in ['symbol','ready_time','entry_time','score_error','episode_rows','gap_source','rsi_source'] if c in bad.columns]
+        print(bad[cols].head(20).to_string(index=False))
+    return out
 
 
 def tags_from_scored(sel, threshold):
     out=[]
-    for _, r in sel[num(sel.transition_score) >= float(threshold)].iterrows():
+    q = sel[num(sel.transition_score).notna() & (num(sel.transition_score) >= float(threshold))]
+    for _, r in q.iterrows():
         out.append(dict(source='SLOW_TURN', symbol=n(r.symbol), time=pd.Timestamp(r.entry_time),
                         event=replace_event_score(r.event, r.transition_score),
                         meta=dict(regime=str(r.regime), transition_score=float(r.transition_score),
@@ -226,7 +276,7 @@ def main():
     print(summary.to_string(index=False,float_format=lambda v:f'{v:.4f}'))
     print('\n=== CANONICAL KR CASES ===')
     targets=[('058610','2026-08-13 09:25:00+09:00','V_TURN_SUCCESS'),('122630','2026-08-20 13:06:00+09:00','GRADUAL_FAILURE'),('950160','2026-08-14 10:59:00+09:00','VALID_SLOW_SUCCESS')]
-    cols=['transition_score','macd_episode_score','rsi_episode_score','sync_score','price_score','micro_score','macd_episode_gain','rsi_episode_gain','macd_episode_speed','rsi_episode_speed','macd_turn_start','rsi_turn_start','net_pct','result']
+    cols=['transition_score','score_error','episode_rows','gap_source','rsi_source','macd_episode_score','rsi_episode_score','sync_score','price_score','micro_score','macd_episode_gain','rsi_episode_gain','macd_episode_speed','rsi_episode_speed','macd_baseline_step','rsi_baseline_step','macd_turn_start','rsi_turn_start','episode_start','episode_end','net_pct','result']
     for sym,t,label in targets:
         ts=pd.Timestamp(t); q=x[(x.symbol==sym)&(x.entry_time==ts)]
         print(f'\n[{label}] {sym} {ts}')

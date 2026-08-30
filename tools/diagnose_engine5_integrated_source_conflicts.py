@@ -14,7 +14,6 @@ import tools.validate_engine5_v17c_opening_5m_hwm_sweep as sweep
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
 import tools.validate_engine5_v20_macd_strength as ms
 import tools.validate_engine5_v20_regime_transition as rt
-import tools.validate_engine5_slow_turn_provisional_full as slowfull
 import tools.validate_engine5_slow_turn_regime_integrated as ri
 import tools.validate_engine5_slow_turn_structure_ablation as ab
 import tools.validate_engine5_v21_v_rebound_structural_stop as vold
@@ -35,8 +34,48 @@ STOP_CAP = 2.0
 VOL_MIN = 1.0
 GAP_KEEP_MIN = 0.9
 
+NEAR_PX_MIN = 0.75
+NEAR_EXTENSION_MAX = 4.0
+MID_P5_MIN = 0.60
+MID_P1_MIN = 0.60
+MID_PX_MIN = 1.00
+BOUNDARY_MACD_MIN = 30.0
+BOUNDARY_RSI_MIN = 10.0
+BOUNDARY_PX_MIN = 1.50
+
 
 def n(x): return str(x).zfill(6)
+
+
+def finite(x):
+    try:
+        v = float(x)
+        return v if np.isfinite(v) else np.nan
+    except Exception:
+        return np.nan
+
+
+def classify_and_select(r):
+    z = finite(r.zero_cross_bars)
+    p5 = finite(r.joint5_persistence)
+    p1 = finite(r.joint1_persistence)
+    px = finite(r.price_progress_1m_pct)
+    gd = finite(r.gap_delta_5m)
+    rs = finite(r.rsi_slope_5m)
+    ext6 = finite(r.close_progress_6m_pct)
+
+    if not np.isfinite(z):
+        return False, 'INVALID'
+    if z <= 1.5:
+        ok = np.isfinite(px) and px >= NEAR_PX_MIN and np.isfinite(ext6) and ext6 < NEAR_EXTENSION_MAX
+        return bool(ok), 'NEAR_LE1_5'
+    if z <= 8.0:
+        ok = np.isfinite(p5) and p5 >= MID_P5_MIN and np.isfinite(p1) and p1 >= MID_P1_MIN and np.isfinite(px) and px >= MID_PX_MIN
+        return bool(ok), 'MID_1_5_8'
+    if z <= 12.0:
+        ok = np.isfinite(gd) and gd >= BOUNDARY_MACD_MIN and np.isfinite(rs) and rs >= BOUNDARY_RSI_MIN and np.isfinite(px) and px >= BOUNDARY_PX_MIN
+        return bool(ok), 'BOUNDARY_8_12'
+    return False, 'DEEP_GT12'
 
 
 def keys_from_events(ev, source):
@@ -60,19 +99,16 @@ def main():
     strength={s:ms.add_strength(f) for s,f in scored.items()}
     completed={s:rt.add_completed_strength(f) for s,f in scored.items()}
 
-    # Build protected V20 stream.
     ev10=sweep.filt_open(v8.pack_entry_events(scored))
     ev16,waits=v16.build_wait_events(ev10,raw,cfg,False)
     ev17,_,_=v17b.build_v17b(ev16,scored,waits)
 
     micros={}
-    provisional={}
     vfeatures={}
     vall=[]
     for sym,bars in raw.items():
         pf,m=vold.load_cache(sym,bars,cfg,completed[sym])
         micros[sym]=m
-        provisional[sym]=pf
         z=vsm.add_features(pf,m,bars).sort_values('time').reset_index(drop=True)
         vfeatures[sym]=z
         c=vsm.state_candidates(sym,z,scored[sym],RAW_MIN,LEG_MIN)
@@ -81,7 +117,6 @@ def main():
     ev18,_=h.build_veto_stream(ev17,micros)
     ev20,_=ms.filter_events(ev18,strength,raw_min=52.0,rel_min=1.45)
 
-    # Reconstruct current provisional gradual-turn selection.
     base_cand=ri.reconstruct_base_candidates(raw,cfg,scored,completed,micros)
     base_cand['symbol']=base_cand.symbol.astype(str).str.zfill(6)
     base_cand['entry_time']=pd.to_datetime(base_cand.entry_time)
@@ -96,13 +131,12 @@ def main():
     sx=pd.concat([sx.reset_index(drop=True),pd.DataFrame(ext)],axis=1)
     smask=[]; sreg=[]
     for _,r in sx.iterrows():
-        ok,rg=slowfull.classify_and_select(r); smask.append(ok); sreg.append(rg)
+        ok,rg=classify_and_select(r); smask.append(ok); sreg.append(rg)
     sx['regime']=sreg
     slow_sel=sx[np.asarray(smask,dtype=bool)].copy()
     slow_keys=slow_sel[['symbol','entry_time']].rename(columns={'entry_time':'time'}).copy()
     slow_keys['source']='SLOW_TURN'
 
-    # Current selected V cohort: stop<=2, reaccel, vol>=1, RSI positive, gap_keep>=0.9.
     vcand=pd.concat(vall,ignore_index=True) if vall else pd.DataFrame()
     if len(vcand):
         vcand=vra.add_pullback_reaccel(vcand,vfeatures)
@@ -122,13 +156,11 @@ def main():
     allk['time']=pd.to_datetime(allk.time)
     allk=allk.sort_values(['symbol','time','source']).reset_index(drop=True)
 
-    # Exact same symbol/time collisions.
     exact=(allk.groupby(['symbol','time']).source.agg(lambda x:'+'.join(sorted(set(x)))).reset_index(name='sources'))
-    exact=exact[exact.sources.str.contains('\+')].copy()
+    exact=exact[exact.sources.str.contains(r'\+', regex=True)].copy()
     exact['kind']='EXACT'
     exact['minutes_apart']=0.0
 
-    # Near collisions: different source on same symbol within 5 minutes.
     near=[]
     for sym,g in allk.groupby('symbol'):
         a=g.sort_values('time').reset_index(drop=True)
@@ -140,7 +172,8 @@ def main():
                 near.append(dict(kind='NEAR_5M',symbol=sym,time=a.time.iloc[i],
                                  sources=f"{a.source.iloc[i]}->{a.source.iloc[j]}",minutes_apart=dt))
     near=pd.DataFrame(near)
-    out=pd.concat([exact[['kind','symbol','time','sources','minutes_apart']],near],ignore_index=True) if len(near) else exact[['kind','symbol','time','sources','minutes_apart']]
+    exact_cols=['kind','symbol','time','sources','minutes_apart']
+    out=pd.concat([exact[exact_cols],near],ignore_index=True) if len(near) else exact[exact_cols]
     OUT_DIR.mkdir(parents=True,exist_ok=True)
     out.to_csv(OUT,index=False)
 

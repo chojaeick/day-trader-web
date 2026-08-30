@@ -4,7 +4,9 @@ from __future__ import annotations
 
 Reuses the existing US core cache. No data rebuild, no threshold changes, no
 US tuning. Historical constructors are imported unchanged from the original KR
-validators and evaluated through the same current integrated exit simulator.
+validators and evaluated with the historical multi-symbol simulator they were
+built for, so 12-field historical events are not forced through the newer
+13-field integrated simulator.
 """
 
 import pickle
@@ -16,10 +18,10 @@ import tools.backtest_dbb_engine5_v16_wait_reaccel as v16
 import tools.backtest_engine5_v17b_breakout_v16_veto as v17b
 import tools.validate_engine5_v17c_opening_5m_hwm_sweep as sweep
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
+import tools.validate_engine5_v17c_multi_symbol as multi
 import tools.validate_engine5_v17c_veto_plus_fast_trigger_additive_sweep as additive
 import tools.validate_engine5_v19_momentum_birth_fast_trigger as birth
 import tools.validate_engine5_v19_prebuy_5m_1m_confirm as strict
-import tools.validate_engine5_integrated_full_history as integ
 
 CACHE=Path('/home/ubuntu/day-trader-api/engine5_us_oos_cache')
 CORE=CACHE/'us_engine5_core.pkl'
@@ -27,22 +29,32 @@ OUT=CACHE/'us_oos_v19_all_historical_summary.csv'
 TRADES=CACHE/'us_oos_v19_all_historical_trades.csv'
 DIAG=CACHE/'us_oos_v19_all_historical_diag.csv'
 DELAYS=(0,1,2,3)
+THRESHOLD=50
 
-def n(x): return str(x).zfill(6)
-def flatten(src,ev):
-    return [dict(source=src,symbol=n(c[0]),time=pd.Timestamp(ts),event=c,meta={}) for ts,cs in ev.items() for c in cs]
 def count_events(ev): return sum(len(v) for v in ev.values())
+
+def stat(label,tr,signals):
+    p=pd.to_numeric(tr.pnl_pct,errors='coerce').dropna() if len(tr) else pd.Series(dtype=float)
+    gp=float(p[p>0].sum()) if len(p) else 0.0
+    gl=float(-p[p<0].sum()) if len(p) else 0.0
+    gross=float(p.sum()) if len(p) else 0.0
+    net=gross-len(p)*0.25
+    return dict(
+        variant=label,signals=int(signals),trades=int(len(p)),wins=int((p>0).sum()),losses=int((p<=0).sum()),
+        win_pct=float((p>0).mean()*100.0) if len(p) else 0.0,
+        net_sum_pct=net,avg_net_pct=float(net/len(p)) if len(p) else 0.0,
+        pf=(gp/gl if gl>0 else float('inf')),max_loss_pct=(float(p.min()) if len(p) else float('nan')))
+
 def run(label,ev,packed,states):
-    tags=flatten(label,ev)
-    tr=integ.simulate(packed,states,tags)
-    s=integ.stat(label,tr)
-    return tr,dict(variant=label,signals=len(tags),**{k:s[k] for k in ['trades','wins','losses','win_pct','net_sum_pct','avg_net_pct','pf','max_loss_pct']})
+    tr=multi.simulate_multi(packed,ev,states,THRESHOLD)
+    return tr,stat(label,tr,count_events(ev))
 
 def main():
     with CORE.open('rb') as fh:d=pickle.load(fh)
     raw=d['raw']; cfg=d['cfg']; packed=d['packed']; states=d['states']; scored=d['scored']; micros=d['micros']
     print('=== US OOS REMAINING HISTORICAL V19 PATHS ===')
     print('NO CACHE REBUILD. NO THRESHOLD CHANGES. NO OOS TUNING.')
+    print('HISTORICAL 12-FIELD EVENTS USE THEIR ORIGINAL MULTI-SYMBOL SIMULATOR.')
 
     raw_entries=v8.pack_entry_events(scored)
     ev10=sweep.filt_open(raw_entries)
@@ -52,12 +64,10 @@ def main():
 
     rows=[]; trade_parts=[]; diag_rows=[]
 
-    # Include V16 because it was not printed by the previous all-version run.
     for label,ev in [('V16_WAIT_REACCEL',ev16),('V18_BASE',ev18)]:
         tr,s=run(label,ev,packed,states); rows.append(s)
         if len(tr):q=tr.copy();q['variant']=label;trade_parts.append(q)
 
-    # Historical pre-V19 additive fast-trigger sweep.
     hybrid,ready_diag=h.build_ready_trigger_stream(scored,micros)
     for delay in DELAYS:
         ev,added=additive.add_fast_events(ev18,hybrid,ready_diag,delay)
@@ -66,7 +76,6 @@ def main():
         if len(tr):q=tr.copy();q['variant']=label;trade_parts.append(q)
         diag_rows.append(dict(variant=label,ready=len(ready_diag),triggered=count_events(ev)-count_events(ev18),raw_added=len(added)))
 
-    # V19 momentum-birth implementation.
     for delay in DELAYS:
         fast,dg=birth.build_v19_birth_events(scored,micros,raw,delay)
         ev,added=birth.merge_additive(ev18,fast)
@@ -75,7 +84,6 @@ def main():
         if len(tr):q=tr.copy();q['variant']=label;trade_parts.append(q)
         diag_rows.append(dict(variant=label,ready=len(dg),triggered=int((dg.status=='TRIGGERED').sum()) if len(dg) else 0,raw_added=len(added)))
 
-    # Later strict 5m-prebuy + 1m-confirm V19 revision.
     for delay in DELAYS:
         fast,dg=strict.build_v19_events(scored,micros,raw,delay)
         ev,added=strict.merge_additive(ev18,fast)

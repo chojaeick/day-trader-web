@@ -13,6 +13,7 @@ PERSIST=CACHE_DIR/'slow_turn_persistence_candidates.csv'
 OUT_TRADES=CACHE_DIR/'us_oos_integrated_trades.csv'
 OUT_SUMMARY=CACHE_DIR/'us_oos_integrated_summary.csv'
 OUT_SIGNALS=CACHE_DIR/'us_oos_integrated_signals.csv'
+NY_TZ='America/New_York'
 
 
 def main():
@@ -21,19 +22,20 @@ def main():
     with CORE.open('rb') as fh:d=pickle.load(fh)
     raw=d['raw']; cfg=d['cfg']; packed=d['packed']; states=d['states']; scored=d['scored']; strength=d['strength']; completed=d['completed']; micros=d['micros']
 
-    # Build/load the O(N) provisional frames once.  These replace only the expensive
+    # Build/load the O(N) provisional frames once. These replace only the expensive
     # Korean diagnostic cache loader; strategy logic/thresholds remain unchanged.
     print('PREP US FAST PROVISIONAL FRAMES FOR SLOW_TURN + V_REBOUND...',flush=True)
     base_cand,pf_by_symbol=uscache.build_base_candidates_fast(raw,cfg,scored,micros,completed)
     print(f'FAST BASE CANDIDATES rows={len(base_cand)}',flush=True)
 
     # integrated_full_history internally calls the old O(N^2) cache loaders twice:
-    # once for Slow-turn reconstruction and once for V-rebound.  Patch only those
+    # once for Slow-turn reconstruction and once for V-rebound. Patch only those
     # data providers for this US OOS run so both paths consume the already-built
     # causal fast provisional frames and the core micro frames.
     old_persist=integ.PERSIST_SRC
     old_reconstruct=integ.sri.reconstruct_base_candidates
     old_vload=integ.vold.load_cache
+    old_read_csv=integ.pd.read_csv
 
     def fast_reconstruct(_raw,_cfg,_scored,_completed,_micros):
         return base_cand.copy()
@@ -43,15 +45,30 @@ def main():
         if s not in pf_by_symbol: raise KeyError(f'no fast provisional for {s}')
         return pf_by_symbol[s], micros[s]
 
+    # The US persistence CSV spans EST and EDT. A plain pd.to_datetime() sees mixed
+    # offsets and returns object dtype. Normalize through UTC, then convert back to
+    # America/New_York so it merges exactly with the tz-aware candidate timestamps.
+    def us_read_csv(path,*args,**kwargs):
+        df=old_read_csv(path,*args,**kwargs)
+        try:
+            same_persist=Path(path)==PERSIST
+        except TypeError:
+            same_persist=False
+        if same_persist and 'entry_time' in df.columns:
+            df['entry_time']=pd.to_datetime(df['entry_time'],utc=True).dt.tz_convert(NY_TZ)
+        return df
+
     integ.PERSIST_SRC=PERSIST
     integ.sri.reconstruct_base_candidates=fast_reconstruct
     integ.vold.load_cache=fast_vload
+    integ.pd.read_csv=us_read_csv
     try:
         tagged=integ.build_sources(raw,cfg,scored,strength,completed,micros)
     finally:
         integ.PERSIST_SRC=old_persist
         integ.sri.reconstruct_base_candidates=old_reconstruct
         integ.vold.load_cache=old_vload
+        integ.pd.read_csv=old_read_csv
 
     tr=integ.simulate(packed,states,tagged)
     sm=pd.DataFrame([integ.stat('US_OOS_INTEGRATED',tr)])

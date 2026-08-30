@@ -17,8 +17,10 @@ The expensive market-independent derived data are persisted once:
 - provisional/<symbol>_provisional.pkl: causal provisional 5m features used by
   Slow-turn and V-rebound
 
-Repeated strategy validation must read these caches instead of rebuilding DB,
-RSI/MACD/Bollinger/1m/5m features.
+This builder is fully resumable. If CORE already exists it is loaded instead of
+rebuilding DB/indicators. Each valid per-symbol provisional pickle is also
+reused independently, so an interrupted run continues from the first missing
+symbol rather than starting over.
 """
 
 import pickle
@@ -47,9 +49,9 @@ SYMS=['SOXL','TQQQ','QQQ','NVDA','AMD','SMH','SPY','AVGO','PLTR']
 FX=1400.0
 NY='America/New_York'
 SHIFT=pd.Timedelta(minutes=30)
+PROV_REQUIRED={'time','bucket_end','close','mid_slope8','gap_delta','macd_slope','rsi_slope','strength_rel'}
 
 def key(s): return str(s).zfill(6)
-
 def provisional_path(sym): return PROV_DIR/f'{key(sym)}_provisional.pkl'
 
 def load_mapped():
@@ -70,42 +72,54 @@ def load_mapped():
         q['volume']=pd.to_numeric(q.volume,errors='coerce')
         q=q.dropna(subset=['time','open','high','low','close']).sort_values('time').reset_index(drop=True)
         out[key(s)]=q[['time','open','high','low','close','volume']].copy()
-
         q['_day']=q.time.dt.date
         for d,g in q.groupby('_day'):
             f5=to_5m(g[['time','open','high','low','close','volume']].copy())
             audits.append(dict(symbol=s,day=str(d),rows1=len(g),first1=str(g.time.iloc[0]),last1=str(g.time.iloc[-1]),
-                               bars5=len(f5),first5=str(f5.time.iloc[0]) if len(f5) else '',last5=str(f5.time.iloc[-1]) if len(f5) else '',
-                               dup=int(g.time.duplicated().sum())))
+                               bars5=len(f5),first5=str(f5.time.iloc[0]) if len(f5) else '',last5=str(f5.time.iloc[-1]) if len(f5) else '',dup=int(g.time.duplicated().sum())))
         print(f'[{i}/{len(SYMS)}] {s} rows={len(q)} mapped {q.time.min()} -> {q.time.max()}',flush=True)
-    con.close()
-    return out,pd.DataFrame(audits)
+    con.close(); return out,pd.DataFrame(audits)
+
+def valid_provisional(path):
+    if not path.exists(): return None
+    try:
+        with path.open('rb') as fh: pf=pickle.load(fh)
+        if not isinstance(pf,pd.DataFrame): return None
+        if not PROV_REQUIRED.issubset(pf.columns): return None
+        if len(pf)==0: return None
+        return pf
+    except Exception:
+        return None
 
 def build_provisional_cache(core):
     PROV_DIR.mkdir(parents=True,exist_ok=True)
     raw=core['raw']; cfg=core['cfg']; completed=core['completed']
-    print('\nBUILD PERSISTENT PROVISIONAL CACHE...',flush=True)
+    print('\nBUILD/RESUME PERSISTENT PROVISIONAL CACHE...',flush=True)
+    built=0; hit=0
     for i,s in enumerate(raw,1):
         p=provisional_path(s)
+        existing=valid_provisional(p)
+        if existing is not None:
+            hit+=1
+            print(f'[{i}/{len(raw)}] {s} HIT rows={len(existing)} -> {p}',flush=True)
+            continue
         pf=uscache.build_minimal_provisional_fast(raw[s],cfg,completed[s])
-        with p.open('wb') as fh: pickle.dump(pf,fh,pickle.HIGHEST_PROTOCOL)
-        print(f'[{i}/{len(raw)}] {s} rows={len(pf)} -> {p}',flush=True)
+        tmp=p.with_suffix('.tmp')
+        with tmp.open('wb') as fh: pickle.dump(pf,fh,pickle.HIGHEST_PROTOCOL)
+        tmp.replace(p)
+        built+=1
+        print(f'[{i}/{len(raw)}] {s} BUILT rows={len(pf)} -> {p}',flush=True)
+    print(f'PROVISIONAL READY: hit={hit} built={built} total={len(raw)}',flush=True)
 
-def main():
-    OUT_DIR.mkdir(parents=True,exist_ok=True)
-    print('=== BUILD PERSISTENT US -> KR ENGINE CACHE ===',flush=True)
-    print('REGULAR 390m kept | clock -30m | OHLC x1400 | volume unchanged',flush=True)
+def build_core():
     raw,audit=load_mapped()
     if not raw: raise SystemExit('NO US DATA')
-
     print('\n=== MAPPING AUDIT ===')
     print(f"day-symbol={len(audit)} rows1 median={audit.rows1.median():.1f} min={audit.rows1.min()} max={audit.rows1.max()} full390={(audit.rows1==390).sum()}/{len(audit)}")
     print(f"bars5 median={audit.bars5.median():.1f} full78={(audit.bars5==78).sum()}/{len(audit)} duplicates={audit.dup.sum()}")
     print('sample',audit.iloc[0].to_dict())
     audit.to_csv(AUDIT,index=False)
-
-    cfg0=DoubleBollingerEngine5Config()
-    cfg=replace(cfg0,macd_slope_spread_full_ratio=2.0,rsi_slope_full_ratio=1.5)
+    cfg0=DoubleBollingerEngine5Config(); cfg=replace(cfg0,macd_slope_spread_full_ratio=2.0,rsi_slope_full_ratio=1.5)
     print('\nBUILD MAPPED CORE...',flush=True)
     packed=v8.base.pack_exit_events(raw,cfg0)
     states=base.pack_state_events(base.build_cfg_frames(raw,cfg0))
@@ -116,10 +130,28 @@ def main():
     completed={s:rt.add_completed_strength(f) for s,f in scored.items()}
     micros={s:h.build_micro(b,cfg) for s,b in raw.items()}
     core=dict(raw=raw,cfg0=cfg0,cfg=cfg,packed=packed,states=states,scored=scored,strength=strength,completed=completed,micros=micros,fx=FX,time_shift_minutes=-30)
-    with CORE.open('wb') as fh: pickle.dump(core,fh,pickle.HIGHEST_PROTOCOL)
-    print('WROTE',CORE,flush=True)
-    print('WROTE',AUDIT,flush=True)
+    tmp=CORE.with_suffix('.tmp')
+    with tmp.open('wb') as fh: pickle.dump(core,fh,pickle.HIGHEST_PROTOCOL)
+    tmp.replace(CORE)
+    print('WROTE',CORE,flush=True); print('WROTE',AUDIT,flush=True)
+    return core
 
+def main():
+    OUT_DIR.mkdir(parents=True,exist_ok=True)
+    print('=== BUILD/RESUME PERSISTENT US -> KR ENGINE CACHE ===',flush=True)
+    print('REGULAR 390m kept | clock -30m | OHLC x1400 | volume unchanged',flush=True)
+    if CORE.exists():
+        print('CORE HIT:',CORE,flush=True)
+        try:
+            with CORE.open('rb') as fh: core=pickle.load(fh)
+            required={'raw','cfg','completed','scored','strength','micros','packed','states'}
+            if not required.issubset(core): raise ValueError('CORE missing required keys')
+            print(f"CORE LOADED symbols={len(core['raw'])} rows={sum(len(x) for x in core['raw'].values())}",flush=True)
+        except Exception as e:
+            print('CORE INVALID, REBUILD:',repr(e),flush=True)
+            core=build_core()
+    else:
+        core=build_core()
     build_provisional_cache(core)
     print('\nCACHE READY.',flush=True)
     print('Repeated validations should load CORE + provisional/*.pkl only.',flush=True)

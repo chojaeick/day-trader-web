@@ -35,9 +35,7 @@ def minute(ts):
 
 def clip(ev):
     return {pd.Timestamp(ts):cs for ts,cs in ev.items() if e.US_BUY_START_MINUTE<=minute(ts)<e.US_NO_ENTRY_MINUTE}
-
 def ev_keys(ev): return {(pd.Timestamp(ts),n(c[0])) for ts,cs in ev.items() for c in cs}
-
 def num(v):
     try:
         x=float(v); return x if np.isfinite(x) else np.nan
@@ -47,6 +45,13 @@ def num(v):
 def row_for(frame,ts):
     q=frame[frame.time<=pd.Timestamp(ts)]
     return None if q.empty else q.iloc[-1]
+
+
+def same_ts(a,b):
+    try:
+        return pd.Timestamp(a).value == pd.Timestamp(b).value
+    except Exception:
+        return False
 
 
 def build_record(sym,ts,scored,strength,k17,k18):
@@ -71,13 +76,13 @@ def build_record(sym,ts,scored,strength,k17,k18):
              rsi=num(r.get('rsi')),rsi_slope=num(r.get('rsi_slope')),trend_up=bool(r.get('trend_up',False)),
              entry_score=num(r.get('entry_score')),entry_gate=bool(r.get('entry_gate',False)),
              v17ce=((pd.Timestamp(ts),sym) in k17),v18e=((pd.Timestamp(ts),sym) in k18))
-    # keep every gate-like boolean actually present in the engine frame
     for c in sorted([c for c in f.columns if c.startswith('gate_')]):
         rec[c]=bool(r.get(c,False))
     for c in ['macd_above_signal','macd_golden_cross','macd_gap_improving','rsi_accelerating','outer_expanding','inner_traverse_up']:
         if c in f.columns: rec[c]=bool(r.get(c,False))
     if sr is not None:
-        rec['v20e_raw_bps']=num(sr.get('macd_strength_raw'))/num(sr.get('close'))*10000.0 if np.isfinite(num(sr.get('macd_strength_raw'))) and np.isfinite(num(sr.get('close'))) and num(sr.get('close'))!=0 else np.nan
+        raw=num(sr.get('macd_strength_raw')); close=num(sr.get('close'))
+        rec['v20e_raw_bps']=raw/close*10000.0 if np.isfinite(raw) and np.isfinite(close) and close!=0 else np.nan
         rec['v20e_rel']=num(sr.get('macd_strength_rel'))
     return rec
 
@@ -99,14 +104,13 @@ def main():
     target=build_record(TARGET_SYM,TARGET_TS,scored,strength,k17,k18)
     if target is not None: rows.append(target)
 
-    # Add a compact sample of other V17CE entries with MACD below signal for pattern checking.
     added=0
     for ts,cs in sorted(ev17.items()):
         for c in cs:
             sym=n(c[0])
             r=build_record(sym,ts,scored,strength,k17,k18)
             if r and r['macd_below_signal']:
-                if not (sym==TARGET_SYM and pd.Timestamp(ts)==TARGET_TS): rows.append(r)
+                if not (sym==TARGET_SYM and same_ts(ts,TARGET_TS)): rows.append(r)
                 added+=1
                 if added>=15: break
         if added>=15: break
@@ -116,7 +120,8 @@ def main():
     print('=== US E ENTRY LOGIC CASE DIAGNOSTIC ===')
     print('NO PERFORMANCE / NO PNL')
     print('\n=== TARGET: SPY 2026-02-02 12:00 ET ===')
-    tq=out[(out.symbol==TARGET_SYM)&(pd.to_datetime(out.time)==TARGET_TS)]
+    mask=(out.symbol==TARGET_SYM) & out['time'].map(lambda x:same_ts(x,TARGET_TS))
+    tq=out[mask]
     if tq.empty: print('TARGET NOT FOUND')
     else:
         basecols=['symbol','time','close','macd','macd_signal','macd_gap','macd_gap_prev','macd_gap_delta','macd_below_signal','macd_gap_improving','rsi','rsi_slope','trend_up','entry_score','entry_gate','v17ce','v18e','v20e_raw_bps','v20e_rel']
@@ -126,7 +131,7 @@ def main():
 
     print('\n=== SAMPLE V17CE ENTRIES WITH MACD BELOW SIGNAL ===')
     q=out[out.macd_below_signal].head(15)
-    cols=[c for c in ['symbol','time','macd_gap','macd_gap_delta','macd_gap_improving','rsi','rsi_slope','trend_up','entry_gate','v17ce','v18e','v20e_raw_bps','v20e_rel'] if c in q.columns]
+    cols=[c for c in ['symbol','time','macd_gap','macd_gap_prev','macd_gap_delta','macd_gap_improving','rsi','rsi_slope','trend_up','entry_gate','v17ce','v18e','v20e_raw_bps','v20e_rel'] if c in q.columns]
     print(q[cols].to_string(index=False) if len(q) else 'NONE')
     print('\nWROTE',OUT)
 

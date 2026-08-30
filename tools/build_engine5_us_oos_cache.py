@@ -24,7 +24,7 @@ DEFAULT_SYMBOLS=['SOXL','TQQQ','QQQ','NVDA','AMD','SMH','SPY','AVGO','PLTR']
 CACHE_DIR=Path('/home/ubuntu/day-trader-api/engine5_us_oos_cache')
 CORE_CACHE=CACHE_DIR/'us_engine5_core.pkl'
 PERSIST=CACHE_DIR/'slow_turn_persistence_candidates.csv'
-PROV_DIR=CACHE_DIR/'slow_turn_provisional_fast_v1'
+PROV_DIR=CACHE_DIR/'slow_turn_provisional_fast_v2'
 
 # Keep the historical engine key convention for compatibility with the already-built
 # core pickle. US tickers therefore appear as e.g. 00SOXL internally; this is only
@@ -81,14 +81,12 @@ def _rolling_slope_last8(values):
     return float(np.dot(xc,a-a.mean())/denom)
 
 
-def build_minimal_provisional_fast(raw_bars: pd.DataFrame, cfg) -> pd.DataFrame:
-    """Build only the provisional fields Slow-turn actually consumes, in O(N).
+def build_minimal_provisional_fast(raw_bars: pd.DataFrame, cfg, completed_strength: pd.DataFrame|None=None) -> pd.DataFrame:
+    """O(N) provisional Engine5 features needed by Slow-turn and V-rebound.
 
-    The old diagnostic helper rebuilt Engine5 over the entire completed 5m history for
-    every 1m bar, which is O(N^2) and takes >1 hour per US symbol.  Slow-turn candidate
-    construction only needs provisional mid_slope8, MACD gap delta, and RSI slope.
-    These can be computed exactly from the prior completed 5m indicator state plus the
-    current provisional close.
+    This preserves the indicator formulas while avoiding the old O(N^2) loop that
+    re-enriched the entire 5m history for every minute.  No strategy threshold is
+    changed; this is only a computationally equivalent feature-building path.
     """
     b=raw_bars.copy().sort_values('time').reset_index(drop=True)
     b['time']=pd.to_datetime(b['time'])
@@ -96,7 +94,6 @@ def build_minimal_provisional_fast(raw_bars: pd.DataFrame, cfg) -> pd.DataFrame:
     complete['time']=pd.to_datetime(complete['time'])
     c=num(complete['close']).astype(float)
 
-    # Completed-state series use the exact same pandas formulas as Engine5.enrich.
     fast=c.ewm(span=cfg.macd_fast,adjust=False).mean()
     slow_ema=c.ewm(span=cfg.macd_slow,adjust=False).mean()
     macd=fast-slow_ema
@@ -111,19 +108,26 @@ def build_minimal_provisional_fast(raw_bars: pd.DataFrame, cfg) -> pd.DataFrame:
     rsi=100.0-100.0/(1.0+rs)
     mid=c.rolling(cfg.bb_period).mean()
 
+    # Strength baseline is exactly the completed-frame value already built in core.
+    baseline_by_time={}
+    if completed_strength is not None and len(completed_strength):
+        cs=completed_strength.copy(); cs['time']=pd.to_datetime(cs.time)
+        if 'strength_baseline' in cs.columns:
+            baseline_by_time={pd.Timestamp(t):float(v) if pd.notna(v) else np.nan for t,v in zip(cs.time,cs.strength_baseline)}
+
     ct=complete['time'].astype('int64').to_numpy()
     close_arr=c.to_numpy(float); fast_arr=fast.to_numpy(float); slow_arr=slow_ema.to_numpy(float)
-    sig_arr=signal.to_numpy(float); gap_arr=gap.to_numpy(float); ag_arr=ag.to_numpy(float)
-    al_arr=al.to_numpy(float); rsi_arr=rsi.to_numpy(float); mid_arr=mid.to_numpy(float)
+    macd_arr=macd.to_numpy(float); sig_arr=signal.to_numpy(float); gap_arr=gap.to_numpy(float)
+    ag_arr=ag.to_numpy(float); al_arr=al.to_numpy(float); rsi_arr=rsi.to_numpy(float); mid_arr=mid.to_numpy(float)
     af=2.0/(float(cfg.macd_fast)+1.0); asl=2.0/(float(cfg.macd_slow)+1.0); asig=2.0/(float(cfg.macd_signal)+1.0)
 
     rows=[]
     for r in b.itertuples(index=False):
         ts=pd.Timestamp(r.time); bucket_start=ts.floor('5min'); bucket_end=bucket_start+pd.Timedelta(minutes=5)
         j=int(np.searchsorted(ct,bucket_start.value,side='right')-1)
-        if j<20 or j<6: continue
+        if j<20: continue
         px=float(r.close); prev_close=close_arr[j]
-        vals=[prev_close,fast_arr[j],slow_arr[j],sig_arr[j],gap_arr[j],ag_arr[j],al_arr[j],rsi_arr[j]]
+        vals=[prev_close,fast_arr[j],slow_arr[j],macd_arr[j],sig_arr[j],gap_arr[j],ag_arr[j],al_arr[j],rsi_arr[j]]
         if not all(np.isfinite(v) for v in vals): continue
 
         fast_cur=af*px+(1.0-af)*fast_arr[j]
@@ -132,6 +136,7 @@ def build_minimal_provisional_fast(raw_bars: pd.DataFrame, cfg) -> pd.DataFrame:
         signal_cur=asig*macd_cur+(1.0-asig)*sig_arr[j]
         gap_cur=macd_cur-signal_cur
         gap_delta=gap_cur-gap_arr[j]
+        macd_slope=macd_cur-macd_arr[j]
 
         delta=px-prev_close; g=max(delta,0.0); l=max(-delta,0.0)
         ag_cur=alpha_rsi*g+(1.0-alpha_rsi)*ag_arr[j]
@@ -146,30 +151,35 @@ def build_minimal_provisional_fast(raw_bars: pd.DataFrame, cfg) -> pd.DataFrame:
         prior7=mid_arr[j-6:j+1]
         mid_slope=_rolling_slope_last8(np.r_[prior7,mid_cur])
 
+        baseline=baseline_by_time.get(pd.Timestamp(complete.time.iloc[j]),np.nan)
+        strength_rel=gap_delta/baseline if np.isfinite(gap_delta) and gap_delta>0 and np.isfinite(baseline) and baseline>0 else np.nan
         rows.append(dict(time=ts,bucket_end=bucket_end,close=px,mid_slope8=mid_slope,
-                         gap_delta=gap_delta,rsi_slope=rsi_slope))
+                         gap_delta=gap_delta,macd_slope=macd_slope,rsi_slope=rsi_slope,
+                         strength_baseline=baseline,strength_rel=strength_rel))
     return pd.DataFrame(rows)
 
 
-def load_or_build_fast_provisional(sym, raw_bars, cfg):
+def load_or_build_fast_provisional(sym, raw_bars, cfg, completed_strength=None):
     PROV_DIR.mkdir(parents=True,exist_ok=True)
-    path=PROV_DIR/f'{sym}_slow_minimal.pkl'
+    path=PROV_DIR/f'{sym}_slow_v_full.pkl'
+    required={'time','bucket_end','close','mid_slope8','gap_delta','macd_slope','rsi_slope','strength_rel'}
     if path.exists():
         with path.open('rb') as fh: pf=pickle.load(fh)
-        print(f'FAST PROVISIONAL HIT {sym} rows={len(pf)}',flush=True)
-        return pf
+        if required.issubset(pf.columns):
+            print(f'FAST PROVISIONAL HIT {sym} rows={len(pf)}',flush=True)
+            return pf
     print(f'FAST PROVISIONAL BUILD {sym}...',flush=True)
-    pf=build_minimal_provisional_fast(raw_bars,cfg)
+    pf=build_minimal_provisional_fast(raw_bars,cfg,completed_strength)
     with path.open('wb') as fh: pickle.dump(pf,fh,pickle.HIGHEST_PROTOCOL)
     print(f'FAST PROVISIONAL WROTE {sym} rows={len(pf)} -> {path}',flush=True)
     return pf
 
 
-def build_base_candidates_fast(raw,cfg,scored,micros):
+def build_base_candidates_fast(raw,cfg,scored,micros,completed=None):
     parts=[]; pf_by_symbol={}
     for i,s in enumerate(raw,1):
         print(f'[{i}/{len(raw)}] {s}',flush=True)
-        pf=load_or_build_fast_provisional(s,raw[s],cfg)
+        pf=load_or_build_fast_provisional(s,raw[s],cfg,None if completed is None else completed[s])
         pf_by_symbol[s]=pf
         q=zd.build_candidates(s,pf,micros[s],scored[s])
         if len(q): parts.append(q)
@@ -185,14 +195,14 @@ def main():
     if CORE_CACHE.exists() and not a.rebuild_core:
         print('RESUME: loading existing core cache',CORE_CACHE,flush=True)
         with CORE_CACHE.open('rb') as fh: core=pickle.load(fh)
-        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; micros=core['micros']
+        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; completed=core['completed']; micros=core['micros']
         print(f'CORE CACHE LOADED symbols={len(raw)}. Skipping expensive core rebuild.',flush=True)
     else:
         core=build_core(a.db,syms)
-        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; micros=core['micros']
+        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; completed=core['completed']; micros=core['micros']
 
     print('BUILD US slow-turn persistence cache (FAST incremental provisional)...',flush=True)
-    cand,pf_by_symbol=build_base_candidates_fast(raw,cfg,scored,micros)
+    cand,pf_by_symbol=build_base_candidates_fast(raw,cfg,scored,micros,completed)
     rows=[]
     if cand.empty:
         pd.DataFrame(rows).to_csv(PERSIST,index=False)

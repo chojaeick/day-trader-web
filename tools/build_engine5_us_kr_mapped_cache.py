@@ -1,30 +1,26 @@
 from __future__ import annotations
 
-"""Build persistent US Engine5 input/cache in KR-equivalent units/clock semantics.
+"""Build persistent US Engine5 cache from ORIGINAL exchange-local ET timestamps.
 
-Purpose: external validation of KR-designed Engine5 logic on US data without
-changing the strategy. US regular-session data are mapped at the INPUT layer:
-- keep all 390 regular-session minutes;
-- shift exchange-local clock by -30 minutes so US 09:30..15:59 maps to the
-  engine's KR 09:00..15:29 clock semantics;
-- multiply OHLC by FX=1400 so all price-linear indicators/thresholds (MACD,
-  Bollinger widths, absolute stop distances, etc.) are in KRW-equivalent units;
-- leave volume unchanged;
-- preserve relative returns/RSI/ratios by construction.
+Critical rule:
+- NEVER shift or rewrite DB/exchange timestamps.
+- Keep all US regular-session 1m bars at original ET 09:30..15:59.
+- Multiply OHLC by FX=1400 only so absolute price-linear Engine5 quantities are
+  expressed in KRW-equivalent units.
+- Volume is unchanged.
+- RSI/MACD/Bollinger/1m/5m features are rebuilt from the original-time OHLCV.
 
-The expensive market-independent derived data are persisted once:
-- us_kr_mapped_core.pkl: raw mapped 1m + packed exits + 5m/scored/strength + 1m micro
-- provisional/<symbol>_provisional.pkl: causal provisional 5m features used by
-  Slow-turn and V-rebound
+Any KR-vs-US session-clock difference belongs in the ENGINE/session rules, not
+in the market-data timestamps.
 
-This builder is fully resumable. If CORE already exists it is loaded instead of
-rebuilding DB/indicators. Each valid per-symbol provisional pickle is also
-reused independently, so an interrupted run continues from the first missing
-symbol rather than starting over.
+Use --rebuild to discard the old shifted cache and rebuild core + provisional
+files from DB. The normal mode remains resume-safe for repeated validations.
 """
 
+import argparse
 import pickle
 import sqlite3
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -48,13 +44,15 @@ PROV_DIR=OUT_DIR/'provisional'
 SYMS=['SOXL','TQQQ','QQQ','NVDA','AMD','SMH','SPY','AVGO','PLTR']
 FX=1400.0
 NY='America/New_York'
-SHIFT=pd.Timedelta(minutes=30)
+CACHE_SCHEMA='US_ORIGINAL_ET_V2'
 PROV_REQUIRED={'time','bucket_end','close','mid_slope8','gap_delta','macd_slope','rsi_slope','strength_rel'}
+
 
 def key(s): return str(s).zfill(6)
 def provisional_path(sym): return PROV_DIR/f'{key(sym)}_provisional.pkl'
 
-def load_mapped():
+
+def load_original_et():
     con=sqlite3.connect(DB)
     out={}; audits=[]
     for i,s in enumerate(SYMS,1):
@@ -65,8 +63,7 @@ def load_mapped():
         if q.empty:
             print(f'[{i}/{len(SYMS)}] {s} EMPTY',flush=True); continue
         et=pd.to_datetime(q.et_time,utc=True).dt.tz_convert(NY)
-        q['original_et_time']=et
-        q['time']=et-SHIFT
+        q['time']=et
         for c in ['open','high','low','close']:
             q[c]=pd.to_numeric(q[c],errors='coerce')*FX
         q['volume']=pd.to_numeric(q.volume,errors='coerce')
@@ -77,8 +74,9 @@ def load_mapped():
             f5=to_5m(g[['time','open','high','low','close','volume']].copy())
             audits.append(dict(symbol=s,day=str(d),rows1=len(g),first1=str(g.time.iloc[0]),last1=str(g.time.iloc[-1]),
                                bars5=len(f5),first5=str(f5.time.iloc[0]) if len(f5) else '',last5=str(f5.time.iloc[-1]) if len(f5) else '',dup=int(g.time.duplicated().sum())))
-        print(f'[{i}/{len(SYMS)}] {s} rows={len(q)} mapped {q.time.min()} -> {q.time.max()}',flush=True)
+        print(f'[{i}/{len(SYMS)}] {s} rows={len(q)} original_ET {q.time.min()} -> {q.time.max()}',flush=True)
     con.close(); return out,pd.DataFrame(audits)
+
 
 def valid_provisional(path):
     if not path.exists(): return None
@@ -90,6 +88,12 @@ def valid_provisional(path):
         return pf
     except Exception:
         return None
+
+
+def valid_core(core):
+    required={'raw','cfg','completed','scored','strength','micros','packed','states'}
+    return isinstance(core,dict) and required.issubset(core) and core.get('cache_schema')==CACHE_SCHEMA and core.get('time_shift_minutes')==0
+
 
 def build_provisional_cache(core):
     PROV_DIR.mkdir(parents=True,exist_ok=True)
@@ -111,16 +115,17 @@ def build_provisional_cache(core):
         print(f'[{i}/{len(raw)}] {s} BUILT rows={len(pf)} -> {p}',flush=True)
     print(f'PROVISIONAL READY: hit={hit} built={built} total={len(raw)}',flush=True)
 
+
 def build_core():
-    raw,audit=load_mapped()
+    raw,audit=load_original_et()
     if not raw: raise SystemExit('NO US DATA')
-    print('\n=== MAPPING AUDIT ===')
+    print('\n=== ORIGINAL-ET INPUT AUDIT ===')
     print(f"day-symbol={len(audit)} rows1 median={audit.rows1.median():.1f} min={audit.rows1.min()} max={audit.rows1.max()} full390={(audit.rows1==390).sum()}/{len(audit)}")
     print(f"bars5 median={audit.bars5.median():.1f} full78={(audit.bars5==78).sum()}/{len(audit)} duplicates={audit.dup.sum()}")
     print('sample',audit.iloc[0].to_dict())
     audit.to_csv(AUDIT,index=False)
     cfg0=DoubleBollingerEngine5Config(); cfg=replace(cfg0,macd_slope_spread_full_ratio=2.0,rsi_slope_full_ratio=1.5)
-    print('\nBUILD MAPPED CORE...',flush=True)
+    print('\nBUILD ORIGINAL-ET CORE...',flush=True)
     packed=v8.base.pack_exit_events(raw,cfg0)
     states=base.pack_state_events(base.build_cfg_frames(raw,cfg0))
     frames0=base.build_cfg_frames(raw,cfg)
@@ -129,31 +134,53 @@ def build_core():
     strength={s:ms.add_strength(f) for s,f in scored.items()}
     completed={s:rt.add_completed_strength(f) for s,f in scored.items()}
     micros={s:h.build_micro(b,cfg) for s,b in raw.items()}
-    core=dict(raw=raw,cfg0=cfg0,cfg=cfg,packed=packed,states=states,scored=scored,strength=strength,completed=completed,micros=micros,fx=FX,time_shift_minutes=-30)
+    core=dict(raw=raw,cfg0=cfg0,cfg=cfg,packed=packed,states=states,scored=scored,strength=strength,completed=completed,micros=micros,
+              fx=FX,time_shift_minutes=0,session='US_REGULAR_ET',cache_schema=CACHE_SCHEMA)
     tmp=CORE.with_suffix('.tmp')
     with tmp.open('wb') as fh: pickle.dump(core,fh,pickle.HIGHEST_PROTOCOL)
     tmp.replace(CORE)
     print('WROTE',CORE,flush=True); print('WROTE',AUDIT,flush=True)
     return core
 
+
+def purge_old_cache():
+    print('PURGE OLD SHIFTED CACHE...',flush=True)
+    if CORE.exists(): CORE.unlink()
+    if AUDIT.exists(): AUDIT.unlink()
+    if PROV_DIR.exists(): shutil.rmtree(PROV_DIR)
+    # Old validation outputs are invalid after timestamp semantics change.
+    for name in ['us_kr_mapped_all_versions_summary.csv','us_kr_mapped_all_versions_trades.csv','us_kr_mapped_v21_signals.csv','us_kr_mapped_fee_sensitivity.csv']:
+        p=OUT_DIR/name
+        if p.exists(): p.unlink()
+    print('OLD CACHE/RESULTS REMOVED.',flush=True)
+
+
 def main():
+    ap=argparse.ArgumentParser()
+    ap.add_argument('--rebuild',action='store_true',help='delete old cache and rebuild from original ET DB timestamps')
+    args=ap.parse_args()
     OUT_DIR.mkdir(parents=True,exist_ok=True)
-    print('=== BUILD/RESUME PERSISTENT US -> KR ENGINE CACHE ===',flush=True)
-    print('REGULAR 390m kept | clock -30m | OHLC x1400 | volume unchanged',flush=True)
+    print('=== BUILD/RESUME US ENGINE CACHE — ORIGINAL ET ===',flush=True)
+    print('REGULAR 390m kept | clock unchanged | OHLC x1400 | volume unchanged',flush=True)
+    if args.rebuild:
+        purge_old_cache()
+    core=None
     if CORE.exists():
         print('CORE HIT:',CORE,flush=True)
         try:
-            with CORE.open('rb') as fh: core=pickle.load(fh)
-            required={'raw','cfg','completed','scored','strength','micros','packed','states'}
-            if not required.issubset(core): raise ValueError('CORE missing required keys')
+            with CORE.open('rb') as fh: candidate=pickle.load(fh)
+            if not valid_core(candidate): raise ValueError('old/shifted cache schema')
+            core=candidate
             print(f"CORE LOADED symbols={len(core['raw'])} rows={sum(len(x) for x in core['raw'].values())}",flush=True)
         except Exception as e:
             print('CORE INVALID, REBUILD:',repr(e),flush=True)
+            if PROV_DIR.exists(): shutil.rmtree(PROV_DIR)
             core=build_core()
-    else:
+    if core is None:
         core=build_core()
     build_provisional_cache(core)
     print('\nCACHE READY.',flush=True)
-    print('Repeated validations should load CORE + provisional/*.pkl only.',flush=True)
+    print('Original US ET preserved. Engine/session clock adaptation must happen in validators/live engine.',flush=True)
+
 
 if __name__=='__main__': main()

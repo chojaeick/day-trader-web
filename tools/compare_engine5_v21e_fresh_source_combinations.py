@@ -3,8 +3,9 @@ from __future__ import annotations
 """Compare fresh V21E source combinations using the already-built fresh map.
 
 No DB remap is performed. The script reloads the exact fresh SQLite-derived map,
-rebuilds only exit/state event packs from saved raw bars, then runs the same integrated
-V21 simulator for several source combinations so position ownership/conflicts are respected.
+rebuilds only exit/state event packs from saved raw bars, applies the same US session
+clock as the fresh V21E run, then runs the same integrated V21 simulator for several
+source combinations so position ownership/conflicts are respected.
 """
 
 import pickle
@@ -42,12 +43,19 @@ def main():
     if d.get('schema') != 'V21E_FRESH_SQLITE_USD_ET_V1':
         raise RuntimeError(f"unexpected schema: {d.get('schema')}")
 
+    # Critical reproducibility step: the original fresh V21E run applies the US
+    # exchange-local session clock before simulation. Reapply exactly the same
+    # runtime constants here; otherwise the imported KR defaults alter entry/exit
+    # ownership and FULL_V21E cannot reproduce the fresh baseline.
+    fresh.e.apply_us_session_clock()
+
     raw = d['raw']
     tags = d['tags']
     cfg0 = DoubleBollingerEngine5Config()
 
     print('=== V21E FRESH SOURCE-COMBINATION SIMULATION ===')
     print('Uses saved fresh SQLite/USD/ET map; NO DB REMAP.')
+    print('US session clock reapplied: buy 09:40 / no-entry 15:30 / force-flat 15:50 ET.')
     print('Re-simulates each combination so source conflicts / position ownership are respected.\n')
 
     packed = v8.base.pack_exit_events(raw, cfg0)
@@ -71,6 +79,13 @@ def main():
         'net025_win_pct','net025_sum_pct','net025_pf','max_net025_loss_pct'
     ]
     print(out[show].to_string(index=False, float_format=lambda x: f'{x:.4f}'))
+
+    full = out[out.combo == 'FULL_V21E']
+    if len(full):
+        r = full.iloc[0]
+        print('\nREPRO CHECK: FULL_V21E should match the fresh baseline: trades=141, gross_sum=+9.5122%, net025_sum=-25.7378%.')
+        print(f"actual: trades={int(r.trades)} gross_sum={r.gross_sum_pct:+.4f}% net025_sum={r.net025_sum_pct:+.4f}%")
+
     out.to_csv(OUT, index=False)
     print('\nWROTE', OUT)
 

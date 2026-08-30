@@ -64,9 +64,14 @@ def minute_of(ts):
 
 def count_events(ev): return sum(len(v) for v in ev.values())
 
+
 def apply_us_session_clock():
     base.NO_ENTRY_MINUTE = US_NO_ENTRY_MINUTE
     base.FORCE_FLAT_MINUTE = US_FORCE_FLAT_MINUTE
+    # validate_engine5_v17c_opening_5m_hwm_sweep.filt_open() reads OPEN_MINUTE.
+    # OPEN_BUY_MINUTE is used by a different historical variant; patch both so no
+    # KR 09:10 wall-clock constant can leak into the E-series.
+    sweep.OPEN_MINUTE = US_BUY_START_MINUTE
     sweep.OPEN_BUY_MINUTE = US_BUY_START_MINUTE
     sweep.OPENING_ENTRY_END = US_OPENING_END_MINUTE
     multi.OPEN_MINUTE = US_BUY_START_MINUTE

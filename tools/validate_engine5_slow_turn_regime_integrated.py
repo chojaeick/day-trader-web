@@ -77,19 +77,13 @@ def common_regime_ok(r):
     if not np.isfinite(z) or not np.isfinite(px):
         return False, 'INVALID'
 
-    # Near zero-cross: tiny sample, so do not overfit MACD/RSI absolute thresholds.
-    # Keep only actual positive 1m price progression as the final confirmation.
     if z <= 1.5:
         return px >= 0.75, 'NEAR_LE1_5'
 
-    # 1.5-8 had very little sample. Require both timeframes to show at least
-    # moderate persistence plus visible 1m price progress.
     if z <= 8.0:
         ok = p5 >= 0.60 and p1 >= 0.60 and px >= 1.0
         return ok, 'MID_1_5_8'
 
-    # 8-12 was the cleanest absolute-strength regime: both 5m MACD and RSI
-    # must be strong, and 1m price must actually be advancing.
     if z <= 12.0:
         ok = strength_ok(r) and px >= 1.5
         return ok, 'BOUNDARY_8_12'
@@ -158,7 +152,6 @@ def main():
     completed = {s: rt.add_completed_strength(f) for s, f in scored.items()}
     micros = {s: h.build_micro(raw[s], cfg) for s in raw}
 
-    # Frozen V20 baseline.
     ev10 = sweep.filt_open(v8.pack_entry_events(scored))
     ev16, waits = v16.build_wait_events(ev10, raw, cfg, False)
     ev17, _, _ = v17b.build_v17b(ev16, scored, waits)
@@ -171,7 +164,6 @@ def main():
     print('V20 is frozen. No V20 rule changed.')
     print(pd.DataFrame([v20_stat]).to_string(index=False))
 
-    # Reconstruct the same 96-candidate universe and attach pre-entry diagnostics.
     base_cand = reconstruct_base_candidates(raw, cfg, scored, completed, micros)
     base_cand['symbol'] = base_cand['symbol'].astype(str).str.zfill(6)
     base_cand['entry_time'] = pd.to_datetime(base_cand['entry_time'])
@@ -180,13 +172,14 @@ def main():
     diag['symbol'] = diag['symbol'].astype(str).str.zfill(6)
     diag['entry_time'] = pd.to_datetime(diag['entry_time'])
 
+    # zero_cross_bars already exists on the reconstructed candidate rows. Do not
+    # merge the same-named diagnostic copy, otherwise pandas suffixes it to _x/_y.
     cols = [
-        'symbol','entry_time','zero_cross_bars','joint5_persistence','joint1_persistence',
+        'symbol','entry_time','joint5_persistence','joint1_persistence',
         'price_progress_1m_pct'
     ]
-    x = base_cand.merge(diag[cols], on=['symbol','entry_time'], how='inner')
+    x = base_cand.merge(diag[cols], on=['symbol','entry_time'], how='inner', validate='one_to_one')
 
-    # 5m absolute strength comes from the original candidate row.
     if len(x) != len(base_cand):
         print(f'WARNING candidate join: reconstructed={len(base_cand)} joined={len(x)}')
 

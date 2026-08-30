@@ -22,6 +22,11 @@ def norm_sym(x):
     return str(x).zfill(6)
 
 
+def target_ts(day, hhmm, tz):
+    ts = pd.Timestamp(f'{day} {hhmm}')
+    return ts.tz_localize(tz) if tz is not None else ts
+
+
 def main():
     raw = {norm_sym(k): v for k, v in load_data().items()}
     base_cfg = DoubleBollingerEngine5Config()
@@ -45,10 +50,12 @@ def main():
 
         b = raw[sym].copy()
         b['time'] = pd.to_datetime(b['time'])
-        day_start = pd.Timestamp(f'{day} 00:00:00')
-        day_end = day_start + pd.Timedelta(days=1)
+        tz = b['time'].dt.tz
+        start_ts = target_ts(day, t0, tz)
+        end_ts = target_ts(day, t1, tz)
+
         # Keep historical bars for indicators, but only evaluate provisional bars in the target window.
-        target_mask = (b.time >= pd.Timestamp(f'{day} {t0}')) & (b.time <= pd.Timestamp(f'{day} {t1}'))
+        target_mask = (b.time >= start_ts) & (b.time <= end_ts)
         target_times = set(pd.to_datetime(b.loc[target_mask, 'time']))
         if not target_times:
             print('NO RAW BARS IN WINDOW', flush=True)

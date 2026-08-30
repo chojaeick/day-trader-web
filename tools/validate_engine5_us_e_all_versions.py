@@ -17,10 +17,10 @@ import tools.validate_engine5_v17c_opening_5m_hwm_sweep as sweep
 import tools.validate_engine5_v17c_multi_symbol as multi
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
 import tools.validate_engine5_v20_macd_strength as ms
-import tools.validate_engine5_v21_slow_turn_integrated as integ
+import tools.validate_engine5_integrated_full_history as integ
 import tools.validate_engine5_v21_v_rebound_state_machine as vsm
 import tools.validate_engine5_v21_v_rebound_reaccel as vra
-import tools.validate_engine5_v21_v_rebound_macd_preservation as vmp
+import tools.validate_engine5_v21_v_rebound_momentum_preservation as vmp
 
 US_OPEN_MINUTE = 9 * 60 + 30
 US_BUY_START_MINUTE = 9 * 60 + 40
@@ -100,7 +100,37 @@ def build_v20e(ev18, strength):
                 continue
             if V20E_REQUIRE_ABOVE_SIGNAL and np.isfinite(gap) and gap <= 0:
                 continue
-            ext = integ.entry_extension_5m(strength[sym], c[0], ts)
+            ext = integ.entry_extension_5m(strength, c[0], ts)
+            if pd.notna(ext) and ext >= integ.V20_EXTREME_CAP:
+                continue
+            tags.append(dict(source='V20E', symbol=sym, time=pd.Timestamp(ts), event=c, meta={}))
+    return tags
+
+# Backward-compatible name used by fresh remap script.
+def build_v20e_tags(ev18, strength, scored):
+    tags = []
+    for ts, cs in ev18.items():
+        for c in cs:
+            sym = n(c[0])
+            f = strength.get(sym)
+            if f is None or f.empty:
+                continue
+            q = f[f.time <= pd.Timestamp(ts)]
+            if q.empty:
+                continue
+            r = q.iloc[-1]
+            px = float(r.close) if pd.notna(r.close) else np.nan
+            raw = float(r.macd_strength_raw) if pd.notna(r.macd_strength_raw) else np.nan
+            rel = float(r.macd_strength_rel) if pd.notna(r.macd_strength_rel) else np.nan
+            if not np.isfinite(px) or px == 0 or not np.isfinite(raw) or not np.isfinite(rel):
+                continue
+            bps = raw / px * 10000.0
+            gap = float(r.macd_gap) if 'macd_gap' in r and pd.notna(r.macd_gap) else np.nan
+            if bps < V20E_RAW_BPS or rel < V20E_REL_MIN:
+                continue
+            if V20E_REQUIRE_ABOVE_SIGNAL and np.isfinite(gap) and gap <= 0:
+                continue
+            ext = integ.entry_extension_5m(scored, c[0], ts)
             if pd.notna(ext) and ext >= integ.V20_EXTREME_CAP:
                 continue
             tags.append(dict(source='V20E', symbol=sym, time=pd.Timestamp(ts), event=c, meta={}))
@@ -175,6 +205,7 @@ def state_candidates_e(sym, z, scored, leg_min):
                         out.append(dict(
                             symbol=n(sym), time=ts, price=px,
                             structural_stop=stop, stop_dist_pct=dist,
+                            first_rebound_high_time=state['rebound_high_time'],
                             pullback_start=state['pullback_start'],
                             volume_accel=float(z.volume_accel_3v10.iloc[i]) if pd.notna(z.volume_accel_3v10.iloc[i]) else np.nan,
                             gap_delta=float(z.gap_delta.iloc[i]),

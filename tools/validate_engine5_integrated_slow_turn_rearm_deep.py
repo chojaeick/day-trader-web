@@ -25,6 +25,7 @@ import tools.backtest_dbb_engine5_fast_tuner_v4 as base
 import tools.backtest_dbb_engine5_fast_tuner_v8 as v8
 import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
+import tools.validate_engine5_v20_macd_strength as ms
 import tools.validate_engine5_v20_regime_transition as rt
 import tools.diagnose_v20_transition_structure_targets as st
 import tools.diagnose_engine5_slow_turn_zero_cross_distance as zd
@@ -120,8 +121,9 @@ def main():
     frames0=base.build_cfg_frames(raw,cfg)
     f10={n(s):v10._refine_entry_frame(f) for s,f in frames0.items()}
     scored={n(s):f for s,f in reweight(f10,cfg,0.0).items()}
-    strength={s:rt.add_completed_strength(f) for s,f in scored.items()}
-    completed=strength
+    # Keep V20 and Slow-turn feature frames distinct, exactly as the existing integrated validator does.
+    strength={s:ms.add_strength(f) for s,f in scored.items()}
+    completed={s:rt.add_completed_strength(f) for s,f in scored.items()}
     micros={s:h.build_micro(raw[s],cfg) for s in raw}
 
     print('=== BUILD UNCHANGED V20 + V_REBOUND BASE SOURCES ===',flush=True)
@@ -135,7 +137,6 @@ def main():
 
     rows=[]; trade_parts=[]; sig_parts=[]
 
-    # Existing integrated result, recomputed with unchanged build_sources.
     old_tr=integ.simulate(packed,states,old_tagged)
     old_stat=integ.stat('OLD_INTEGRATED',old_tr)
     oc=source_counts(old_tagged)

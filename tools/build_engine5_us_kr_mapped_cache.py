@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Build US Engine5 input in KR-equivalent units/clock semantics.
+"""Build persistent US Engine5 input/cache in KR-equivalent units/clock semantics.
 
 Purpose: external validation of KR-designed Engine5 logic on US data without
 changing the strategy. US regular-session data are mapped at the INPUT layer:
@@ -12,7 +12,13 @@ changing the strategy. US regular-session data are mapped at the INPUT layer:
 - leave volume unchanged;
 - preserve relative returns/RSI/ratios by construction.
 
-This script does NOT tune or alter strategy thresholds.
+The expensive market-independent derived data are persisted once:
+- us_kr_mapped_core.pkl: raw mapped 1m + packed exits + 5m/scored/strength + 1m micro
+- provisional/<symbol>_provisional.pkl: causal provisional 5m features used by
+  Slow-turn and V-rebound
+
+Repeated strategy validation must read these caches instead of rebuilding DB,
+RSI/MACD/Bollinger/1m/5m features.
 """
 
 import pickle
@@ -28,6 +34,7 @@ import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
 import tools.validate_engine5_v20_regime_transition as rt
 import tools.validate_engine5_v20_macd_strength as ms
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
+import tools.build_engine5_us_oos_cache as uscache
 from live_server.double_bollinger_engine5 import DoubleBollingerEngine5Config
 from tools.backtest_dbb_engine5_tuner import reweight, to_5m
 
@@ -35,12 +42,15 @@ DB=Path('/home/ubuntu/day-trader-api/daytrader.db')
 OUT_DIR=Path('/home/ubuntu/day-trader-api/engine5_us_kr_mapped_cache')
 CORE=OUT_DIR/'us_kr_mapped_core.pkl'
 AUDIT=OUT_DIR/'us_kr_mapped_input_audit.csv'
+PROV_DIR=OUT_DIR/'provisional'
 SYMS=['SOXL','TQQQ','QQQ','NVDA','AMD','SMH','SPY','AVGO','PLTR']
 FX=1400.0
 NY='America/New_York'
 SHIFT=pd.Timedelta(minutes=30)
 
 def key(s): return str(s).zfill(6)
+
+def provisional_path(sym): return PROV_DIR/f'{key(sym)}_provisional.pkl'
 
 def load_mapped():
     con=sqlite3.connect(DB)
@@ -71,9 +81,19 @@ def load_mapped():
     con.close()
     return out,pd.DataFrame(audits)
 
+def build_provisional_cache(core):
+    PROV_DIR.mkdir(parents=True,exist_ok=True)
+    raw=core['raw']; cfg=core['cfg']; completed=core['completed']
+    print('\nBUILD PERSISTENT PROVISIONAL CACHE...',flush=True)
+    for i,s in enumerate(raw,1):
+        p=provisional_path(s)
+        pf=uscache.build_minimal_provisional_fast(raw[s],cfg,completed[s])
+        with p.open('wb') as fh: pickle.dump(pf,fh,pickle.HIGHEST_PROTOCOL)
+        print(f'[{i}/{len(raw)}] {s} rows={len(pf)} -> {p}',flush=True)
+
 def main():
     OUT_DIR.mkdir(parents=True,exist_ok=True)
-    print('=== BUILD US -> KR ENGINE-INPUT MAPPING ===',flush=True)
+    print('=== BUILD PERSISTENT US -> KR ENGINE CACHE ===',flush=True)
     print('REGULAR 390m kept | clock -30m | OHLC x1400 | volume unchanged',flush=True)
     raw,audit=load_mapped()
     if not raw: raise SystemExit('NO US DATA')
@@ -99,6 +119,9 @@ def main():
     with CORE.open('wb') as fh: pickle.dump(core,fh,pickle.HIGHEST_PROTOCOL)
     print('WROTE',CORE,flush=True)
     print('WROTE',AUDIT,flush=True)
-    print('READY: this mapped core is the only US input that should be used for KR-vs-US Engine5 cross-validation.',flush=True)
+
+    build_provisional_cache(core)
+    print('\nCACHE READY.',flush=True)
+    print('Repeated validations should load CORE + provisional/*.pkl only.',flush=True)
 
 if __name__=='__main__': main()

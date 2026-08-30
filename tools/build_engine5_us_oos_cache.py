@@ -15,19 +15,19 @@ import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
 import tools.validate_engine5_v20_regime_transition as rt
 import tools.validate_engine5_v20_macd_strength as ms
 import tools.validate_engine5_v17c_5m_context_1m_trigger as h
-import tools.validate_engine5_slow_turn_regime_integrated as sri
 import tools.validate_engine5_slow_turn_prototype as slow
-import tools.diagnose_v20_transition_structure_targets as st
+import tools.diagnose_engine5_slow_turn_zero_cross_distance as zd
 from live_server.double_bollinger_engine5 import DoubleBollingerEngine5Config
-from tools.backtest_dbb_engine5_tuner import reweight
+from tools.backtest_dbb_engine5_tuner import reweight, to_5m
 
 DEFAULT_SYMBOLS=['SOXL','TQQQ','QQQ','NVDA','AMD','SMH','SPY','AVGO','PLTR']
 CACHE_DIR=Path('/home/ubuntu/day-trader-api/engine5_us_oos_cache')
 CORE_CACHE=CACHE_DIR/'us_engine5_core.pkl'
 PERSIST=CACHE_DIR/'slow_turn_persistence_candidates.csv'
+PROV_DIR=CACHE_DIR/'slow_turn_provisional_fast_v1'
 
 # Keep the historical engine key convention for compatibility with the already-built
-# core pickle.  US tickers therefore appear as e.g. 00SOXL internally; this is only
+# core pickle. US tickers therefore appear as e.g. 00SOXL internally; this is only
 # an internal key, not a market symbol lookup.
 def key(s): return str(s).zfill(6)
 def num(x): return pd.to_numeric(x,errors='coerce')
@@ -73,6 +73,110 @@ def build_core(db,syms):
     print('WROTE',CORE_CACHE,flush=True)
     return core
 
+
+def _rolling_slope_last8(values):
+    a=np.asarray(values,dtype=float)
+    if len(a)!=8 or not np.isfinite(a).all(): return np.nan
+    x=np.arange(8,dtype=float); xc=x-x.mean(); denom=float(np.dot(xc,xc))
+    return float(np.dot(xc,a-a.mean())/denom)
+
+
+def build_minimal_provisional_fast(raw_bars: pd.DataFrame, cfg) -> pd.DataFrame:
+    """Build only the provisional fields Slow-turn actually consumes, in O(N).
+
+    The old diagnostic helper rebuilt Engine5 over the entire completed 5m history for
+    every 1m bar, which is O(N^2) and takes >1 hour per US symbol.  Slow-turn candidate
+    construction only needs provisional mid_slope8, MACD gap delta, and RSI slope.
+    These can be computed exactly from the prior completed 5m indicator state plus the
+    current provisional close.
+    """
+    b=raw_bars.copy().sort_values('time').reset_index(drop=True)
+    b['time']=pd.to_datetime(b['time'])
+    complete=to_5m(b).sort_values('time').reset_index(drop=True)
+    complete['time']=pd.to_datetime(complete['time'])
+    c=num(complete['close']).astype(float)
+
+    # Completed-state series use the exact same pandas formulas as Engine5.enrich.
+    fast=c.ewm(span=cfg.macd_fast,adjust=False).mean()
+    slow_ema=c.ewm(span=cfg.macd_slow,adjust=False).mean()
+    macd=fast-slow_ema
+    signal=macd.ewm(span=cfg.macd_signal,adjust=False).mean()
+    gap=macd-signal
+
+    d=c.diff(); gain=d.clip(lower=0.0); loss=-d.clip(upper=0.0)
+    alpha_rsi=1.0/float(cfg.rsi_period)
+    ag=gain.ewm(alpha=alpha_rsi,adjust=False,min_periods=cfg.rsi_period).mean()
+    al=loss.ewm(alpha=alpha_rsi,adjust=False,min_periods=cfg.rsi_period).mean()
+    rs=ag/al.mask(al==0.0,np.nan)
+    rsi=100.0-100.0/(1.0+rs)
+    mid=c.rolling(cfg.bb_period).mean()
+
+    ct=complete['time'].astype('int64').to_numpy()
+    close_arr=c.to_numpy(float); fast_arr=fast.to_numpy(float); slow_arr=slow_ema.to_numpy(float)
+    sig_arr=signal.to_numpy(float); gap_arr=gap.to_numpy(float); ag_arr=ag.to_numpy(float)
+    al_arr=al.to_numpy(float); rsi_arr=rsi.to_numpy(float); mid_arr=mid.to_numpy(float)
+    af=2.0/(float(cfg.macd_fast)+1.0); asl=2.0/(float(cfg.macd_slow)+1.0); asig=2.0/(float(cfg.macd_signal)+1.0)
+
+    rows=[]
+    for r in b.itertuples(index=False):
+        ts=pd.Timestamp(r.time); bucket_start=ts.floor('5min'); bucket_end=bucket_start+pd.Timedelta(minutes=5)
+        j=int(np.searchsorted(ct,bucket_start.value,side='right')-1)
+        if j<20 or j<6: continue
+        px=float(r.close); prev_close=close_arr[j]
+        vals=[prev_close,fast_arr[j],slow_arr[j],sig_arr[j],gap_arr[j],ag_arr[j],al_arr[j],rsi_arr[j]]
+        if not all(np.isfinite(v) for v in vals): continue
+
+        fast_cur=af*px+(1.0-af)*fast_arr[j]
+        slow_cur=asl*px+(1.0-asl)*slow_arr[j]
+        macd_cur=fast_cur-slow_cur
+        signal_cur=asig*macd_cur+(1.0-asig)*sig_arr[j]
+        gap_cur=macd_cur-signal_cur
+        gap_delta=gap_cur-gap_arr[j]
+
+        delta=px-prev_close; g=max(delta,0.0); l=max(-delta,0.0)
+        ag_cur=alpha_rsi*g+(1.0-alpha_rsi)*ag_arr[j]
+        al_cur=alpha_rsi*l+(1.0-alpha_rsi)*al_arr[j]
+        rsi_cur=np.nan if al_cur==0.0 else 100.0-100.0/(1.0+ag_cur/al_cur)
+        rsi_slope=rsi_cur-rsi_arr[j] if np.isfinite(rsi_cur) else np.nan
+
+        if j<18: continue
+        prior19=close_arr[j-18:j+1]
+        if len(prior19)!=19 or not np.isfinite(prior19).all(): continue
+        mid_cur=float((prior19.sum()+px)/float(cfg.bb_period))
+        prior7=mid_arr[j-6:j+1]
+        mid_slope=_rolling_slope_last8(np.r_[prior7,mid_cur])
+
+        rows.append(dict(time=ts,bucket_end=bucket_end,close=px,mid_slope8=mid_slope,
+                         gap_delta=gap_delta,rsi_slope=rsi_slope))
+    return pd.DataFrame(rows)
+
+
+def load_or_build_fast_provisional(sym, raw_bars, cfg):
+    PROV_DIR.mkdir(parents=True,exist_ok=True)
+    path=PROV_DIR/f'{sym}_slow_minimal.pkl'
+    if path.exists():
+        with path.open('rb') as fh: pf=pickle.load(fh)
+        print(f'FAST PROVISIONAL HIT {sym} rows={len(pf)}',flush=True)
+        return pf
+    print(f'FAST PROVISIONAL BUILD {sym}...',flush=True)
+    pf=build_minimal_provisional_fast(raw_bars,cfg)
+    with path.open('wb') as fh: pickle.dump(pf,fh,pickle.HIGHEST_PROTOCOL)
+    print(f'FAST PROVISIONAL WROTE {sym} rows={len(pf)} -> {path}',flush=True)
+    return pf
+
+
+def build_base_candidates_fast(raw,cfg,scored,micros):
+    parts=[]; pf_by_symbol={}
+    for i,s in enumerate(raw,1):
+        print(f'[{i}/{len(raw)}] {s}',flush=True)
+        pf=load_or_build_fast_provisional(s,raw[s],cfg)
+        pf_by_symbol[s]=pf
+        q=zd.build_candidates(s,pf,micros[s],scored[s])
+        if len(q): parts.append(q)
+    cand=pd.concat(parts,ignore_index=True) if parts else pd.DataFrame()
+    return cand,pf_by_symbol
+
+
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--db',default='daytrader.db'); ap.add_argument('--symbols',default=','.join(DEFAULT_SYMBOLS)); ap.add_argument('--rebuild-core',action='store_true'); a=ap.parse_args()
     syms=[x.strip().upper() for x in a.symbols.split(',') if x.strip()]
@@ -81,18 +185,23 @@ def main():
     if CORE_CACHE.exists() and not a.rebuild_core:
         print('RESUME: loading existing core cache',CORE_CACHE,flush=True)
         with CORE_CACHE.open('rb') as fh: core=pickle.load(fh)
-        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; completed=core['completed']; micros=core['micros']
+        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; micros=core['micros']
         print(f'CORE CACHE LOADED symbols={len(raw)}. Skipping expensive core rebuild.',flush=True)
     else:
         core=build_core(a.db,syms)
-        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; completed=core['completed']; micros=core['micros']
+        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; micros=core['micros']
 
-    print('BUILD US slow-turn persistence cache...',flush=True)
-    cand=sri.reconstruct_base_candidates(raw,cfg,scored,completed,micros)
+    print('BUILD US slow-turn persistence cache (FAST incremental provisional)...',flush=True)
+    cand,pf_by_symbol=build_base_candidates_fast(raw,cfg,scored,micros)
     rows=[]
+    if cand.empty:
+        pd.DataFrame(rows).to_csv(PERSIST,index=False)
+        print('NO BASE SLOW-TURN CANDIDATES',flush=True)
+        print('WROTE',PERSIST,'rows=0',flush=True)
+        return
+
     for i,(sym,g) in enumerate(cand.groupby(cand.symbol.astype(str).str.zfill(6)),1):
-        # sym is the same normalized internal key used by raw/completed/micros.
-        pf,_=st.load_or_build_cache(sym,raw[sym],cfg,completed[sym]); z,m=slow.add_slow_turn_features(pf,micros[sym])
+        pf=pf_by_symbol[sym]; z,m=slow.add_slow_turn_features(pf,micros[sym])
         for _,r in g.iterrows():
             ready=pd.Timestamp(r.ready_time); entry=pd.Timestamp(r.entry_time)
             q5=z[(z.time<=ready)&(z.time>=ready-pd.Timedelta(minutes=6))]; q1=m[(m.time<=entry)&(m.time>=entry-pd.Timedelta(minutes=6))]
@@ -103,4 +212,5 @@ def main():
     pd.DataFrame(rows).to_csv(PERSIST,index=False)
     print('WROTE',PERSIST,'rows=',len(rows),flush=True)
     print('CACHE_READY. No strategy threshold was changed.',flush=True)
+
 if __name__=='__main__':main()

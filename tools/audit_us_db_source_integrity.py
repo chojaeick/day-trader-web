@@ -26,14 +26,30 @@ def load_db():
     return q
 
 
+def norm_trade_date(s: pd.Series) -> pd.Series:
+    x=s.astype(str).str.strip()
+    # DB stores YYYYMMDD (e.g. 20260202); normalize to YYYY-MM-DD.
+    y=pd.to_datetime(x,format='%Y%m%d',errors='coerce')
+    # Fallback for any already-hyphenated rows.
+    miss=y.isna()
+    if miss.any():
+        y.loc[miss]=pd.to_datetime(x.loc[miss],errors='coerce')
+    return y.dt.strftime('%Y-%m-%d')
+
+
 def audit_db(q):
     issues=[]
     q=q.copy()
     for c in ['open','high','low','close','volume']:
         q[c]=pd.to_numeric(q[c],errors='coerce')
     et=pd.to_datetime(q['et_time'],utc=True,errors='coerce').dt.tz_convert(NY)
+    ts_utc=pd.to_datetime(q['ts'],utc=True,errors='coerce')
+    ts_et=ts_utc.dt.tz_convert(NY)
     q['_et']=et
+    q['_ts_et']=ts_et
+    q['_trade_day']=norm_trade_date(q['trade_date'])
     q['_day']=q['_et'].dt.strftime('%Y-%m-%d')
+    q['_ts_day']=q['_ts_et'].dt.strftime('%Y-%m-%d')
     q['_hhmm']=q['_et'].dt.strftime('%H:%M')
 
     print('=== RAW DB AUDIT ===')
@@ -41,9 +57,15 @@ def audit_db(q):
     print('sessions=',q.session.value_counts().to_dict())
     print('price range=',float(q.close.min()),'..',float(q.close.max()))
 
-    bad_trade_date=(q.trade_date.astype(str)!=q['_day'])
+    bad_trade_date=(q['_trade_day']!=q['_day'])
+    bad_ts_day=(q['_trade_day']!=q['_ts_day'])
+    bad_ts_et=(q['_et']!=q['_ts_et'])
     print('trade_date_vs_et_mismatch=',int(bad_trade_date.sum()))
-    if bad_trade_date.any(): issues.append(f'trade_date mismatch {int(bad_trade_date.sum())}')
+    print('trade_date_vs_ts_as_et_mismatch=',int(bad_ts_day.sum()))
+    print('ts_vs_et_time_instant_mismatch=',int(bad_ts_et.sum()))
+    if bad_trade_date.any(): issues.append(f'trade_date vs et_time mismatch {int(bad_trade_date.sum())}')
+    if bad_ts_day.any(): issues.append(f'trade_date vs ts-as-ET mismatch {int(bad_ts_day.sum())}')
+    if bad_ts_et.any(): issues.append(f'ts vs et_time instant mismatch {int(bad_ts_et.sum())}')
 
     bad_ohlc=(q.low>q.high)|(q.open<q.low)|(q.open>q.high)|(q.close<q.low)|(q.close>q.high)
     print('bad_ohlc=',int(bad_ohlc.sum()))
@@ -67,7 +89,6 @@ def audit_db(q):
     if not (p.rows==390).all(): issues.append('not all day-symbols have 390 rows')
     if p.non1.sum(): issues.append(f'non1min gaps {int(p.non1.sum())}')
 
-    # Strong sanity check: US regular session ET should be exactly 09:30..15:59.
     bad_session=((q['_hhmm']<'09:30')|(q['_hhmm']>'15:59'))
     print('outside_0930_1559=',int(bad_session.sum()))
     if bad_session.any(): issues.append(f'outside regular ET {int(bad_session.sum())}')
@@ -128,7 +149,7 @@ def main():
         for x in issues: print(' -',x)
     else:
         print('PASS: SQLite US REGULAR DB is internally consistent and E cache is byte-semantic equivalent for time/OHLCV.')
-        print('This proves our earlier time/FX experiments affected derived caches, not the SQLite source rows.')
+        print('Earlier time/FX experiments affected derived caches, not the SQLite source rows.')
     print('\nEXTERNAL PRICE TRUTH CHECK STILL REQUIRED: compare selected DB rows against an independent market-data source.')
 
 if __name__=='__main__': main()

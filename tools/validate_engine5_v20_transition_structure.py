@@ -152,7 +152,7 @@ def events_from_candidates(cand, raw_min, lb, stop_cap, mode=None):
     q = cand[(cand.raw_min == raw_min) & (cand.slope_lb == lb) &
              (cand.stop_dist_pct <= stop_cap)].copy()
     if mode is not None:
-        q = q[q.mode == mode]
+        q = q[q['mode'] == mode]
     if q.empty:
         return {}, q
     # Prevent minute-by-minute duplicate chasing: first qualifying transition per symbol/day/mode.

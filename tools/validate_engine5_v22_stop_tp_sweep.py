@@ -1,42 +1,186 @@
 from __future__ import annotations
 
-"""
-V22 exit-only validation sweep.
+from dataclasses import replace
+from pathlib import Path
+import numpy as np
+import pandas as pd
 
-This script is intentionally a launcher/spec guard for the V22 stop/TP sweep.
-It verifies the requested matrix and then delegates to the existing integrated
-history validator once the variant-capable simulator is present.
+import tools.backtest_dbb_engine5_fast_tuner_v4 as base
+import tools.backtest_dbb_engine5_fast_tuner_v8 as v8
+import tools.backtest_dbb_engine5_fast_tuner_v10 as v10
+import tools.backtest_dbb_engine5_v16_wait_reaccel as v16
+import tools.backtest_engine5_v17b_breakout_v16_veto as v17b
+import tools.validate_engine5_v17c_multi_symbol as multi
+import tools.validate_engine5_v17c_opening_5m_hwm_sweep as sweep
+import tools.validate_engine5_v17c_5m_context_1m_trigger as h
+import tools.validate_engine5_v20_macd_strength as ms
+import tools.validate_engine5_v20_regime_transition as rt
+import tools.validate_engine5_integrated_full_history as integ
+from live_server.double_bollinger_engine5 import DoubleBollingerEngine5Config
+from tools.backtest_dbb_engine5_tuner import reweight
+from tools.backtest_dbb_kr_v2_v21_v22 import load_data
 
-Requested matrix:
-A   = current structural stop, TP1 2.0x band
-B5  = max 2% initial loss cap for first 5m, TP1 2.0x
-B10 = max 2% initial loss cap for first 10m, TP1 2.0x
-C   = current structural stop, TP1 1.5x band
-D5  = max 2% initial loss cap for first 5m, TP1 1.5x
-D10 = max 2% initial loss cap for first 10m, TP1 1.5x
-
-NOTE: This file is a guard only and must not silently claim results. It exits
-with a clear message until the variant-capable simulator is wired in.
-"""
+OUT = Path('/home/ubuntu/day-trader-api/engine5_v22_stop_tp_sweep')
+FEE = integ.FEE_RT_PCT
+THRESHOLD = integ.THRESHOLD
 
 MATRIX = [
-    ("A", None, None, 2.0),
-    ("B5", 2.0, 5, 2.0),
-    ("B10", 2.0, 10, 2.0),
-    ("C", None, None, 1.5),
-    ("D5", 2.0, 5, 1.5),
-    ("D10", 2.0, 10, 1.5),
+    ('A', None, None, 2.0),
+    ('B5', 2.0, 5.0, 2.0),
+    ('B10', 2.0, 10.0, 2.0),
+    ('C', None, None, 1.5),
+    ('D5', 2.0, 5.0, 1.5),
+    ('D10', 2.0, 10.0, 1.5),
 ]
 
+def n(x): return str(x).zfill(6)
+
+def stats(label, tr):
+    g = pd.to_numeric(tr.pnl_pct, errors='coerce').dropna() if len(tr) else pd.Series(dtype=float)
+    net = g - FEE
+    gp = float(net[net > 0].sum()) if len(net) else 0.0
+    gl = float(-net[net < 0].sum()) if len(net) else 0.0
+    return dict(case=label, trades=len(net), wins=int((net > 0).sum()), win_pct=float((net > 0).mean()*100) if len(net) else 0.0,
+                net_sum_pct=float(net.sum()) if len(net) else 0.0, avg_net_pct=float(net.mean()) if len(net) else 0.0,
+                pf=(gp/gl if gl > 0 else np.inf), max_loss_pct=float(net.min()) if len(net) else np.nan,
+                max_win_pct=float(net.max()) if len(net) else np.nan)
+
+def simulate_variant(packed, state_events, tagged, cap_pct, cap_minutes, tp1_mult):
+    by_time = {}
+    for x in tagged: by_time.setdefault(pd.Timestamp(x['time']), []).append(x)
+    positions, trades, current_state, last_price = {}, [], {}, {}
+    last_ts = None
+
+    def realize(pos, frac, price):
+        frac = min(float(frac), pos['remaining'])
+        if frac <= 0: return
+        pos['realized'] += frac * (float(price)/pos['entry_price'] - 1.0)
+        pos['remaining'] -= frac
+
+    def close_pos(sym, price, ts, reason):
+        pos = positions[sym]
+        pnl = pos['realized'] + pos['remaining'] * (float(price)/pos['entry_price'] - 1.0)
+        trades.append(dict(symbol=sym, entry_time=pos['entry_time'], exit_time=pd.Timestamp(ts), entry_price=pos['entry_price'],
+                           exit_price=float(price), pnl_pct=pnl*100.0, reason=reason, source=pos['source'],
+                           tp1_done=pos['tp1_done'], cap_hit=(reason=='INITIAL_LOSS_CAP')))
+        del positions[sym]
+
+    for ts, minute, rows in packed:
+        last_ts = ts
+        if ts in state_events: current_state.update(state_events[ts])
+        for sym in list(positions):
+            pos = positions.get(sym); rr = rows.get(sym)
+            if pos is None or rr is None: continue
+            closep, low, high, iu, il, ou, spread1, rsi1 = rr
+            closep=float(closep); low=float(low); high=float(high); last_price[sym]=closep
+            trend_up, outer_expanding, mid_slope8, spread5, rsi5 = current_state.get(sym,(False,False,np.nan,np.nan,np.nan))
+            fade_votes = int(np.isfinite(mid_slope8) and mid_slope8<=0)+int(np.isfinite(spread5) and spread5<=0)+int(np.isfinite(rsi5) and rsi5<=0)
+            clear_5m_collapse = (not trend_up) and fade_votes >= 2
+            fast_fade = np.isfinite(spread1) and spread1<=0 and np.isfinite(rsi1) and rsi1<=0
+            elapsed = (pd.Timestamp(ts)-pos['entry_time']).total_seconds()/60.0
+            tight = pos['breakout_entry'] and elapsed < multi.TIGHT_MINUTES
+            gross_ret=(closep/pos['entry_price']-1.0)*100.0
+            if pos['source']=='V_REBOUND' and not pos['run_mode'] and gross_ret>=integ.RUN_ACTIVATE_PCT:
+                pos['run_mode']=True
+
+            cap_stop = None
+            if cap_pct is not None and cap_minutes is not None and elapsed < cap_minutes:
+                cap_stop = pos['entry_price'] * (1.0 - cap_pct/100.0)
+
+            if minute >= base.FORCE_FLAT_MINUTE:
+                close_pos(sym, closep, ts, 'SESSION_FORCE_FLAT')
+            elif cap_stop is not None and low <= cap_stop:
+                close_pos(sym, cap_stop, ts, 'INITIAL_LOSS_CAP')
+            elif pos['source']=='V_REBOUND' and (not pos['run_mode']) and low<=pos['v_structural_stop']:
+                close_pos(sym,pos['v_structural_stop'],ts,'V_HIGHER_LOW_STRUCTURAL_STOP')
+            elif pos['source']!='V_REBOUND' and low<=pos['stop_price']:
+                close_pos(sym,pos['stop_price'],ts,'INITIAL_STRUCTURAL_STOP')
+            elif pos['source']=='V_REBOUND' and pos['run_mode']:
+                continue
+            elif tight and low<=pos['completed_hwm']*(1.-multi.HWM_DD):
+                close_pos(sym,pos['completed_hwm']*(1.-multi.HWM_DD),ts,'BREAKOUT_FIRST10_HWM_1PCT_EXIT')
+            elif tight:
+                pos['completed_hwm']=max(pos['completed_hwm'],high)
+            elif not pos['tp1_done']:
+                if high>=pos['tp1_price']:
+                    realize(pos,.50,pos['tp1_price']); pos['tp1_done']=True; pos['tp1_bar_high']=high; pos['post_tp1_high']=high; pos['fade_armed']=False; pos['fast_fade_streak']=0
+                elif clear_5m_collapse:
+                    close_pos(sym,closep,ts,'PRE_TP1_CLEAR_TREND_COLLAPSE')
+            else:
+                fresh=high>max(pos['tp1_bar_high'],pos['post_tp1_high'])
+                outer=trend_up and outer_expanding and np.isfinite(ou) and high>=ou
+                if fresh or outer: pos['fade_armed']=True
+                pos['post_tp1_high']=max(pos['post_tp1_high'],high)
+                pos['fast_fade_streak']=pos['fast_fade_streak']+1 if pos['fade_armed'] and fast_fade else 0
+                if pos['fade_armed'] and pos['fast_fade_streak']>=2:
+                    close_pos(sym,closep,ts,'FAST_1M_MOMENTUM_FADE_EXIT')
+                else:
+                    if sym in positions and (not pos['tp2_done']) and outer:
+                        realize(pos,pos['remaining']*.50,ou); pos['tp2_done']=True
+                    if sym in positions and pos['tp2_done'] and np.isfinite(il) and closep<il:
+                        close_pos(sym,closep,ts,'INNER_LOWER_CLOSE_EXIT')
+
+        if minute < base.NO_ENTRY_MINUTE:
+            for item in by_time.get(pd.Timestamp(ts), []):
+                sym=item['symbol']; c=item['event']
+                if sym in positions or c[2] < float(THRESHOLD): continue
+                _,closep,score,msv,rsv,band_r,stop_dist,entry_iu,entry_il,entry_ou,entry_mid,extended,breakout = c
+                positions[sym]=dict(symbol=sym,entry_time=pd.Timestamp(ts),entry_price=float(closep),stop_price=float(closep)-float(stop_dist),
+                    tp1_price=float(closep)+float(tp1_mult)*float(band_r),remaining=1.,realized=0.,tp1_done=False,tp2_done=False,
+                    tp1_bar_high=np.nan,post_tp1_high=-np.inf,fade_armed=False,fast_fade_streak=0,breakout_entry=bool(breakout),
+                    completed_hwm=float(closep),source=item['source'],v_structural_stop=float(item['meta'].get('structural_stop',np.nan)),run_mode=False)
+                last_price[sym]=float(closep)
+
+    if last_ts is not None:
+        for sym in list(positions):
+            if sym in last_price: close_pos(sym,last_price[sym],last_ts,'END_OF_DATA')
+    return pd.DataFrame(trades)
 
 def main():
-    print("=== V22 STOP/TP SWEEP SPEC ===")
-    for name, cap_pct, cap_minutes, tp1_mult in MATRIX:
-        print(f"{name}: cap={cap_pct}, minutes={cap_minutes}, tp1={tp1_mult}x")
-    raise SystemExit(
-        "Variant-capable simulator not wired yet. Do NOT treat this as a completed validation."
-    )
+    OUT.mkdir(parents=True, exist_ok=True)
+    print('=== V22 KR STOP / TP1 SWEEP ===', flush=True)
+    raw={n(k):v for k,v in load_data().items()}
+    base_cfg=DoubleBollingerEngine5Config()
+    cfg=replace(base_cfg,macd_slope_spread_full_ratio=2.0,rsi_slope_full_ratio=1.5)
+    packed=v8.base.pack_exit_events(raw,base_cfg)
+    states=base.pack_state_events(base.build_cfg_frames(raw,base_cfg))
+    frames0=base.build_cfg_frames(raw,cfg)
+    f10={n(s):v10._refine_entry_frame(f) for s,f in frames0.items()}
+    scored={n(s):f for s,f in reweight(f10,cfg,0.0).items()}
+    strength={s:ms.add_strength(f) for s,f in scored.items()}
+    completed={s:rt.add_completed_strength(f) for s,f in scored.items()}
+    micros={s:h.build_micro(raw[s],cfg) for s in raw}
+    tagged=integ.build_sources(raw,cfg,scored,strength,completed,micros)
 
+    baseline=integ.simulate(packed,states,tagged)
+    b=stats('A_EXPECTED',baseline)
+    print('BASELINE current integrated:', b, flush=True)
 
-if __name__ == "__main__":
-    main()
+    rows=[]; alltr=[]
+    for name,cap,mins,tp in MATRIX:
+        tr=simulate_variant(packed,states,tagged,cap,mins,tp)
+        st=stats(name,tr); rows.append(st)
+        x=tr.copy(); x['case']=name; alltr.append(x)
+        print(name, st, flush=True)
+
+    summary=pd.DataFrame(rows)
+    trades=pd.concat(alltr,ignore_index=True) if alltr else pd.DataFrame()
+    a=summary[summary.case=='A'].iloc[0]
+    tol=1e-9
+    repro=(int(a.trades)==int(b['trades']) and abs(float(a.net_sum_pct)-float(b['net_sum_pct']))<tol and abs(float(a.max_loss_pct)-float(b['max_loss_pct']))<tol)
+    print('\nREPRO CHECK A == CURRENT V22:', 'PASS' if repro else 'FAIL')
+    if not repro:
+        raise SystemExit('A baseline mismatch; sweep invalid.')
+
+    summary.to_csv(OUT/'summary.csv',index=False)
+    trades.to_csv(OUT/'trades.csv',index=False)
+    print('\n=== SUMMARY ===')
+    print(summary.to_string(index=False))
+    print('\n=== CAP HIT COUNTS ===')
+    print(trades.groupby('case').cap_hit.sum().to_string())
+    print('\n=== TP1 DONE COUNTS ===')
+    print(trades.groupby('case').tp1_done.sum().to_string())
+    print('WROTE', OUT/'summary.csv')
+    print('WROTE', OUT/'trades.csv')
+
+if __name__=='__main__': main()

@@ -18,7 +18,6 @@ import tools.validate_engine5_v17c_5m_context_1m_trigger as h
 import tools.validate_engine5_slow_turn_regime_integrated as sri
 import tools.validate_engine5_slow_turn_prototype as slow
 import tools.diagnose_v20_transition_structure_targets as st
-import tools.validate_engine5_integrated_full_history as integ
 from live_server.double_bollinger_engine5 import DoubleBollingerEngine5Config
 from tools.backtest_dbb_engine5_tuner import reweight
 
@@ -27,9 +26,10 @@ CACHE_DIR=Path('/home/ubuntu/day-trader-api/engine5_us_oos_cache')
 CORE_CACHE=CACHE_DIR/'us_engine5_core.pkl'
 PERSIST=CACHE_DIR/'slow_turn_persistence_candidates.csv'
 
-
+# Keep the historical engine key convention for compatibility with the already-built
+# core pickle.  US tickers therefore appear as e.g. 00SOXL internally; this is only
+# an internal key, not a market symbol lookup.
 def key(s): return str(s).zfill(6)
-
 def num(x): return pd.to_numeric(x,errors='coerce')
 
 def seq_monotonicity(vals):
@@ -49,9 +49,6 @@ def load_us(db,syms):
         q=pd.read_sql_query("select et_time,open,high,low,close,volume from historical_minute_bars where symbol=? and interval_min=1 and session='REGULAR' order by trade_date,et_time",con,params=(s,))
         if q.empty: print(f'[{i}/{len(syms)}] {s} EMPTY',flush=True); continue
         q=q.rename(columns={'et_time':'time'})
-        # SQLite stores ET with seasonal offsets (-05:00 / -04:00). Parse through UTC so
-        # pandas gets one stable datetime64 dtype across the DST boundary, then convert to
-        # America/New_York. The engine only needs a consistent causal timeline.
         q['time']=pd.to_datetime(q.time,utc=True).dt.tz_convert('America/New_York')
         for c in ['open','high','low','close','volume']:q[c]=pd.to_numeric(q[c],errors='coerce')
         q=q.dropna(subset=['time','open','high','low','close']).sort_values('time').reset_index(drop=True)
@@ -59,11 +56,8 @@ def load_us(db,syms):
         print(f'[{i}/{len(syms)}] {s} rows={len(q)} {q.time.min()} -> {q.time.max()}',flush=True)
     con.close(); return out
 
-def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--db',default='daytrader.db'); ap.add_argument('--symbols',default=','.join(DEFAULT_SYMBOLS)); a=ap.parse_args()
-    syms=[x.strip().upper() for x in a.symbols.split(',') if x.strip()]
-    CACHE_DIR.mkdir(parents=True,exist_ok=True)
-    raw=load_us(a.db,syms)
+def build_core(db,syms):
+    raw=load_us(db,syms)
     cfg0=DoubleBollingerEngine5Config(); cfg=replace(cfg0,macd_slope_spread_full_ratio=2.0,rsi_slope_full_ratio=1.5)
     print('BUILD core frames...',flush=True)
     packed=v8.base.pack_exit_events(raw,cfg0)
@@ -74,13 +68,30 @@ def main():
     strength={s:ms.add_strength(f) for s,f in scored.items()}
     completed={s:rt.add_completed_strength(f) for s,f in scored.items()}
     micros={s:h.build_micro(b,cfg) for s,b in raw.items()}
-    with CORE_CACHE.open('wb') as fh:pickle.dump(dict(raw=raw,cfg0=cfg0,cfg=cfg,packed=packed,states=states,scored=scored,strength=strength,completed=completed,micros=micros),fh,pickle.HIGHEST_PROTOCOL)
+    core=dict(raw=raw,cfg0=cfg0,cfg=cfg,packed=packed,states=states,scored=scored,strength=strength,completed=completed,micros=micros)
+    with CORE_CACHE.open('wb') as fh:pickle.dump(core,fh,pickle.HIGHEST_PROTOCOL)
     print('WROTE',CORE_CACHE,flush=True)
+    return core
+
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument('--db',default='daytrader.db'); ap.add_argument('--symbols',default=','.join(DEFAULT_SYMBOLS)); ap.add_argument('--rebuild-core',action='store_true'); a=ap.parse_args()
+    syms=[x.strip().upper() for x in a.symbols.split(',') if x.strip()]
+    CACHE_DIR.mkdir(parents=True,exist_ok=True)
+
+    if CORE_CACHE.exists() and not a.rebuild_core:
+        print('RESUME: loading existing core cache',CORE_CACHE,flush=True)
+        with CORE_CACHE.open('rb') as fh: core=pickle.load(fh)
+        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; completed=core['completed']; micros=core['micros']
+        print(f'CORE CACHE LOADED symbols={len(raw)}. Skipping expensive core rebuild.',flush=True)
+    else:
+        core=build_core(a.db,syms)
+        raw=core['raw']; cfg=core['cfg']; scored=core['scored']; completed=core['completed']; micros=core['micros']
 
     print('BUILD US slow-turn persistence cache...',flush=True)
     cand=sri.reconstruct_base_candidates(raw,cfg,scored,completed,micros)
     rows=[]
     for i,(sym,g) in enumerate(cand.groupby(cand.symbol.astype(str).str.zfill(6)),1):
+        # sym is the same normalized internal key used by raw/completed/micros.
         pf,_=st.load_or_build_cache(sym,raw[sym],cfg,completed[sym]); z,m=slow.add_slow_turn_features(pf,micros[sym])
         for _,r in g.iterrows():
             ready=pd.Timestamp(r.ready_time); entry=pd.Timestamp(r.entry_time)
@@ -90,6 +101,6 @@ def main():
             rows.append(dict(symbol=sym,entry_time=entry,joint5_persistence=min(g5,r5) if np.isfinite(g5) and np.isfinite(r5) else np.nan,joint1_persistence=min(g1,r1) if np.isfinite(g1) and np.isfinite(r1) else np.nan,price_progress_1m_pct=price_progress(m,entry)))
         print(f'  persistence [{i}] {sym} candidates={len(g)}',flush=True)
     pd.DataFrame(rows).to_csv(PERSIST,index=False)
-    print('WROTE',PERSIST,'rows=',len(rows))
-    print('CACHE_READY. No strategy threshold was changed.')
+    print('WROTE',PERSIST,'rows=',len(rows),flush=True)
+    print('CACHE_READY. No strategy threshold was changed.',flush=True)
 if __name__=='__main__':main()

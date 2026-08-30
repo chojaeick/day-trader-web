@@ -120,19 +120,12 @@ def main():
         raw=raw,
         cfg=cfg,
         required_rises=3,
-        merit_points=5.0,
+        merit=5.0,
         score_cache=score_cache,
     )
     r3 = integ.simulate(packed, states, early_tags)
     r3_stats = stats('R3_B05', r3)
     r3_stats['advanced_tags'] = len(changes)
-
-    # Identify original cohort keys that were advanced to T-1. Those are already
-    # executed before T and must not be cancelled using the later T score.
-    advanced_original_keys = set()
-    if len(changes):
-        for r in changes.itertuples(index=False):
-            advanced_original_keys.add((n(r.symbol), pd.Timestamp(r.original_time), str(r.source)))
 
     combined = []
     veto_rows = []
@@ -140,9 +133,8 @@ def main():
         sym = n(item['symbol'])
         ts = pd.Timestamp(item['time'])
 
-        # Detect whether this item is one of the advanced T-1 events by matching
-        # the recorded early time/source/symbol. Advanced events bypass the later
-        # T veto because the later score is not yet observable at T-1.
+        # Advanced T-1 events bypass the later T veto because the later score is
+        # not observable yet at the actual earlier decision point.
         is_advanced = False
         if len(changes):
             q = changes[
@@ -199,7 +191,6 @@ def main():
         print(vx.to_string(index=False))
         vx.to_csv(OUT/'veto15_matched_baseline.csv', index=False)
 
-    # Compare realized trade paths across A / R3 / combined.
     parts = []
     for name, tr in [('A', baseline), ('R3_B05', r3), ('R3_B05_PLUS_VETO15', combo)]:
         q = tr.copy(); q['case'] = name; parts.append(q)

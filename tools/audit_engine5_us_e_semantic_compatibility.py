@@ -20,7 +20,7 @@ Checks:
    bar boundary.  V18E must be a subset of V17CE.  V19E is additive to V18E.
 7) V20E/V21E normalized gates must use bps/relative quantities, not USD absolute MACD.
 
-PASS means semantic applicability is proven at the implementation level.  It does NOT
+PASS means semantic applicability is proven at the implementation level. It does NOT
 say anything about profitability.
 """
 
@@ -68,6 +68,9 @@ def event_keys(ev): return {(pd.Timestamp(ts),n(c[0])) for ts,cs in ev.items() f
 def apply_us_clock():
     base.NO_ENTRY_MINUTE=US_NO_ENTRY
     base.FORCE_FLAT_MINUTE=US_FORCE
+    # filt_open() in the imported V17C opening module reads OPEN_MINUTE, not
+    # OPEN_BUY_MINUTE. Patch both to prevent the KR 09:10 constant leaking.
+    sweep.OPEN_MINUTE=US_BUY
     sweep.OPEN_BUY_MINUTE=US_BUY
     sweep.OPENING_ENTRY_END=US_OPENING_END
     multi.OPEN_MINUTE=US_BUY
@@ -103,7 +106,6 @@ def audit_session_mapping(rows):
 
 
 def audit_scale_semantics(rows,d):
-    # Use one symbol. Re-enrich identical path after arbitrary x10 price scaling.
     s=sorted(d['raw'])[0]; b=d['raw'][s].copy(); b['time']=pd.to_datetime(b.time)
     b=b.iloc[:390*5].copy()
     f5=to_5m(b)
@@ -115,7 +117,6 @@ def audit_scale_semantics(rows,d):
     common=set(a.columns)&set(z.columns)
 
     invariant_candidates=[c for c in common if any(k in c.lower() for k in ['rsi','ratio','strength'])]
-    # exclude price-linear-looking RSI slope? RSI itself/slope are still invariant under price scaling.
     inv_bad=[]
     for c in invariant_candidates:
         aa=pd.to_numeric(a[c],errors='coerce'); zz=pd.to_numeric(z[c],errors='coerce')
@@ -127,7 +128,6 @@ def audit_scale_semantics(rows,d):
     bool_bad=[]
     for c in bool_cols:
         aa=a[c].fillna(False).astype(bool).to_numpy(); zz=z[c].fillna(False).astype(bool).to_numpy()
-        # Zero-level floating noise can flip RSI slope booleans on exact flats; count separately.
         m=int((aa!=zz).sum())
         if m>0: bool_bad.append((c,m))
     total=sum(m for _,m in bool_bad)
@@ -137,19 +137,16 @@ def audit_scale_semantics(rows,d):
 
 def audit_code_leaks(rows):
     src=inspect.getsource(e)
-    # E validator must not multiply price by FX or use legacy absolute raw_min 52/30 as active gate.
     bad=[]
     if re.search(r'\*\s*1400|FX\s*=\s*1400',src): bad.append('FX1400')
     if re.search(r'raw_min\s*=\s*52(?:\.0)?',src): bad.append('RAW52')
     if re.search(r'raw_min\s*=\s*30(?:\.0)?',src): bad.append('RAW30')
     ok(rows,'e_price_unit_leak',not bad,'no FX/RAW52/RAW30 active literals','found '+','.join(bad))
 
-    # Explicit US session constants must be present in the E layer.
     need=['US_BUY_START_MINUTE','US_OPENING_END_MINUTE','US_NO_ENTRY_MINUTE','US_FORCE_FLAT_MINUTE']
     missing=[x for x in need if x not in src]
     ok(rows,'e_session_adapter',not missing,'US session adapter explicit','missing '+','.join(missing))
 
-    # Normalized bps gates required for V20E/V21E.
     cond=('V20E_RAW_BPS' in src and 'V21E_RAW30_BPS' in src and '*10000.0' in src)
     ok(rows,'e_normalized_macd_gates',cond,'V20E/V21E use price-relative bps','normalized gate not proven')
 
@@ -170,11 +167,9 @@ def audit_event_semantics(rows,d):
     k17=event_keys(ev17); k18=event_keys(ev18)
     ok(rows,'V18E_subset_of_V17CE',k18.issubset(k17),f'{len(k18)}/{len(k17)} keys; pure veto/subset','V18E contains keys absent from V17CE')
 
-    # Completed-5m events must land on 5-minute boundaries.
     bad_boundary=sum(1 for ts in ev17 if pd.Timestamp(ts).minute%5!=0)
     ok(rows,'V17CE_completed_5m_boundary',bad_boundary==0,'all event timestamps on 5m boundaries',f'{bad_boundary} off-boundary timestamps')
 
-    # V19E is additive; verify one delay stream after US session clipping.
     fast,_=v19.build_v19_events(scored,micros,raw,0)
     fast={ts:cs for ts,cs in fast.items() if US_BUY<=minute(ts)<US_NO_ENTRY}
     merged,_=v19.merge_additive(ev18,fast)

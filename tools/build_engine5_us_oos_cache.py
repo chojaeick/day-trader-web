@@ -47,7 +47,11 @@ def load_us(db,syms):
     for i,s in enumerate(syms,1):
         q=pd.read_sql_query("select et_time,open,high,low,close,volume from historical_minute_bars where symbol=? and interval_min=1 and session='REGULAR' order by trade_date,et_time",con,params=(s,))
         if q.empty: print(f'[{i}/{len(syms)}] {s} EMPTY',flush=True); continue
-        q=q.rename(columns={'et_time':'time'}); q['time']=pd.to_datetime(q.time)
+        q=q.rename(columns={'et_time':'time'})
+        # SQLite stores ET with seasonal offsets (-05:00 / -04:00). Parse through UTC so
+        # pandas gets one stable datetime64 dtype across the DST boundary, then convert to
+        # America/New_York. The engine only needs a consistent causal timeline.
+        q['time']=pd.to_datetime(q.time,utc=True).dt.tz_convert('America/New_York')
         for c in ['open','high','low','close','volume']:q[c]=pd.to_numeric(q[c],errors='coerce')
         q=q.dropna(subset=['time','open','high','low','close']).sort_values('time').reset_index(drop=True)
         out[key(s)]=q

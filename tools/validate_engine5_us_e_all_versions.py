@@ -48,12 +48,9 @@ US_OPENING_END_MINUTE = 10*60 + 30
 US_NO_ENTRY_MINUTE = 15*60 + 30
 US_FORCE_FLAT_MINUTE = 15*60 + 50
 
-# KR-only parity calibration from V20 RAW52/REL1.45 validation.
-# This is a scale-invariant price-relative strength threshold, not a USD threshold.
 V20E_RAW_BPS = 11.166071
 V20E_REL_MIN = 1.45
 V20E_REQUIRE_ABOVE_SIGNAL = True
-# Preserve the original V21 RAW30 : V20 RAW52 proportion without price-unit dependence.
 V21E_RAW30_BPS = V20E_RAW_BPS * (30.0 / 52.0)
 
 
@@ -65,12 +62,18 @@ def minute_of(ts):
 def count_events(ev): return sum(len(v) for v in ev.values())
 
 
+def clip_us_entry_window(ev):
+    """E-series hard session guard: candidates may exist all day, entries may not."""
+    return {
+        pd.Timestamp(ts): list(cs)
+        for ts, cs in ev.items()
+        if US_BUY_START_MINUTE <= minute_of(ts) < US_NO_ENTRY_MINUTE
+    }
+
+
 def apply_us_session_clock():
     base.NO_ENTRY_MINUTE = US_NO_ENTRY_MINUTE
     base.FORCE_FLAT_MINUTE = US_FORCE_FLAT_MINUTE
-    # validate_engine5_v17c_opening_5m_hwm_sweep.filt_open() reads OPEN_MINUTE.
-    # OPEN_BUY_MINUTE is used by a different historical variant; patch both so no
-    # KR 09:10 wall-clock constant can leak into the E-series.
     sweep.OPEN_MINUTE = US_BUY_START_MINUTE
     sweep.OPEN_BUY_MINUTE = US_BUY_START_MINUTE
     sweep.OPENING_ENTRY_END = US_OPENING_END_MINUTE
@@ -100,7 +103,7 @@ def hist_stat(label,tr,signals):
                 max_loss_pct=float(net.min()) if len(net) else np.nan)
 
 def run_hist(label,ev,packed,states):
-    e = upgrade(ev)
+    e = upgrade(clip_us_entry_window(ev))
     tr = multi.simulate_multi(packed,e,states,THRESHOLD)
     return tr,hist_stat(label,tr,count_events(e))
 
@@ -117,7 +120,7 @@ def load_pf(raw):
 
 def filter_v20e(ev18,strength):
     out, diag = {}, []
-    for ts in sorted(ev18):
+    for ts in sorted(clip_us_entry_window(ev18)):
         for c in ev18[ts]:
             sym = n(c[0]); f = strength[sym]
             q = f[f.time <= pd.Timestamp(ts)]
@@ -128,9 +131,9 @@ def filter_v20e(ev18,strength):
             rel = float(r.macd_strength_rel) if pd.notna(r.macd_strength_rel) else np.nan
             bps = raw/close*10000.0 if np.isfinite(raw) and np.isfinite(close) and close != 0 else np.nan
             above = bool(r.macd_above_signal) if 'macd_above_signal' in r.index else False
-            ok = bool(np.isfinite(bps) and bps >= V20E_RAW_BPS and np.isfinite(rel) and rel >= V20E_REL_MIN and (above or not V20E_REQUIRE_ABOVE_SIGNAL))
-            diag.append(dict(symbol=sym,time=pd.Timestamp(ts),raw_bps=bps,rel=rel,above_signal=above,keep=ok))
-            if ok: out.setdefault(pd.Timestamp(ts),[]).append(c)
+            keep = bool(np.isfinite(bps) and bps >= V20E_RAW_BPS and np.isfinite(rel) and rel >= V20E_REL_MIN and (above or not V20E_REQUIRE_ABOVE_SIGNAL))
+            diag.append(dict(symbol=sym,time=pd.Timestamp(ts),raw_bps=bps,rel=rel,above_signal=above,keep=keep))
+            if keep: out.setdefault(pd.Timestamp(ts),[]).append(c)
     return out,pd.DataFrame(diag)
 
 
@@ -146,7 +149,6 @@ def build_v20e_tags(ev18,strength,scored):
 
 
 def state_candidates_e(sym,z,scored,leg_min):
-    """V-rebound state machine with RAW30 replaced by normalized bps and US clock."""
     out=[]
     pxs=pd.to_numeric(z.px,errors='coerce')
     gd=pd.to_numeric(z.gap_delta,errors='coerce')
@@ -187,7 +189,7 @@ def state_candidates_e(sym,z,scored,leg_min):
             if higher_low and reclaim and mom:
                 stop=state['pullback_low']; dist=(px/stop-1.0)*100.0
                 q5=scored[scored.time<=ts.floor('5min')]
-                if minute_of(ts)>=US_BUY_START_MINUTE and minute_of(ts)<US_NO_ENTRY_MINUTE and not q5.empty:
+                if US_BUY_START_MINUTE<=minute_of(ts)<US_NO_ENTRY_MINUTE and not q5.empty:
                     ev=vsm.old.make_event(sym,q5.iloc[-1],px)
                     if ev is not None:
                         out.append(dict(symbol=n(sym),time=ts,price=px,structural_stop=stop,stop_dist_pct=dist,
@@ -216,7 +218,6 @@ def build_vrebound_e(raw,scored,micros,pf):
 
 
 def normalize_slow_boundary_e(allslow):
-    """Keep existing Slow-turn regimes, but replace BOUNDARY MACD30 with bps and enforce US session."""
     x=allslow.copy()
     if x.empty: return x
     ready_min=pd.to_datetime(x.ready_time).dt.hour*60+pd.to_datetime(x.ready_time).dt.minute
@@ -249,10 +250,13 @@ def main():
     print(f'V21E RAW30-equivalent={V21E_RAW30_BPS:.6f}bps',flush=True)
 
     raw_entries=v8.pack_entry_events(scored)
-    ev10=sweep.filt_open(raw_entries)
+    ev10=clip_us_entry_window(sweep.filt_open(raw_entries))
     ev16,waits=v16.build_wait_events(ev10,raw,cfg,False)
+    ev16=clip_us_entry_window(ev16)
     ev17,_,_=v17b.build_v17b(ev16,scored,waits)
+    ev17=clip_us_entry_window(ev17)
     ev18,_=h.build_veto_stream(ev17,micros)
+    ev18=clip_us_entry_window(ev18)
 
     rows=[]; parts=[]
     for label,ev in [('V17CE',ev17),('V18E',ev18)]:
@@ -261,8 +265,10 @@ def main():
 
     for delay in DELAYS:
         fast,_=v19.build_v19_events(scored,micros,raw,delay)
-        fast={ts:cs for ts,cs in fast.items() if US_BUY_START_MINUTE<=minute_of(ts)<US_NO_ENTRY_MINUTE}
-        ev,_=v19.merge_additive(ev18,fast); label=f'V19E_D{delay}'
+        fast=clip_us_entry_window(fast)
+        ev,_=v19.merge_additive(ev18,fast)
+        ev=clip_us_entry_window(ev)
+        label=f'V19E_D{delay}'
         tr,s=run_hist(label,ev,packed,states); rows.append(s); q=tr.copy(); q['variant']=label; parts.append(q)
         print(f"{label}: signals={s['signals']} trades={s['trades']}",flush=True)
 
@@ -285,7 +291,8 @@ def main():
     for cut in CUTS:
         slow=revised.slow_tags(revised.select_revised(allslow,cut))
         for x in slow: x['source']='SLOW_TURN_E'
-        tags=sorted(v20+vr+slow,key=lambda x:(pd.Timestamp(x['time']),x['symbol'],x['source']))
+        tags=[x for x in (v20+vr+slow) if US_BUY_START_MINUTE<=minute_of(x['time'])<US_NO_ENTRY_MINUTE]
+        tags=sorted(tags,key=lambda x:(pd.Timestamp(x['time']),x['symbol'],x['source']))
         tr=integ.simulate(packed,states,tags); st=integ.stat(f'V21E_{cut}',tr); label=f'V21E_{cut}'
         rr=dict(variant=label,signals=len(tags),**{k:st[k] for k in ['trades','wins','losses','win_pct','net_sum_pct','avg_net_pct','pf','max_loss_pct']})
         rows.append(rr); q=tr.copy(); q['variant']=label; parts.append(q)

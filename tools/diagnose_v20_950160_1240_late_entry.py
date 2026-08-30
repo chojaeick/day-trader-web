@@ -18,11 +18,11 @@ from tools.backtest_dbb_engine5_tuner import reweight
 from tools.backtest_dbb_kr_v2_v21_v22 import load_data
 
 SYM='950160'
-START=pd.Timestamp('2026-08-14 12:20:00+09:00')
+START=pd.Timestamp('2026-08-14 10:40:00+09:00')
 END=pd.Timestamp('2026-08-14 14:05:00+09:00')
 RAW_MIN=52.0
 REL_MIN=1.45
-OUT=Path('/home/ubuntu/day-trader-api/engine5_v16_full_validation/diagnose_950160_20260814_1240_late_entry.csv')
+OUT=Path('/home/ubuntu/day-trader-api/engine5_v16_full_validation/diagnose_950160_20260814_1040_late_entry.csv')
 
 
 def n(x): return str(x).zfill(6)
@@ -74,20 +74,32 @@ def main():
     prev_rsi=pd.to_numeric(full['rsi_slope'],errors='coerce').shift(1)
     ss=pd.to_numeric(full['macd_slope_spread_strength'],errors='coerce').fillna(0.)
     rs=pd.to_numeric(full['rsi_slope_strength'],errors='coerce').fillna(0.)
+    prev_mid=pd.to_numeric(full['mid_slope8'],errors='coerce').shift(1)
     full['diag_macd_reaccel']=((full.macd_slope_spread>0)&((prev_spread<=0)|(full.macd_slope_spread>=prev_spread*.85)|(ss>=.75))).fillna(False)
     full['diag_rsi_reaccel']=((full.rsi_slope>0)&((prev_rsi<=0)|(full.rsi_slope>=prev_rsi*.70)|(rs>=.75))).fillna(False)
-    q=q.merge(full[['time','diag_macd_reaccel','diag_rsi_reaccel']],on='time',how='left')
+    full['diag_mid_improving']=(pd.to_numeric(full.mid_slope8,errors='coerce')>prev_mid).fillna(False)
+    q=q.merge(full[['time','diag_macd_reaccel','diag_rsi_reaccel','diag_mid_improving']],on='time',how='left')
 
     q['V10_EVENT']=q.time.isin(k10); q['V16_EVENT']=q.time.isin(k16); q['V17_EVENT']=q.time.isin(k17); q['V18_EVENT']=q.time.isin(k18); q['V20_EVENT']=q.time.isin(k20)
     q['dist_mid_pct']=(pd.to_numeric(q.close,errors='coerce')/pd.to_numeric(q.mid,errors='coerce')-1.)*100.
 
     def first_block(r):
-        if not b(r.get('trend_up')): return 'V10:trend_up'
-        if not b(r.get('gate_macd_context')): return 'V10:macd_context'
-        if not b(r.get('gate_macd_rising')): return 'V10:macd_rising'
-        if not b(r.get('diag_macd_reaccel')): return 'V10:macd_reaccel'
-        if not b(r.get('diag_rsi_reaccel')): return 'V10:rsi_reaccel'
-        if not b(r.get('gate_rsi_persistent')): return 'V10:rsi_persistent'
+        # Report the actual V10 path first. If trend_up is false, the early-reversal path may still qualify.
+        if b(r.get('entry_mode_continuation')) or b(r.get('entry_mode_early_reversal')):
+            pass
+        else:
+            if not b(r.get('trend_up')):
+                if not b(r.get('diag_mid_improving')): return 'EARLY:mid_not_improving'
+                if finite(r.get('macd_gap_delta'))<=0: return 'EARLY:macd_gap_delta<=0'
+                if not b(r.get('diag_macd_reaccel')): return 'EARLY:macd_turn_weak'
+                if not b(r.get('diag_rsi_reaccel')): return 'EARLY:rsi_turn_weak'
+                return 'EARLY:price/2bar_strength'
+            if not b(r.get('gate_macd_context')): return 'CONT:macd_context'
+            if not b(r.get('gate_macd_rising')): return 'CONT:macd_rising'
+            if not b(r.get('diag_macd_reaccel')): return 'CONT:macd_reaccel'
+            if not b(r.get('diag_rsi_reaccel')): return 'CONT:rsi_reaccel'
+            if not b(r.get('gate_rsi_persistent')): return 'CONT:rsi_persistent'
+            return 'V10:entry_gate_other'
         if not b(r.get('entry_gate')): return 'V10:entry_gate_other'
         if not b(r.get('V10_EVENT')): return 'PACK/SCORE/RISK'
         if not b(r.get('V16_EVENT')): return 'V16_WAIT'
@@ -99,25 +111,24 @@ def main():
         return 'PASS_V20'
     q['first_block']=q.apply(first_block,axis=1)
 
-    cols=['time','close','dist_mid_pct','trend_up','gate_macd_context','gate_macd_rising','diag_macd_reaccel','diag_rsi_reaccel','gate_rsi_persistent','entry_mode_continuation','entry_mode_early_reversal','entry_gate','entry_score','rsi','rsi_slope','macd_gap','macd_gap_delta','macd_strength_raw','macd_strength_rel','V10_EVENT','V16_EVENT','V17_EVENT','V18_EVENT','V20_EVENT','first_block']
+    cols=['time','close','dist_mid_pct','mid_slope8','diag_mid_improving','trend_up','gate_macd_context','gate_macd_rising','diag_macd_reaccel','diag_rsi_reaccel','gate_rsi_persistent','entry_mode_continuation','entry_mode_early_reversal','entry_gate','entry_score','rsi','rsi_slope','macd_gap','macd_gap_delta','macd_strength_raw','macd_strength_rel','V10_EVENT','V16_EVENT','V17_EVENT','V18_EVENT','V20_EVENT','first_block']
     cols=[c for c in cols if c in q.columns]
     OUT.parent.mkdir(parents=True,exist_ok=True); q[cols].to_csv(OUT,index=False)
 
-    print('=== 950160 2026-08-14 12:20-14:05 LATE-ENTRY DIAG ===')
+    print('=== 950160 2026-08-14 10:40-14:05 EARLY/MISSED/LATE ENTRY DIAG ===')
     print('PIPELINE_FIRST:',end=' ')
     for name,ks in [('V10',k10),('V16',k16),('V17',k17),('V18',k18),('V20',k20)]:
         print(f"{name}={min(ks).strftime('%H:%M') if ks else 'NONE'}",end='  ')
     print()
-    print('\n12:30-14:00 FIVE-MINUTE BLOCK TRACE')
-    brief=q[(q.time>=pd.Timestamp('2026-08-14 12:30:00+09:00'))&(q.time<=pd.Timestamp('2026-08-14 14:00:00+09:00'))][['time','close','trend_up','entry_score','macd_strength_raw','macd_strength_rel','first_block']].copy()
+    print('\n10:40-13:00 EARLY TRACE')
+    brief=q[(q.time>=pd.Timestamp('2026-08-14 10:40:00+09:00'))&(q.time<=pd.Timestamp('2026-08-14 13:00:00+09:00'))][['time','close','mid_slope8','trend_up','entry_score','macd_strength_raw','macd_strength_rel','first_block']].copy()
     brief['time']=brief.time.dt.strftime('%H:%M')
     print(brief.to_string(index=False))
 
-    print('\nV16_WAIT_ROWS')
-    if len(waits):
-        w=waits[(waits.symbol.astype(str).str.zfill(6)==SYM)&(pd.to_datetime(waits.signal_time)>=START)&(pd.to_datetime(waits.signal_time)<=END)]
-        print(w.to_string(index=False) if len(w) else 'NONE')
-    else: print('NONE')
+    print('\n13:05-14:00 REENTRY TRACE')
+    brief2=q[(q.time>=pd.Timestamp('2026-08-14 13:05:00+09:00'))&(q.time<=pd.Timestamp('2026-08-14 14:00:00+09:00'))][['time','close','entry_score','macd_strength_raw','macd_strength_rel','first_block']].copy()
+    brief2['time']=brief2.time.dt.strftime('%H:%M')
+    print(brief2.to_string(index=False))
 
     print('\nV18_VETO_ROWS')
     if len(vetoed):

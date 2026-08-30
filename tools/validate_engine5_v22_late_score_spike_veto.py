@@ -58,13 +58,12 @@ def main():
     micros = {s: h.build_micro(raw[s], cfg) for s in raw}
     tagged = integ.build_sources(raw, cfg, scored, strength, completed, micros)
 
-    # Compute the causal live-score jump for every tagged candidate, not just baseline executions.
     score_cache = {}
     def live_score(sym, ts):
         key = (sym, pd.Timestamp(ts))
         if key not in score_cache:
             r = diag.score_at(raw[sym], pd.Timestamp(ts), cfg)
-            score_cache[key] = np.nan if r is None else float(r['entry_score'])
+            score_cache[key] = np.nan if r is None else float(r['live_score'])
         return score_cache[key]
 
     annotated = []
@@ -108,7 +107,6 @@ def main():
     trades = pd.concat(alltr, ignore_index=True, sort=False)
     vetoes = pd.DataFrame(veto_rows)
 
-    # Baseline guard: current V22 KR result must remain exact.
     b = summary.iloc[0]
     guard = int(b.trades) == 44 and abs(float(b.net_sum_pct) - 46.355117) < 1e-5
     print('\nBASELINE REPRO:', 'PASS' if guard else 'FAIL', dict(b))
@@ -122,7 +120,6 @@ def main():
     if len(vetoes): print(vetoes.sort_values(['case','time','symbol']).to_string(index=False))
     else: print('NONE')
 
-    # Show which baseline executed entries match each veto, so removal/re-entry effects are visible.
     be = baseline[['symbol','entry_time','pnl_pct','reason','source']].copy()
     be['symbol'] = be.symbol.astype(str).str.zfill(6)
     if len(vetoes):

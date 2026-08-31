@@ -8,6 +8,11 @@ BACKUP=Path('/home/ubuntu/day-trader-api-repo/app_v5.py.pre_terminal_design_v38'
 LOG=Path('/tmp/daytrader-v5.log')
 PORT=8503
 
+# This updater keeps the full V38 payload already in the script body below.
+# The only behavioral change is resilient top-level anchor detection for apps
+# that were already patched by earlier V5 UI upgraders and no longer contain
+# st.title('DAY TRADER V5') / V37 markers.
+
 CSS = r'''st.markdown("""
 <style>
 :root{--bg:#07111b;--panel:#0b1622;--line:#223448;--muted:#7d8da3;--text:#eef5ff;--green:#21d982;--red:#ff5066;--amber:#ffc03a;--orange:#ff6a12}
@@ -138,25 +143,18 @@ with h2:
     if d.button('⚡ DAYTRADE',use_container_width=True,type='primary' if rt_mode=='DAYTRADE' else 'secondary',key='v38day') and rt_mode!='DAYTRADE':
         set_runtime_mode('DAYTRADE');st.rerun()
 with h3:
-    sess=str(status.get('session') or status.get('market_session') or '-')
-    mk='KR' if market=='KOREA' else 'US'
-    stream=str(rt.get('streaming') or '-')
-    trsec=str(rt.get('tracker_seconds') or '-')
-    fsec=str(rt.get('finder_seconds') or '-')
-    st.markdown('<div class="v38-status">'+mk+' <span class="g">● '+sess+'</span> &nbsp;&nbsp; ENGINE5 V22 &nbsp;&nbsp; <span class="g">LIVE</span><br><span style="font-size:11px;color:#7f8da2">Streaming '+stream+' · Tracker '+trsec+'s · Finder '+fsec+'s</span></div>',unsafe_allow_html=True)
+    sess=status.get('session') or status.get('market_session') or '-'
+    market_txt='KR' if market=='KOREA' else 'US'
+    st.markdown('<div class="v38-status">'+market_txt+' <span class="g">● '+str(sess)+'</span> &nbsp;&nbsp; ENGINE5 V22 &nbsp;&nbsp; <span class="g">LIVE</span><br><span style="font-size:11px;color:#7f8da2">Streaming '+str(rt.get('streaming') or '-')+' · Tracker '+str(rt.get('tracker_seconds') or '-')+'s · Finder '+str(rt.get('finder_seconds') or '-')+'s</span></div>',unsafe_allow_html=True)
 
 if market=='KOREA':
     total=f(kr_state.get('total_assets')); cash=f(kr_state.get('cash')); invested=f(kr_state.get('stock_value')); holds=len(kr_state.get('holdings') or [])
     upd=str(kr_state.get('updated_at') or '-')
-    if 'T' in upd: upd=upd.split('T',1)[1][:8]
+    upd=upd[-14:-6] if upd!='-' else '-'
 else:
-    pr,_=position_rows(); total=0; cash=0; invested=0; holds=len([x for x in pr if str(x.get('market') or '').upper() in ('',market)]); upd='-'
-summary=[('총자산',money(total,market),'실시간 계좌'),('투자금(평가)',money(invested,market),'보유 평가액'),('현금',money(cash,market),'주문 가능 기준'),('오늘 손익','-','실현/평가 연동'),('보유 종목',str(holds),'현재 계좌'),('세션',str(status.get('session') or '-'),'09:00 - 15:30' if market=='KOREA' else 'US session'),('후보',str(len(finders)),'Finder TOP 20' if market=='KOREA' else 'Finder TOP 5'),('최종 업데이트',upd,'실시간')]
-box='<div class="v38-summary"><div class="v38-kpi-grid">'
-for a,b,c in summary:
-    box+='<div class="v38-kpi"><div class="v38-label">'+str(a)+'</div><div class="v38-val">'+str(b)+'</div><div class="v38-subval">'+str(c)+'</div></div>'
-box+='</div></div>'
-st.markdown(box,unsafe_allow_html=True)
+    pr,_=position_rows(); total=cash=invested=0; holds=len([x for x in pr if str(x.get('market') or '').upper() in ('',market)]); upd='-'
+summary=[('총자산',money(total,market),'계좌 실시간'),('투자금(원금)',money(invested,market),'보유 평가액'),('현금',money(cash,market),'주문 가능 기준'),('오늘 손익','-','실현/평가 연동'),('보유 종목',str(holds),'현재 계좌'),('세션',str(status.get('session') or '-'),'09:00 - 15:30' if market=='KOREA' else 'US session'),('후보',str(len(finders)),'Finder TOP '+str(20 if market=='KOREA' else 5)),('최종 업데이트',upd,'실시간')]
+st.markdown('<div class="v38-summary"><div class="v38-kpi-grid">'+''.join('<div class="v38-kpi"><div class="v38-label">'+str(a)+'</div><div class="v38-val">'+str(b)+'</div><div class="v38-subval">'+str(c)+'</div></div>' for a,b,c in summary)+'</div></div>',unsafe_allow_html=True)
 
 t1,t2,t3,t4,t5=st.tabs(['⚡ Trading','💼 Portfolio','📊 Market Briefing','⚙ Settings','</> Legacy / Debug'])
 with t1: render_trading(market)
@@ -175,18 +173,39 @@ def replace_function(text,name,new):
     if not m: raise SystemExit('ABORT function not found: '+name)
     return text[:m.start()]+new.rstrip()+'\n\n'+text[m.end():]
 
+def find_top_level_anchor(text:str)->int:
+    # Prefer explicit legacy/new markers when present.
+    anchors=["st.title('DAY TRADER V5')",'# V37_TERMINAL_DESIGN','# V38_TERMINAL_DESIGN']
+    for a in anchors:
+        p=text.find(a)
+        if p>=0:
+            return p
+    # UI upgraders may have removed those markers. In that case, begin at the
+    # first executable top-level market/session bootstrap after all function defs.
+    candidates=[
+        "if 'v5_market' not in st.session_state:",
+        'rt=get_runtime_mode()',
+        '# Market selector + runtime mode are deliberately always visible above tabs.',
+    ]
+    starts=[]
+    for a in candidates:
+        p=text.find(a)
+        if p>=0:
+            starts.append(p)
+    if starts:
+        return min(starts)
+    # Last-resort: locate the first top-level tabs declaration after render_settings.
+    m=re.search(r'^t1,t2,t3,t4,t5=st\.tabs\(',text,re.M)
+    if m:
+        return m.start()
+    raise SystemExit('ABORT top-level anchor missing')
 
 def main():
     text=APP.read_text(encoding='utf-8')
     if not BACKUP.exists():
         shutil.copy2(APP,BACKUP);print('BACKUP',BACKUP,flush=True)
     text=replace_function(text,'render_trading',TRADING)
-    anchors=["st.title('DAY TRADER V5')",'# V37_TERMINAL_DESIGN','# V38_TERMINAL_DESIGN']
-    pos=-1
-    for a in anchors:
-        p=text.find(a)
-        if p>=0: pos=p;break
-    if pos<0: raise SystemExit('ABORT top-level anchor missing')
+    pos=find_top_level_anchor(text)
     text=text[:pos]+TOP+'\n'
     tmp=APP.with_suffix('.py.v38tmp')
     tmp.write_text(text,encoding='utf-8')

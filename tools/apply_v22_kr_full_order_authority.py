@@ -3,11 +3,12 @@ from __future__ import annotations
 """Deploy full KR Engine5 V22 BUY+SELL authority to Kiwoom MOCK runtime.
 
 Removes Williams STRUCT0 exit and legacy -1.5% emergency sell from the KR broker
-order path.  Engine5 V22 alone decides broker exits.  Williams remains telemetry.
+order path. Engine5 V22 alone decides broker exits. Williams remains telemetry.
+Runtime files may be root-owned, so installs/writes use sudo-safe temp files.
 """
 
 from pathlib import Path
-import py_compile, shutil, subprocess, time, urllib.request
+import py_compile, shutil, subprocess, tempfile, time, urllib.request
 
 REPO=Path('/home/ubuntu/day-trader-api-repo')
 RUNTIME=Path('/home/ubuntu/day-trader-api')
@@ -23,21 +24,35 @@ def run(*a):
     print('+',' '.join(map(str,a)),flush=True); subprocess.run(list(map(str,a)),check=True)
 
 
+def sudo_install(src: Path, dst: Path):
+    run('sudo','install','-m','0644',str(src),str(dst))
+
+
+def sudo_write_text(dst: Path, text: str):
+    with tempfile.NamedTemporaryFile('w',delete=False) as f:
+        f.write(text); tmp=Path(f.name)
+    try:
+        run('sudo','install','-m','0644',str(tmp),str(dst))
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def main():
-    # Always install the matching V22 live evaluator first.
     src=REPO/'live_server/engine5_v22_live_kr.py'; dst=RUNTIME/'live_server/engine5_v22_live_kr.py'
-    shutil.copy2(src,dst); py_compile.compile(str(dst),doraise=True); print('INSTALLED live_server/engine5_v22_live_kr.py',flush=True)
+    py_compile.compile(str(src),doraise=True)
+    sudo_install(src,dst)
+    print('INSTALLED live_server/engine5_v22_live_kr.py',flush=True)
 
     text=TARGET.read_text()
     backup=TARGET.with_suffix('.py.pre_v22_full_order_authority')
-    if not backup.exists(): shutil.copy2(TARGET,backup); print('BACKUP',backup,flush=True)
+    if not backup.exists():
+        run('sudo','cp','-p',str(TARGET),str(backup)); print('BACKUP',backup,flush=True)
     if 'V22_KR_FULL_ORDER_AUTHORITY' not in text:
         if text.count(OLD_EXIT)!=1: raise SystemExit(f'ABORT exit anchor count={text.count(OLD_EXIT)}')
         text=text.replace(OLD_EXIT,NEW_EXIT,1)
         print('V22_EXIT_AUTHORITY=PATCHED',flush=True)
     else: print('V22_EXIT_AUTHORITY=ALREADY_PATCHED',flush=True)
 
-    # Persist original quantity and runner state on every new V22 position.
     marker='                    "tp1_done":False,\n'
     replacement='                    "tp1_done":False,\n                    "original_qty":qty,\n                    "v22_tp1_done":False,\n                    "v22_outer_reduced":False,\n'
     if '"original_qty":qty' not in text:
@@ -45,10 +60,16 @@ def main():
         text=text.replace(marker,replacement,1)
         print('V22_RUNNER_STATE=PATCHED',flush=True)
 
-    TARGET.write_text(text); py_compile.compile(str(TARGET),doraise=True)
+    with tempfile.NamedTemporaryFile('w',suffix='.py',delete=False) as f:
+        f.write(text); tmp=Path(f.name)
+    try:
+        py_compile.compile(str(tmp),doraise=True)
+    finally:
+        tmp.unlink(missing_ok=True)
+    sudo_write_text(TARGET,text)
+
     verify=TARGET.read_text()
     banned=['hard_stop=bool(entry_price and price and price<=entry_price*0.985)','if not exit_ready:','WILLIAMS_MOCK_SELL_ACCEPTED']
-    # banned strings may exist elsewhere in historical/paper code; enforce absence only inside broker method slice.
     a=verify.index('    def _williams_mock_auto_step(self, row):'); b=verify.index('    def _finalize(self,market,rows):',a); block=verify[a:b]
     for x in banned:
         if x in block: raise SystemExit('ABORT legacy KR broker SELL authority remains: '+x)

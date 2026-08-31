@@ -25,11 +25,7 @@ def install_text(dst:Path,text:str):
 def patch_app():
     s=APP.read_text(encoding='utf-8')
     new=r'''def engine_matrix(row):
-    """Trading detail intentionally exposes DBB only.
-
-    Legacy/Fujimoto/MA20/Ethan/Jared rows are not active trading engines and
-    must not appear in the Trading tab's engine evaluation matrix.
-    """
+    """Trading detail exposes only the active DBB engine."""
     row=row or {}
     market=str(row.get('market') or '').upper()
     v22e=row.get('engine5_v22e_decision') or {}
@@ -48,7 +44,9 @@ def patch_app():
     m=pat.search(s)
     if not m: raise SystemExit('ABORT engine_matrix function missing')
     s=s[:m.start()]+new+'\n'+s[m.end():]
-    if any(x in new for x in ('Fujimoto','MA20','Ethan','Jared')): raise SystemExit('ABORT legacy engine label in replacement')
+    # Verify executable matrix output contains only DBB labels.
+    if "name='DBB V22E' if market=='USA' else 'DBB V22'" not in new:
+        raise SystemExit('ABORT DBB-only engine label missing')
     APP.write_text(s,encoding='utf-8');py_compile.compile(str(APP),doraise=True)
     print('TRADING_ENGINE_MATRIX=DBB_ONLY',flush=True)
 

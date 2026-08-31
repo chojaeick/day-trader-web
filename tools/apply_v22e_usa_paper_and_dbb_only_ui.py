@@ -44,7 +44,6 @@ def patch_app():
     m=pat.search(s)
     if not m: raise SystemExit('ABORT engine_matrix function missing')
     s=s[:m.start()]+new+'\n'+s[m.end():]
-    # Verify executable matrix output contains only DBB labels.
     if "name='DBB V22E' if market=='USA' else 'DBB V22'" not in new:
         raise SystemExit('ABORT DBB-only engine label missing')
     APP.write_text(s,encoding='utf-8');py_compile.compile(str(APP),doraise=True)
@@ -68,7 +67,6 @@ def _get_v22e_usa_executor():
     return _v22e_usa_executor
 
 async def v22e_usa_paper_forever():
-    """USA internal mock execution. DBB V22E is the only order authority here."""
     global _v22e_usa_last
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo as _ZI
@@ -116,10 +114,17 @@ def v22e_usa_trades(limit:int=100):
         needle='asyncio.create_task(v4_engine_forever())'
         p=s.find(needle)
         if p<0: raise SystemExit('ABORT v4_engine task anchor missing')
-        s=s[:p]+task+',\n                      '+s[p:]
+        # IMPORTANT: keep existing list syntax valid; insert a complete list element line.
+        line_start=s.rfind('\n',0,p)+1
+        indent=re.match(r'[ \t]*',s[line_start:p]).group(0)
+        s=s[:line_start]+indent+task+',\n'+s[line_start:]
     if s.count(task)!=1: raise SystemExit('ABORT V22E task schedule count='+str(s.count(task)))
     install_text(API,s)
     print('V22E_USA_API_RUNTIME=PATCHED',flush=True)
+
+def service_diag():
+    subprocess.run(['sudo','systemctl','status',SERVICE,'--no-pager','-l'],check=False)
+    subprocess.run(['sudo','journalctl','-u',SERVICE,'-n','80','--no-pager'],check=False)
 
 def main():
     if not APP.exists() or not API.exists() or not MOD_SRC.exists(): raise SystemExit('ABORT required file missing')
@@ -135,7 +140,8 @@ def main():
                 if r.status==200:print('API_HEALTH=PASS',flush=True);break
         except Exception as e:last=e
         time.sleep(2)
-    else:raise SystemExit('ABORT API health '+str(last))
+    else:
+        print('API_HEALTH=FAIL',flush=True);service_diag();raise SystemExit('ABORT API health '+str(last))
     subprocess.run(['pkill','-f','streamlit run app_v5.py'],check=False);time.sleep(1)
     cmd=f'cd {APP.parent} && DAYTRADER_API_URL=http://127.0.0.1:8000 nohup {RUNTIME}/venv/bin/python -m streamlit run app_v5.py --server.address=0.0.0.0 --server.port={PORT} --server.headless=true > {LOG} 2>&1 &'
     subprocess.Popen(['bash','-lc',cmd],start_new_session=True)

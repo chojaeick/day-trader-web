@@ -88,9 +88,16 @@ TRADING=r'''def render_trading(market):
             decision=action_ko(action_of(selected))
             change=selected.get('change_pct')
             power=selected.get('power')
-            st.markdown(f'''<div class="v37-detail-main"><div style="display:grid;grid-template-columns:1.4fr 1fr .8fr .8fr;gap:16px;align-items:center"><div><div class="v37-big">{name}</div><div class="v37-code">{sym}</div><span class="v37-pill">관찰</span></div><div><div class="v37-big">{px}</div><div class="v37-subval">등락 <span class="{'pos' if f(change)>=0 else 'neg'}">{('-' if change is None else f'{f(change):+.2f}%')}</span></div></div><div style="text-align:center"><div class="v37-label">{'V22' if v22 else 'Finder'}</div><div class="v37-big pos">{('-' if score is None else f'{f(score):.1f}')}</div></div><div class="v37-watch"><span class="v37-label">엔진 판단</span><br><b>{decision}</b></div></div>''',unsafe_allow_html=True)
-            c=selected.get('components') or {}
-            st.markdown(f'''<div class="v37-grid"><div><span>현재가</span><b>{px}</b></div><div><span>Power</span><b>{('-' if power is None else f'{f(power):+.1f}')}</b></div><div><span>Finder</span><b>{('-' if selected.get('finder_score') is None else f'{f(selected.get('finder_score')):.1f}')}</b></div><div><span>거래대금</span><b>{('-' if not selected.get('dollar_volume') else f'{f(selected.get('dollar_volume'))/100000000:,.0f}억')}</b></div><div><span>위험</span><b>{selected.get('risk') or '-'}</b></div></div>''',unsafe_allow_html=True)
+            change_cls='pos' if f(change)>=0 else 'neg'
+            change_txt='-' if change is None else f'{f(change):+.2f}%'
+            score_label='V22' if v22 else 'Finder'
+            score_txt='-' if score is None else f'{f(score):.1f}'
+            power_txt='-' if power is None else f'{f(power):+.1f}'
+            finder_txt='-' if selected.get('finder_score') is None else f'{f(selected.get("finder_score")):.1f}'
+            dv=selected.get('dollar_volume')
+            dv_txt='-' if not dv else f'{f(dv)/100000000:,.0f}억'
+            st.markdown(f'<div class="v37-detail-main"><div style="display:grid;grid-template-columns:1.4fr 1fr .8fr .8fr;gap:16px;align-items:center"><div><div class="v37-big">{name}</div><div class="v37-code">{sym}</div><span class="v37-pill">관찰</span></div><div><div class="v37-big">{px}</div><div class="v37-subval">등락 <span class="{change_cls}">{change_txt}</span></div></div><div style="text-align:center"><div class="v37-label">{score_label}</div><div class="v37-big pos">{score_txt}</div></div><div class="v37-watch"><span class="v37-label">엔진 판단</span><br><b>{decision}</b></div></div>',unsafe_allow_html=True)
+            st.markdown(f'<div class="v37-grid"><div><span>현재가</span><b>{px}</b></div><div><span>Power</span><b>{power_txt}</b></div><div><span>Finder</span><b>{finder_txt}</b></div><div><span>거래대금</span><b>{dv_txt}</b></div><div><span>위험</span><b>{selected.get("risk") or "-"}</b></div></div>',unsafe_allow_html=True)
             a,b=st.columns([.9,1.1])
             with a:
                 comps=selected.get('finder_components') or {}

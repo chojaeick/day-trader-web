@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import py_compile
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -16,9 +15,10 @@ API = RUNTIME / 'live_server' / 'api.py'
 BACKUP = RUNTIME / 'live_server' / 'api.py.pre_v43_unified_cadence'
 SERVICE = 'day-trader-api'
 PYTHON = RUNTIME / 'venv' / 'bin' / 'python'
+ENV_FILE = RUNTIME / '.env'
 
 
-def run(*args, check=True, capture=False, env=None):
+def run(*args, check=True, capture=False, env=None, cwd=None):
     print('+', ' '.join(map(str, args)), flush=True)
     return subprocess.run(
         list(map(str, args)),
@@ -26,6 +26,7 @@ def run(*args, check=True, capture=False, env=None):
         text=True,
         capture_output=capture,
         env=env,
+        cwd=str(cwd) if cwd else None,
     )
 
 
@@ -46,6 +47,8 @@ def wait_http(url: str, seconds: int = 60):
 def main():
     if not API.exists():
         raise SystemExit('ABORT runtime api.py missing')
+    if not ENV_FILE.exists():
+        raise SystemExit('ABORT runtime .env missing')
 
     s = API.read_text(encoding='utf-8')
     original = s
@@ -124,19 +127,35 @@ def main():
             run('sudo', 'cp', '-a', API, BACKUP)
         run('sudo', 'install', '-m', '0644', tmp, API)
 
-        # Import-test the actual installed runtime BEFORE restarting systemd.
-        env = os.environ.copy()
-        env['PYTHONPATH'] = str(RUNTIME)
+        # Import-test the ACTUAL runtime tree before restarting systemd.
+        # sudo commonly strips PYTHONPATH, so force both cwd and sys.path inside Python.
+        code = (
+            "import os,sys; "
+            f"os.chdir({str(RUNTIME)!r}); sys.path.insert(0,{str(RUNTIME)!r}); "
+            f"from dotenv import load_dotenv; load_dotenv({str(ENV_FILE)!r}, override=False); "
+            "import live_server.api as a; p=a._runtime_profile(); "
+            "print('IMPORT_FILE',a.__file__); print('IMPORT_PROFILE',p)"
+        )
         p = run(
             'sudo', '-u', 'ubuntu', '-H',
-            PYTHON, '-c',
-            "import live_server.api; p=live_server.api._runtime_profile(); print('IMPORT_PROFILE',p)",
+            PYTHON, '-c', code,
             capture=True,
-            env=env,
+            check=False,
+            cwd=RUNTIME,
         )
-        print(p.stdout.strip(), flush=True)
+        if p.stdout.strip():
+            print(p.stdout.strip(), flush=True)
+        if p.returncode != 0:
+            if p.stderr.strip():
+                print('IMPORT_STDERR_BEGIN', flush=True)
+                print(p.stderr.strip(), flush=True)
+                print('IMPORT_STDERR_END', flush=True)
+            raise RuntimeError(f'runtime import verification failed rc={p.returncode}')
+        if str(API) not in p.stdout:
+            raise RuntimeError('import verification loaded wrong api.py: ' + p.stdout.strip())
         if 'IMPORT_PROFILE' not in p.stdout:
             raise RuntimeError('runtime import profile marker missing')
+        print('RUNTIME_IMPORT=PASS', flush=True)
 
     except Exception:
         if BACKUP.exists():

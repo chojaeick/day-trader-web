@@ -1,11 +1,21 @@
+import os
 import requests
 import pandas as pd
 import streamlit as st
 
 
+def _api_base(api_url: str) -> str:
+    base = str(api_url or '').strip().rstrip('/')
+    if not base:
+        base = str(os.getenv('DAYTRADER_API_URL') or '').strip().rstrip('/')
+    if not base:
+        base = 'http://127.0.0.1:8000'
+    return base
+
+
 def _get(api_url: str, path: str, timeout: int = 20):
     try:
-        r = requests.get(str(api_url).rstrip('/') + path, timeout=timeout)
+        r = requests.get(_api_base(api_url) + path, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -19,16 +29,29 @@ def _money(v):
         return '-'
 
 
+def _top_market_switch():
+    st.markdown('## ⚡ DAY TRADER V5')
+    c1, c2, c3 = st.columns([1.0, 1.0, 4.0])
+    c1.button('🇰🇷 KR 국장', use_container_width=True, type='primary', key='kr_iso_kr')
+    if c2.button('🇺🇸 US 미장', use_container_width=True, key='kr_iso_us'):
+        st.session_state['v5_market'] = 'USA'
+        st.rerun()
+    c3.caption('KR UI ISOLATED · US runtime/engine/order state untouched')
+
+
 def render_kr_app(api_url: str):
     """KOREA-only UI entrypoint.
 
     This module must never import or mutate USA runtime/engine state.
-    It reads only KOREA endpoints and is intentionally safe while the KR
-    execution bridge remains signal-only/order_placement=False.
+    It reads only KOREA endpoints. Switching back to USA changes only the UI
+    market selection and returns to the existing USA rendering path.
     """
+    _top_market_switch()
     st.markdown('### 🇰🇷 국장 단타')
-    gate = _get(api_url, '/api/v5/market-gate/KOREA', 15)
-    entry = _get(api_url, '/api/v5/daytrade-entry/KOREA?limit=20&eval_limit=10', 60)
+
+    base = _api_base(api_url)
+    gate = _get(base, '/api/v5/market-gate/KOREA', 15)
+    entry = _get(base, '/api/v5/daytrade-entry/KOREA?limit=20&eval_limit=10', 60)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric('세션', 'OPEN' if gate.get('regular_open') else 'CLOSED')
@@ -42,6 +65,9 @@ def render_kr_app(api_url: str):
         st.warning(f"국장 정규장인데 실시간 pulse가 LIVE가 아닙니다: {gate.get('pulse_status')}")
     elif not gate.get('regular_open'):
         st.info('현재 장 시작 전/장 종료 상태입니다. 주문은 비활성 상태입니다.')
+
+    if not entry.get('ok'):
+        st.error(f"KR Entry 오류: {entry.get('error') or entry}")
 
     rows = entry.get('rows') or []
     table = []
@@ -94,4 +120,4 @@ def render_kr_app(api_url: str):
                 'session': r.get('session'),
             })
 
-    st.caption('KR UI ISOLATED · 이 화면은 USA 엔진/상태/자동매매 스위치를 읽거나 변경하지 않습니다.')
+    st.caption(f'KR API {base} · USA 엔진/상태/자동매매 스위치는 읽거나 변경하지 않습니다.')

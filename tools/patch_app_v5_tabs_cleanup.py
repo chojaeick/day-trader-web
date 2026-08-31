@@ -4,53 +4,33 @@ import re
 p = Path('/home/ubuntu/day-trader-api/app_v5.py')
 s = p.read_text()
 
-# Collapse the temporary 5-tab shell to the two active pages we are keeping
-# during the KR/US modularization phase.  Trading keeps the KR/US module
-# dispatch already installed; Portfolio stays as the personal-holdings page
-# until the dedicated replacement is finished.
-pat = re.compile(
-    r"t1\s*,\s*t2\s*,\s*t3\s*,\s*t4\s*,\s*t5\s*=\s*st\.tabs\(\[[^\n]+\]\)\s*\n"
-    r"with\s+t1:\s*(?P<t1>.*?)\n"
-    r"with\s+t2:\s*(?P<t2>.*?)\n"
-    r"with\s+t3:.*?\n"
-    r"with\s+t4:.*?\n"
-    r"with\s+t5:.*?(?=\n\Z|\n[^ \t])",
-    re.S,
-)
+# Replace only the tab declaration, then remove t3/t4/t5 blocks while preserving
+# the existing indentation of the t1/t2 bodies. This avoids collapsing
+# "with t1:" and its first statement onto one line.
+old_decl = "t1,t2,t3,t4,t5=st.tabs(['⚡ Trading','💼 Portfolio','📰 Market Briefing','⚙️ Settings','🧪 Legacy / Debug'])"
+new_decl = "t1,t2=st.tabs(['⚡ Trading','💼 Portfolio'])"
 
-m = pat.search(s)
-if m:
-    t1 = m.group('t1').rstrip()
-    t2 = m.group('t2').rstrip()
-    repl = "t1,t2=st.tabs(['⚡ Trading','💼 Portfolio'])\nwith t1:" + t1 + "\nwith t2:" + t2
-    s = s[:m.start()] + repl + s[m.end():]
-elif "st.tabs(['⚡ Trading','💼 Portfolio'])" in s or 'st.tabs([\"⚡ Trading\",\"💼 Portfolio\"])' in s:
-    print('V5_TABS_ALREADY_CLEAN')
-    raise SystemExit(0)
+if old_decl in s:
+    s = s.replace(old_decl, new_decl, 1)
+elif new_decl not in s:
+    raise SystemExit('V5_TAB_DECL_NOT_FOUND')
+
+# Repair the exact syntax damage made by the previous patch if present.
+s = s.replace("with t1:if market == 'KOREA':", "with t1:\n    if market == 'KOREA':")
+s = s.replace("with t2:render_portfolio(market)", "with t2:\n    render_portfolio(market)")
+
+# Drop obsolete tab bodies starting at with t3:, keeping only t1/t2 tail.
+lines = s.splitlines()
+cut = None
+for i, line in enumerate(lines):
+    if re.match(r'^\s*with\s+t3\s*:', line):
+        cut = i
+        break
+if cut is not None:
+    lines = lines[:cut]
+    s = '\n'.join(lines).rstrip() + '\n'
 else:
-    # Safer exact-tail fallback for the production form seen in v22.
-    marker = "t1,t2,t3,t4,t5=st.tabs(['⚡ Trading','💼 Portfolio','📰 Market Briefing','⚙️ Settings','🧪 Legacy / Debug'])"
-    i = s.find(marker)
-    if i < 0:
-        raise SystemExit('V5_TAB_BLOCK_NOT_FOUND')
-    head = s[:i]
-    tail = s[i:]
-    lines = tail.splitlines()
-    # locate start of each with-block
-    idx = {}
-    for n,line in enumerate(lines):
-        z=line.strip()
-        if z.startswith('with t1:'): idx['t1']=n
-        elif z.startswith('with t2:'): idx['t2']=n
-        elif z.startswith('with t3:'): idx['t3']=n
-        elif z.startswith('with t4:'): idx['t4']=n
-        elif z.startswith('with t5:'): idx['t5']=n
-    if not all(k in idx for k in ('t1','t2','t3','t4','t5')):
-        raise SystemExit('V5_TAB_WITH_BLOCKS_NOT_FOUND')
-    t1_lines=lines[idx['t1']:idx['t2']]
-    t2_lines=lines[idx['t2']:idx['t3']]
-    new=["t1,t2=st.tabs(['⚡ Trading','💼 Portfolio'])"] + t1_lines + t2_lines
-    s=head+'\n'.join(new)+'\n'
+    s = '\n'.join(lines).rstrip() + '\n'
 
 p.write_text(s)
-print('V5_TABS_CLEANED')
+print('V5_TABS_CLEANED_SAFE')

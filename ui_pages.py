@@ -7,7 +7,10 @@ def render_portfolio_page(market, *, get_market_status, tracker_rows, render_pos
     st.caption('KR/US 공통 프레임 · 현재 선택한 시장의 보유종목만 표시합니다.')
     status = get_market_status(market) or {}
     tracker = tracker_rows(status) or []
-    render_positions(market, tracker)
+    # IMPORTANT: Streamlit renders every tab in one script pass. Trading already
+    # renders the same positions component with scope='trading', so Portfolio
+    # must use its own widget-key namespace to avoid DuplicateElementKey.
+    render_positions(market, tracker, scope='portfolio')
 
 
 def _trade_event_type(e):
